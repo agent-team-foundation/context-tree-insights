@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+
+# Generated audits contain private Chat and trace-derived evidence.
+/artifacts/
+/.audit/
+/REPORT.md
+/evidence.jsonl
+/candidates.jsonl
+/chats.jsonl
+/judgments.jsonl
