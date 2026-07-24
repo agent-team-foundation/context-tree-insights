@@ -17,6 +17,7 @@ SCRIPT = SKILL_ROOT / "scripts" / "context_tree_insights.py"
 AGENT_ID = "55555555-5555-4555-8555-555555555555"
 OTHER_AGENT_ID = "99999999-9999-4999-8999-999999999999"
 CHAT_ID = "11111111-1111-4111-8111-111111111111"
+SECOND_CHAT_ID = "22222222-2222-4222-8222-222222222222"
 UNAUTHORIZED_CHAT_ID = "88888888-8888-4888-8888-888888888888"
 MESSAGE_ID = "33333333-3333-4333-8333-333333333333"
 NOW = "2026-07-24T00:00:00Z"
@@ -94,6 +95,20 @@ def context_row(chat_id: str) -> dict[str, Any]:
             "type": "message",
             "role": "user",
             "content": [{"type": "input_text", "text": context_block(chat_id)}],
+        },
+    }
+
+
+def context_mirror_row(chat_id: str) -> dict[str, Any]:
+    return {
+        "timestamp": "2026-07-22T10:01:00.001Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": context_block(chat_id),
+            "images": [],
+            "local_images": [],
+            "text_elements": [],
         },
     }
 
@@ -506,6 +521,154 @@ print(json.dumps({{"ok": True, "data": data}}))
             stat.S_IMODE((self.artifacts / "candidates-one.jsonl").stat().st_mode),
         )
 
+    def test_preflight_accepts_same_id_mirror_and_ignores_noncanonical_echoes(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "production-envelope.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                context_mirror_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:01:01Z",
+                    "type": "compacted",
+                    "payload": {
+                        "message": context_block(UNAUTHORIZED_CHAT_ID),
+                        "replacement_history": [],
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:01:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-echo-only",
+                        "output": context_block(UNAUTHORIZED_CHAT_ID),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-production-read",
+                        "arguments": json.dumps(
+                            {
+                                "cmd": f"cat {self.tree_file}",
+                                "workdir": str(self.workspace),
+                            }
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-production-read",
+                        "output": (
+                            "Process exited with code 0\n"
+                            "# Architecture\n\n## Decision\n\n"
+                            "Chat history is the authoritative state."
+                        ),
+                    },
+                },
+            ],
+        )
+
+        result = self.collect("production-envelope-candidates.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "production-envelope-candidates.jsonl"
+        )[0]
+        self.assertEqual(1, len(candidate["mapped_trace_files"]))
+        self.assertEqual(1, len(candidate["reads"]))
+        self.assertNotIn(
+            "codex_trace_preflight_malformed_or_ambiguous",
+            candidate["coverage_gaps"],
+        )
+
+    def test_preflight_rejects_conflicting_mirror_and_mirror_only_trace(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "conflicting-mirror.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                context_mirror_row(UNAUTHORIZED_CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-conflicting-mirror",
+                        "output": "conflicting-mirror-private-sentinel",
+                    },
+                },
+            ],
+        )
+        write_jsonl(
+            self.trace_root / "mirror-only.jsonl",
+            [
+                session_meta(self.workspace),
+                context_mirror_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-mirror-only",
+                        "output": "mirror-only-private-sentinel",
+                    },
+                },
+            ],
+        )
+
+        result = self.collect("rejected-envelope-candidates.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "rejected-envelope-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["mapped_trace_files"])
+        self.assertEqual([], candidate["reads"])
+        self.assertIn(
+            "codex_trace_preflight_malformed_or_ambiguous",
+            candidate["coverage_gaps"],
+        )
+        self.assertIn("codex_trace_preflight_unmapped", candidate["coverage_gaps"])
+        serialized = json.dumps(candidate, sort_keys=True)
+        self.assertNotIn("conflicting-mirror-private-sentinel", serialized)
+        self.assertNotIn("mirror-only-private-sentinel", serialized)
+
+    def test_preflight_rejects_two_canonical_chat_ids(self) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "canonical-chat-drift.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                context_mirror_row(CHAT_ID),
+                context_row(SECOND_CHAT_ID),
+                context_mirror_row(SECOND_CHAT_ID),
+            ],
+        )
+
+        result = self.collect("canonical-chat-drift-candidates.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "canonical-chat-drift-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["mapped_trace_files"])
+        self.assertIn(
+            "codex_trace_preflight_ambiguous_chat",
+            candidate["coverage_gaps"],
+        )
+
     def test_report_is_deterministic_and_rejects_overstated_probable(self) -> None:
         self.write_chat_export()
         self.write_trace_fixtures()
@@ -594,6 +757,43 @@ print(json.dumps({{"ok": True, "data": data}}))
         wrong_tree = report("evidence-wrong-tree.jsonl", "REPORT-wrong-tree.md")
         self.assertEqual(2, wrong_tree.returncode)
         self.assertIn("workspace-bound Tree", wrong_tree.stderr)
+
+    def test_report_handles_outside_candidate_without_representative_case(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        self.write_trace_fixtures()
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
+        candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        candidate["candidate_status"] = "outside_candidate_set"
+        candidate["mapped_trace_files"] = []
+        candidate["reads"] = []
+        candidate["visible_tree_mentions"] = []
+        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
+        write_jsonl(self.artifacts / "judgments.jsonl", [])
+
+        result = run_cli(
+            "report",
+            "--artifact-root",
+            str(self.artifacts),
+            "--agent-workspace",
+            f"{AGENT_ID}={self.workspace}",
+            "--candidates",
+            str(self.artifacts / "candidates.jsonl"),
+            "--judgments",
+            str(self.artifacts / "judgments.jsonl"),
+            "--evidence-output",
+            str(self.artifacts / "outside-evidence.jsonl"),
+            "--report-output",
+            str(self.artifacts / "outside-REPORT.md"),
+            "--generated-at",
+            NOW,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        report = (self.artifacts / "outside-REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("No representative verified case was selected.", report)
+        self.assertIn("| Outside candidate set | 1 |", report)
 
     def test_symlinked_artifact_output_is_rejected(self) -> None:
         self.write_chat_export()
