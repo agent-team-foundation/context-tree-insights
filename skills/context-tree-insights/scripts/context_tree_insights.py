@@ -1011,6 +1011,8 @@ def preflight_trace(
     context_chat_ids: set[str] = set()
     relevant_malformed = False
     malformed_metadata_might_match = False
+    last_canonical_ids: set[str] | None = None
+    last_canonical_line: int | None = None
     bytes_seen = 0
     lines_seen = 0
     workspace_bytes = str(workspace_identity.workspace).encode("utf-8")
@@ -1051,22 +1053,48 @@ def preflight_trace(
                     else:
                         relevant_malformed = True
                     continue
-                if row.get("type") != "response_item":
-                    relevant_malformed = True
-                    continue
                 payload = row.get("payload")
-                if (
-                    not isinstance(payload, dict)
-                    or payload.get("type") != "message"
-                    or payload.get("role") != "user"
-                ):
-                    relevant_malformed = True
+                if not isinstance(payload, dict):
+                    if row.get("type") in {"response_item", "event_msg"}:
+                        relevant_malformed = True
                     continue
-                user_text = payload_text(payload.get("content"))
-                found_ids = set(chat_ids_from_text(user_text))
-                if not found_ids:
-                    relevant_malformed = True
-                context_chat_ids.update(found_ids)
+
+                is_canonical = (
+                    row.get("type") == "response_item"
+                    and payload.get("type") == "message"
+                    and payload.get("role") == "user"
+                )
+                if is_canonical:
+                    user_text = payload_text(payload.get("content"))
+                    if CHAT_CONTEXT_PATTERN.search(user_text) is None:
+                        continue
+                    found_ids = set(chat_ids_from_text(user_text))
+                    if len(found_ids) != 1:
+                        relevant_malformed = True
+                    else:
+                        context_chat_ids.update(found_ids)
+                    last_canonical_ids = found_ids
+                    last_canonical_line = lines_seen
+                    continue
+
+                is_user_message_mirror = (
+                    row.get("type") == "event_msg"
+                    and payload.get("type") == "user_message"
+                )
+                if is_user_message_mirror:
+                    mirror_text = payload_text(payload)
+                    if CHAT_CONTEXT_PATTERN.search(mirror_text) is None:
+                        continue
+                    mirror_ids = set(chat_ids_from_text(mirror_text))
+                    if last_canonical_line == lines_seen - 1 and (
+                        len(mirror_ids) != 1 or mirror_ids != last_canonical_ids
+                    ):
+                        relevant_malformed = True
+                    continue
+
+                # Context blocks echoed by tool output, compaction, or another
+                # non-canonical trace row are neither identity evidence nor a
+                # reason to reject an otherwise valid bounded header.
     except OSError:
         return None, gaps
 
@@ -1650,7 +1678,12 @@ def representative_cases(evidence: Sequence[Mapping[str, Any]]) -> list[Mapping[
     ]
     if selected:
         return selected
-    verified = [row for row in evidence if row.get("judgment", {}).get("result") == "verified"]
+    verified = [
+        row
+        for row in evidence
+        if isinstance(row.get("judgment"), dict)
+        and row["judgment"].get("result") == "verified"
+    ]
     return verified[:5]
 
 

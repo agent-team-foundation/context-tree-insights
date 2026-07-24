@@ -81,8 +81,13 @@ Pass when:
 
 Prepare sanitized local trace fixtures for the same workspace:
 
-- one trace whose bounded header/current-context identifies exactly one
-  authorized Chat;
+- one production-shaped trace whose bounded header contains a canonical
+  `response_item/message/user` current-context row followed by an
+  `event_msg/user_message` mirror with the same authorized Chat id;
+- one trace whose adjacent mirror contains a different Chat id;
+- one trace that contains only a mirror and no canonical current-context row;
+- one trace whose tool output and compaction rows echo a current-context block
+  after the canonical identity row;
 - one trace whose bounded preflight identifies an unauthorized Chat and whose
   later content contains a unique sentinel plus malformed JSON;
 - one trace with no `chatId`;
@@ -92,7 +97,13 @@ Run `collect` for only the authorized Chat.
 
 Pass when:
 
-- only the first trace is mapped and scanned for candidate evidence;
+- only canonical user-message rows establish identity;
+- a same-id adjacent mirror is accepted, a conflicting adjacent mirror fails
+  closed, and a mirror-only trace remains unmapped;
+- tool-output and compaction echoes neither authorize a trace nor invalidate a
+  valid canonical mapping;
+- only the authorized canonical trace is mapped and scanned for candidate
+  evidence;
 - the unauthorized trace's sentinel and later malformed content never appear
   in output or content-derived diagnostics;
 - missing and ambiguous mappings remain coverage gaps;

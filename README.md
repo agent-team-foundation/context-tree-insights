@@ -17,7 +17,9 @@ workspace, and one bound Tree at a time.
   exact Chat UUIDs for that Agent, or the invoking current Chat resolved to its
   runtime `chatId`.
 - Local Codex traces are preflighted against exact authorized `chatId` values
-  before full content is scanned.
+  before full content is scanned. Only canonical Codex user-message rows can
+  establish identity; the adjacent event mirror must agree, while tool-output
+  and compaction echoes cannot authorize or invalidate a trace.
 - Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
   reported as coverage gaps.
 - Evidence uses opaque Tree and trace identities rather than leaking local
