@@ -75,6 +75,11 @@ MIXED_OR_MUTATING_TOOLS = {
 }
 _ARTIFACT_LEXICAL_ROOTS: dict[Path, Path] = {}
 UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+# Current Agent names are 1-64 lowercase ASCII slug characters. First Tree
+# still runs older, grandfathered 1-100 character names, so an audit must not
+# reject an already-bound runtime merely because it predates the tighter
+# create-time limit.
+AGENT_SLUG_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
 CHAT_CONTEXT_PATTERN = re.compile(
     r"<first-tree-current-chat-context[\s\S]*?</first-tree-current-chat-context>",
     re.UNICODE,
@@ -123,6 +128,7 @@ class Scope:
 @dataclass(frozen=True)
 class WorkspaceIdentity:
     agent_name: str
+    agent_display_name: str
     agent_id: str
     workspace_lexical: Path
     workspace: Path
@@ -170,6 +176,16 @@ def in_window(value: str | None, window: Window) -> bool:
     except AuditError:
         return False
     return timestamp <= window.end and (window.start is None or timestamp >= window.start)
+
+
+def strictly_before_window(value: Any, window: Window) -> bool:
+    if not isinstance(value, str) or not value or window.start is None:
+        return False
+    try:
+        timestamp = parse_datetime(value)
+    except AuditError:
+        return False
+    return timestamp < window.start
 
 
 def window_start_text(window: Window) -> str | None:
@@ -495,6 +511,38 @@ def resolve_first_tree_binary(cli_value: str | None) -> str:
     )
 
 
+def verify_cli_agent_identity(binary: str, agent_slug: str, agent_id: str) -> None:
+    """Cross-check the runtime slug through the CLI's local binding resolver."""
+    command = [binary, "agent", "list"]
+    environment = os.environ.copy()
+    environment.pop("FIRST_TREE_JSON", None)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        check=False,
+        text=True,
+        env=environment,
+    )
+    if completed.returncode != 0:
+        raise AuditError(
+            "The invoking Agent slug could not be resolved from local First Tree bindings "
+            f"(exit {completed.returncode}; output withheld)."
+        )
+    resolved_ids = re.findall(
+        rf"^[ \t]*{re.escape(agent_slug)}[ \t]+runtime:[ \t]+"
+        rf"[^ \t\r\n]+[ \t]+uuid:[ \t]+({UUID_PATTERN})[ \t]*$",
+        f"{completed.stdout}\n{completed.stderr}",
+        re.MULTILINE,
+    )
+    if len(resolved_ids) != 1 or require_uuid(
+        resolved_ids[0], "First Tree CLI Agent UUID"
+    ) != agent_id:
+        raise AuditError(
+            "The invoking Agent's local CLI binding does not resolve to the "
+            "authorized workspace UUID."
+        )
+
+
 def parse_agent_workspace(value: str) -> WorkspaceIdentity:
     agent_id_text, separator, workspace_text = value.partition("=")
     agent_id = require_uuid(agent_id_text, "--agent-workspace Agent UUID")
@@ -531,10 +579,27 @@ def parse_agent_workspace(value: str) -> WorkspaceIdentity:
         or identity.get("type") != "agent"
     ):
         raise AuditError(f"Managed workspace identity does not match Agent {agent_id}.")
-    agent_name = identity.get("displayName")
-    if not isinstance(agent_name, str) or not agent_name.strip():
+    agent_display_name = identity.get("displayName")
+    if not isinstance(agent_display_name, str) or not agent_display_name.strip():
         raise AuditError("Managed workspace identity does not declare an Agent display name.")
-
+    runtime_agent_id_text = os.environ.get("FIRST_TREE_AGENT_ID")
+    runtime_agent_slug = os.environ.get("FIRST_TREE_AGENT_SLUG")
+    if not runtime_agent_id_text:
+        raise AuditError(
+            "FIRST_TREE_AGENT_ID is required to bind the audit to the invoking runtime Agent."
+        )
+    runtime_agent_id = require_uuid(runtime_agent_id_text, "FIRST_TREE_AGENT_ID")
+    if runtime_agent_id != agent_id:
+        raise AuditError(
+            "FIRST_TREE_AGENT_ID does not match the authorized workspace Agent UUID."
+        )
+    if (
+        not isinstance(runtime_agent_slug, str)
+        or AGENT_SLUG_PATTERN.fullmatch(runtime_agent_slug) is None
+    ):
+        raise AuditError(
+            "FIRST_TREE_AGENT_SLUG must contain the invoking Agent's lowercase CLI selector."
+        )
     tree_value = identity.get("contextTreePath")
     if not isinstance(tree_value, str) or not tree_value.strip():
         raise AuditError("Managed workspace identity does not declare a bound Context Tree.")
@@ -548,7 +613,8 @@ def parse_agent_workspace(value: str) -> WorkspaceIdentity:
     if not bound_tree.is_dir():
         raise AuditError("Bound Context Tree is not a directory.")
     return WorkspaceIdentity(
-        agent_name=agent_name.strip(),
+        agent_name=runtime_agent_slug,
+        agent_display_name=agent_display_name.strip(),
         agent_id=agent_id,
         workspace_lexical=workspace_lexical,
         workspace=workspace,
@@ -783,6 +849,11 @@ def export_chats(args: argparse.Namespace) -> None:
             "--agent-workspace identity must match the one exact Agent name and UUID in --scope."
         )
     first_tree_binary = resolve_first_tree_binary(args.first_tree_bin)
+    verify_cli_agent_identity(
+        first_tree_binary,
+        workspace_identity.agent_name,
+        workspace_identity.agent_id,
+    )
     window = resolve_window(args.days, args.now)
     chat_sources: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -792,7 +863,7 @@ def export_chats(args: argparse.Namespace) -> None:
             if not isinstance(chat_id, str) or re.fullmatch(UUID_PATTERN, chat_id) is None:
                 continue
             last_message_at = chat.get("lastMessageAt")
-            if isinstance(last_message_at, str) and not in_window(last_message_at, window):
+            if strictly_before_window(last_message_at, window):
                 continue
             key = (chat_id, scoped_agent.agent_id)
             chat_sources.setdefault(

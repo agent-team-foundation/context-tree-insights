@@ -1,6 +1,6 @@
 # Context Tree Insights
 
-`context-tree-insights` 0.2.0 is an explicit-only Codex Skill for task-first,
+`context-tree-insights` 0.2.1 is an explicit-only Codex Skill for task-first,
 evidence-first analysis of Context Tree decision value. It reconstructs Tasks
 from authorized Chats, separates confirmed from unresolved exposure, judges
 four visible effect types, and stops sampling through a Task quota plus

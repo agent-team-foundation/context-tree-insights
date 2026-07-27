@@ -24,6 +24,20 @@ These values record consent, not inferred ownership. A run uses one mode only.
 The Chat-Agent pair remains the authorization, source, and trace-mapping unit;
 it is not the value-counting unit.
 
+The Agent name in scope and evidence is the immutable lowercase slug from the
+invoking runtime's `FIRST_TREE_AGENT_SLUG`. The runtime's
+`FIRST_TREE_AGENT_ID` must equal the UUID in the managed workspace identity.
+The First Tree CLI must resolve that slug to the same UUID through its
+producer-owned local binding loader—the same mapping used by later
+`chat --agent` commands. The local Agent listing exists only in memory for this
+identity preflight; it is not persisted, analyzed, or used to broaden consent.
+Workspace `displayName` is a mutable human-facing label and is never a CLI
+selector or authorization identity. The consumer accepts the current 1-64
+character Agent-name grammar and the same grammar up to 100 characters for
+still-runnable grandfathered Agent names; it does not reinterpret arbitrary
+filesystem text as a selector or parse the local YAML mirror independently of
+its producer.
+
 ## Chat export
 
 `export-chats` writes authorized visible messages. Each message contains only
@@ -130,6 +144,10 @@ gaps. It never blocks Chat export or the full audit.
 
 `window.start` is `null` unless the human supplied `--days`. The option is an
 acquisition bound only; it does not decide sample size or the stopping rule.
+A Chat whose latest activity is after `window.end` must still be fetched and
+filtered because it may contain messages inside the historical window. A Chat
+may be skipped from its summary timestamp only when that timestamp is strictly
+before `window.start`.
 
 `tree_identity` is a deterministic opaque identity for the exact
 Agent/workspace-bound Tree. The audit-row and read-level values must match.

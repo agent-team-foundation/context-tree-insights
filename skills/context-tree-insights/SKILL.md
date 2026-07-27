@@ -45,10 +45,16 @@ adapter or scan another Agent.
 
 ## Authorize the source scope
 
-Resolve the exact current Agent name and UUID from the managed workspace
-identity and the exact bound Tree root from runtime configuration. Reject
-symlinks, missing identity, an Agent mismatch, an unbound Tree, or more than
-one workspace or Tree.
+Resolve the exact current Agent UUID and bound Tree root from the managed
+workspace identity. Resolve the immutable Agent `name` slug used by mentions,
+URLs, CLI selectors, and local mirror paths from `FIRST_TREE_AGENT_SLUG`, and
+cross-check `FIRST_TREE_AGENT_ID` and the First Tree CLI's producer-owned local
+binding resolution of that slug against the workspace UUID. The local listing
+is used only for this one identity check and is never persisted or promoted
+into the authorized source scope. `displayName` is a mutable UI label and must
+never be used as the CLI selector. Reject
+symlinks, missing or malformed runtime identity, an Agent mismatch, an unbound
+Tree, or more than one workspace or Tree.
 
 Choose exactly one mode from the human's explicit request:
 

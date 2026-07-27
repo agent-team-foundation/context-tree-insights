@@ -28,6 +28,17 @@ Pass when:
 
 - the Skill loads only after explicit invocation;
 - the scope contains one exact Agent, workspace, Tree, and authorization mode;
+- the immutable runtime Agent slug is used for CLI selection even when the
+  workspace `displayName` differs;
+- a missing or malformed runtime slug, or a runtime/workspace UUID mismatch,
+  fails closed;
+- current underscore/trailing-separator Agent names and still-runnable
+  grandfathered names remain selectable, while names outside the producer
+  grammar fail closed;
+- the First Tree CLI's producer-owned local binding resolution of the runtime
+  slug must return the same UUID as later `chat --agent` calls; the Skill does
+  not reimplement the local YAML parser or persist/enumerate other Agents into
+  the audit scope;
 - another Agent, workspace, Tree, or unlisted Chat fails closed;
 - only one private artifact directory is created;
 - ordinary tasks do not load the Skill or scan history;
@@ -149,6 +160,8 @@ Pass when:
 - an incomplete sample is reported as incomplete/continuing rather than a
   stable rate;
 - `--days`, when supplied, remains only an acquisition bound.
+- a Chat with messages inside the bound but later activity after `window.end`
+  is fetched and filtered rather than omitted.
 
 ## 9. Report conservation and language
 

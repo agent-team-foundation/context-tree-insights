@@ -45,22 +45,43 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     ]
 
 
-def run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    *arguments: str,
+    runtime_agent_id: str | None = AGENT_ID,
+    runtime_agent_slug: str | None = "fixture-agent",
+    first_tree_json: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    for key, value in (
+        ("FIRST_TREE_AGENT_ID", runtime_agent_id),
+        ("FIRST_TREE_AGENT_SLUG", runtime_agent_slug),
+        ("FIRST_TREE_JSON", first_tree_json),
+    ):
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = value
     return subprocess.run(
         [sys.executable, str(SCRIPT), *arguments],
         capture_output=True,
         check=False,
         text=True,
+        env=environment,
     )
 
 
-def write_workspace_identity(workspace: Path, tree_root: Path, agent_id: str = AGENT_ID) -> None:
+def write_workspace_identity(
+    workspace: Path,
+    tree_root: Path,
+    agent_id: str = AGENT_ID,
+    display_name: str = "Fixture Agent",
+) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     write_json(
         workspace / ".first-tree-workspace" / "identity.json",
         {
             "agentId": agent_id,
-            "displayName": "fixture-agent",
+            "displayName": display_name,
             "type": "agent",
             "contextTreePath": str(tree_root),
         },
@@ -170,12 +191,17 @@ class DeterministicPipelineTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def make_fake_first_tree(
-        self, message_metadata: dict[str, Any] | None = None
+        self,
+        message_metadata: dict[str, Any] | None = None,
+        chat_last_message_at: Any = "2026-07-22T10:05:00Z",
+        resolved_agent_id: str = AGENT_ID,
+        resolved_agent_name: str = "fixture-agent",
     ) -> tuple[Path, Path]:
         binary = self.root / "fake-first-tree"
         log = self.root / "first-tree-commands.log"
         source = f"""#!/usr/bin/env python3
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -183,15 +209,23 @@ args = sys.argv[1:]
 with Path({str(log)!r}).open("a", encoding="utf-8") as handle:
     handle.write(" ".join(args) + "\\n")
 
+if "agent" in args and "list" in args:
+    if os.environ.get("FIRST_TREE_JSON") == "1":
+        raise SystemExit(0)
+    print(
+        "  {resolved_agent_name} runtime: codex uuid: {resolved_agent_id}",
+        file=sys.stderr,
+    )
+    raise SystemExit(0)
 if "agent" in args:
-    print(json.dumps({{"ok": False, "error": "agent list must not be called"}}))
+    print(json.dumps({{"ok": False, "error": "unexpected agent command"}}))
     raise SystemExit(9)
 if "chat" in args and "list" in args:
     data = {{
         "items": [{{
             "id": {CHAT_ID!r},
             "topic": "Fixture Chat",
-            "lastMessageAt": "2026-07-22T10:05:00Z"
+            "lastMessageAt": {chat_last_message_at!r}
         }}],
         "nextCursor": None
     }}
@@ -222,11 +256,23 @@ print(json.dumps({{"ok": True, "data": data}}))
         message_metadata: dict[str, Any] | None = None,
         *,
         days: int | None = 7,
+        runtime_agent_id: str | None = AGENT_ID,
+        runtime_agent_slug: str | None = "fixture-agent",
+        resolved_agent_id: str = AGENT_ID,
+        first_tree_json: str | None = None,
+        chat_last_message_at: Any = "2026-07-22T10:05:00Z",
     ) -> subprocess.CompletedProcess[str]:
         scope_path = self.artifacts / "scope.json"
         output_path = self.artifacts / output_name
         write_json(scope_path, scope)
-        binary, _ = self.make_fake_first_tree(message_metadata)
+        binary, _ = self.make_fake_first_tree(
+            message_metadata,
+            chat_last_message_at,
+            resolved_agent_id,
+            runtime_agent_slug
+            if isinstance(runtime_agent_slug, str)
+            else "fixture-agent",
+        )
         arguments = [
             "export-chats",
             "--artifact-root",
@@ -244,7 +290,30 @@ print(json.dumps({{"ok": True, "data": data}}))
         ]
         if days is not None:
             arguments.extend(["--days", str(days)])
-        return run_cli(*arguments)
+        return run_cli(
+            *arguments,
+            runtime_agent_id=runtime_agent_id,
+            runtime_agent_slug=runtime_agent_slug,
+            first_tree_json=first_tree_json,
+        )
+
+    def export_scope_with_runtime(
+        self,
+        scope: dict[str, Any],
+        *,
+        runtime_agent_id: str | None = AGENT_ID,
+        runtime_agent_slug: str | None = "fixture-agent",
+        resolved_agent_id: str = AGENT_ID,
+        first_tree_json: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.export_scope(
+            scope,
+            "runtime-identity.jsonl",
+            runtime_agent_id=runtime_agent_id,
+            runtime_agent_slug=runtime_agent_slug,
+            resolved_agent_id=resolved_agent_id,
+            first_tree_json=first_tree_json,
+        )
 
     def test_scope_is_single_agent_and_uses_one_explicit_mode(self) -> None:
         mixed = {
@@ -291,7 +360,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(2, result.returncode)
         self.assertIn("one exact Agent", result.stderr)
 
-    def test_exact_chat_export_never_calls_agent_list_and_is_private(self) -> None:
+    def test_exact_chat_export_only_uses_local_agent_list_for_identity(self) -> None:
         scope = {
             "schema_version": 1,
             "agents": [],
@@ -312,9 +381,9 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(CHAT_ID, rows[0]["chat_id"])
 
         commands = (self.root / "first-tree-commands.log").read_text(encoding="utf-8")
+        self.assertIn("agent list", commands)
         self.assertIn(f"chat history {CHAT_ID}", commands)
         self.assertNotIn("chat list", commands)
-        self.assertNotIn("agent list", commands)
         self.assertEqual(0o700, stat.S_IMODE(self.artifacts.stat().st_mode))
         self.assertEqual(
             0o600,
@@ -338,8 +407,124 @@ print(json.dumps({{"ok": True, "data": data}}))
         rows = read_jsonl(self.artifacts / "chats.jsonl")
         self.assertEqual("explicit_agent", rows[0]["authorization"])
         commands = (self.root / "first-tree-commands.log").read_text(encoding="utf-8")
+        self.assertIn("agent list", commands)
         self.assertIn("chat list", commands)
-        self.assertNotIn("agent list", commands)
+        self.assertIn("--agent fixture-agent", commands)
+        self.assertNotIn("Fixture Agent", commands)
+
+    def test_runtime_slug_and_uuid_bind_the_cli_selector(self) -> None:
+        scope = {
+            "schema_version": 1,
+            "agents": [
+                {
+                    "name": "fixture-agent",
+                    "agent_id": AGENT_ID,
+                    "authorization": "explicit_agent",
+                }
+            ],
+            "chats": [],
+        }
+
+        missing_slug = self.export_scope_with_runtime(
+            scope,
+            runtime_agent_slug=None,
+        )
+        self.assertEqual(2, missing_slug.returncode)
+        self.assertIn("FIRST_TREE_AGENT_SLUG", missing_slug.stderr)
+
+        inherited_json_mode = self.export_scope_with_runtime(
+            scope,
+            first_tree_json="1",
+        )
+        self.assertEqual(
+            0,
+            inherited_json_mode.returncode,
+            inherited_json_mode.stderr,
+        )
+
+        for valid_slug in (
+            "fixture_agent",
+            "fixture-agent-",
+            "fixture-agent_",
+            "a" * 64,
+            "a" * 100,
+        ):
+            accepted = self.export_scope_with_runtime(
+                {
+                    **scope,
+                    "agents": [{**scope["agents"][0], "name": valid_slug}],
+                },
+                runtime_agent_slug=valid_slug,
+            )
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+
+        for invalid_slug_value in (
+            "Fixture Agent",
+            "-fixture-agent",
+            "fixture.agent",
+            "a" * 101,
+        ):
+            invalid_slug = self.export_scope_with_runtime(
+                scope,
+                runtime_agent_slug=invalid_slug_value,
+            )
+            self.assertEqual(2, invalid_slug.returncode)
+            self.assertIn("lowercase CLI selector", invalid_slug.stderr)
+
+        wrong_uuid = self.export_scope_with_runtime(
+            scope,
+            runtime_agent_id=OTHER_AGENT_ID,
+        )
+        self.assertEqual(2, wrong_uuid.returncode)
+        self.assertIn("does not match", wrong_uuid.stderr)
+
+        mismatched_selector = self.export_scope_with_runtime(
+            scope,
+            resolved_agent_id=OTHER_AGENT_ID,
+        )
+        self.assertEqual(2, mismatched_selector.returncode)
+        self.assertIn("does not resolve", mismatched_selector.stderr)
+
+        display_name_scope = json.loads(json.dumps(scope))
+        display_name_scope["agents"][0]["name"] = "Fixture Agent"
+        wrong_name = self.export_scope_with_runtime(display_name_scope)
+        self.assertEqual(2, wrong_name.returncode)
+        self.assertIn("identity must match", wrong_name.stderr)
+
+    def test_chat_continuing_after_window_end_is_still_exported(self) -> None:
+        scope = {
+            "schema_version": 1,
+            "agents": [
+                {
+                    "name": "fixture-agent",
+                    "agent_id": AGENT_ID,
+                    "authorization": "explicit_agent",
+                }
+            ],
+            "chats": [],
+        }
+        result = self.export_scope(
+            scope,
+            "continued-chat.jsonl",
+            chat_last_message_at="2026-07-25T10:05:00Z",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        rows = read_jsonl(self.artifacts / "continued-chat.jsonl")
+        self.assertEqual([CHAT_ID], [row["chat_id"] for row in rows])
+        commands = (self.root / "first-tree-commands.log").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"chat history {CHAT_ID}", commands)
+
+        for malformed_summary in ({"unexpected": "object"}, 42):
+            malformed = self.export_scope(
+                scope,
+                "continued-chat.jsonl",
+                chat_last_message_at=malformed_summary,
+            )
+            self.assertEqual(0, malformed.returncode, malformed.stderr)
+            rows = read_jsonl(self.artifacts / "continued-chat.jsonl")
+            self.assertEqual([CHAT_ID], [row["chat_id"] for row in rows])
 
     def test_receipt_projection_is_minimal_and_absence_stays_unknown(self) -> None:
         scope = {
