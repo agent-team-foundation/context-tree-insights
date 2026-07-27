@@ -1,37 +1,64 @@
-# Evidence and Judgment Schema
+# Collector Evidence Schema
 
-Use this reference only after deterministic collection produces
-`candidates.jsonl`. Do not manually rewrite collected passages, paths, IDs, or
-timestamps.
+This reference defines the deterministic collector boundary. Task
+reconstruction and semantic judgment live in
+[task-analysis-schema.md](task-analysis-schema.md).
 
-## Contents
+## Authorization unit
 
-- [Audit unit and authorization](#audit-unit-and-authorization)
-- [Candidate evidence](#candidate-evidence)
-- [Judgment evidence](#judgment-evidence)
-- [Review order](#review-order)
-
-## Audit unit and authorization
-
-One audit unit is the exact pair:
+One collector unit is:
 
 ```text
 CHAT_UUID@AGENT_UUID
 ```
 
-Every unit in one V0 run must use the same invoking Agent UUID, managed
-workspace, and bound Tree. Allowed authorization values are:
+Every unit in one run uses the same invoking Agent UUID, managed workspace, and
+bound Tree. Allowed authorization values are:
 
-- `explicit_agent`: the human explicitly requested all Chats for the current
+- `explicit_agent`: the human explicitly authorized all Chats for the current
   Agent;
-- `explicit_chat`: the human explicitly supplied this exact Chat UUID or
-  authorized the invoking current Chat resolved from runtime `chatId`.
+- `explicit_chat`: the human supplied exact Chat UUIDs for the current Agent or
+  authorized the invoking Chat resolved from runtime `chatId`.
 
 These values record consent, not inferred ownership. A run uses one mode only.
+The Chat-Agent pair remains the authorization, source, and trace-mapping unit;
+it is not the value-counting unit.
+
+## Chat export
+
+`export-chats` writes authorized visible messages. Each message contains only
+its ID, timestamp, sender identity/kind, visible content, and an optional
+`decision_receipt`.
+
+When `metadata.contextDecision` is a valid v1 receipt, the export retains only:
+
+```json
+{
+  "version": 1,
+  "effect": "constrained",
+  "summary": "The Tree narrowed the acceptable implementation.",
+  "evidence": [
+    {
+      "repoUrl": "https://github.com/example/context-tree",
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "nodePath": "system/example.md",
+      "heading": "Decision"
+    }
+  ]
+}
+```
+
+No other message metadata is copied. Valid effects are `confirmed`,
+`constrained`, `redirected`, and `conflicted`; evidence contains one to three
+rows, a 40-character Git commit, and a relative Markdown node path.
+
+Receipt absence is unknown and creates no negative diagnostic. A malformed
+receipt is omitted and adds `context_decision_invalid` to the Chat coverage
+gaps. It never blocks Chat export or the full audit.
 
 ## Candidate evidence
 
-`collect` emits one JSON object per authorized audit unit:
+`collect` emits one JSON object per authorized Chat-Agent unit:
 
 ```json
 {
@@ -46,7 +73,7 @@ These values record consent, not inferred ownership. A run uses one mode only.
     "message_count": 12
   },
   "window": {
-    "start": "RFC3339",
+    "start": null,
     "end": "RFC3339"
   },
   "tree_identity": "tree-opaque-hash",
@@ -71,6 +98,15 @@ These values record consent, not inferred ownership. A run uses one mode only.
       "success": true
     }
   ],
+  "visible_messages": [
+    {
+      "message_id": "message-id",
+      "created_at": "RFC3339",
+      "sender_id": "sender-id",
+      "content": "visible message",
+      "decision_receipt": null
+    }
+  ],
   "visible_choice_candidates": [
     {
       "message_id": "message-id",
@@ -84,98 +120,42 @@ These values record consent, not inferred ownership. A run uses one mode only.
 }
 ```
 
-`tree_identity` is a deterministic opaque identity for the exact
-Agent/workspace-bound Tree. It is not an absolute path. The audit-row and
-read-level values must match.
+`window.start` is `null` unless the human supplied `--days`. The option is an
+acquisition bound only; it does not decide sample size or the stopping rule.
 
-`content_class_hint` is path-based triage, not a semantic verdict. Verify the
-cited passage itself. A qualifying passage must be isolated from one successful
-read of the authorized bound Tree; mixed or compound output cannot qualify
-merely because it contains an authorized `.md` path. Tool names must exactly
-match the documented built-in read tools; suffix lookalikes, stdin, and extra
-file operands are not isolated reads.
+`tree_identity` is a deterministic opaque identity for the exact
+Agent/workspace-bound Tree. The audit-row and read-level values must match.
 
 `mapped_trace_files` and the compatibility-named `session_file` field contain
-opaque `trace-*` identities, never local filesystem paths. They identify only
-local root Codex sessions that pass a bounded preflight for the exact workspace
-and one authorized runtime-injected `chatId`. An unauthorized, ambiguous, or
-unmapped trace must not be scanned for content. `reader_agent_id` must equal
-`source_agent_id`.
+opaque trace identities, never local filesystem paths. Only local root Codex
+sessions that pass bounded preflight for the exact workspace and one authorized
+runtime-injected `chatId` may be scanned.
 
-`visible_choice_candidates` contains only later visible messages authored by
-that same Agent. Human or other-Agent messages cannot establish this Agent's
-influence.
+`visible_messages` supports Task reconstruction. `visible_choice_candidates`
+contains only later visible messages authored by the audited Agent; human or
+other-Agent messages cannot establish that Agent's effect.
 
 `outside_candidate_set` means collection found neither a successful qualifying
-Tree read nor a visible Tree-influence signal. It is not `unproven`, evidence
-of no value, or an eligible denominator.
+Tree read nor a visible Tree-influence signal. It is not evidence of no
+exposure or no value. A later Task reconstruction may still mark historical
+exposure unresolved.
 
-## Judgment evidence
+## Read evidence
 
-Create exactly one JSONL row for every `candidate`:
+The collector retains the existing conservative trace rules:
 
-```json
-{
-  "audit_id": "CHAT_UUID@AGENT_UUID",
-  "result": "verified",
-  "effect": "constrained",
-  "rubric": {
-    "real_read": true,
-    "decision_bearing_normal_passage": true,
-    "task_relevant": true,
-    "read_before_choice": true,
-    "influence_visible": true
-  },
-  "read_ids": ["stable-read-id"],
-  "choice_message_ids": ["message-id"],
-  "decision_theme": "Concise decision theme",
-  "summary": "The passage narrowed the implementation to the existing state source.",
-  "representative": true,
-  "coverage_gaps": []
-}
-```
+- bounded metadata/current-context preflight happens before full trace scan;
+- one trace must map unambiguously to one authorized Chat and exact workspace;
+- only documented built-in read identities are accepted;
+- a call is paired with its exact output and continuations;
+- one successful, isolated Markdown read is required;
+- compound, mixed, mutating, stdin, lookalike, cross-tree, failed, or pending
+  output is rejected or recorded as a coverage gap;
+- historical output is never replaced with the current Tree file.
 
-### Results
+`content_class_hint` is path-based triage, not a semantic verdict. A qualifying
+effect still requires the Agent to judge a current decision, constraint,
+rationale, or cross-domain relationship in normal content.
 
-- `verified`: every rubric field is `true`.
-- `probable`: the first four fields are `true`; `influence_visible` is `false`
-  or `null` because the aligned outcome does not expose complete causality.
-- `unproven`: available evidence does not close the claim. Set `effect` to
-  `null`.
-
-Use `null` for a genuinely unknowable rubric fact and `false` for contrary
-evidence. Do not use `probable` to soften a failed real-read,
-normal-passage, task-relevance, or pre-choice check.
-
-### Effects
-
-Use one effect for `verified` and `probable` only:
-
-- `confirmed`: corroborated an already selected direction;
-- `constrained`: narrowed scope or prevented an invalid extension;
-- `redirected`: changed the direction or implementation path;
-- `conflicted`: exposed a conflict between the choice and current normal
-  content.
-
-Both positive results require at least one successful `read_id` and one
-same-Agent `choice_message_id`. When `read_before_choice` is true, every cited
-read needs a completion time no later than the earliest cited choice. A known
-post-choice read cannot be positive evidence.
-
-## Review order
-
-For each candidate:
-
-1. Verify the referenced successful read contains the exact cited passage.
-2. Identify the current decision, constraint, rationale, or cross-domain
-   relationship in normal content. Indexes, workflow instructions, member
-   routing, archives, and proposals cannot qualify alone.
-3. State the concrete task choice the passage could affect.
-4. Compare the read completion and visible-message timestamps.
-5. Cite the later same-Agent message that exposes or aligns with the effect.
-6. Choose the conservative result and preserve every missing or truncated
-   evidence item in `coverage_gaps`.
-
-Do not infer hidden reasoning. An aligned outcome without visible causality is
-at most `probable`. Summarize passages in the report instead of copying long
-raw content.
+Missing, cleaned, malformed, truncated, unsupported, or non-Codex traces remain
+coverage gaps. They do not become negative exposure evidence.

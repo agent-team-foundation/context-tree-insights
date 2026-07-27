@@ -1,64 +1,66 @@
 ---
 name: context-tree-insights
-description: Produce evidence-first insights about Context Tree use when a human explicitly invokes $context-tree-insights. V0 supports only a manual, read-only retrospective of how Context Tree passages influenced decisions in explicitly authorized Chats for the current First Tree Codex Agent. Do not use for ordinary task reads, stored-tree quality audits, Tree writes, generic Chat analytics, automatic monitoring, or work involving another Agent.
+description: Produce task-first, evidence-first insights about Context Tree decision value when a human explicitly invokes $context-tree-insights. The audit is manual, read-only, limited to explicitly authorized Chats for the current First Tree Codex Agent, and uses Task quotas plus saturation rather than Chat counts or a default time window. Do not use for ordinary task reads, stored-tree audits, Tree writes, generic Chat analytics, monitoring, or another Agent.
 ---
 
 # Context Tree Insights
 
-## V0 capability
+## Capability
 
-Run a historical value audit that connects an actual Context Tree passage read
-by the invoking Agent to a later visible choice by that same Agent. Keep
-deterministic collection separate from semantic judgment:
+Run a manual and read-only retrospective that reconstructs Tasks from
+authorized Chats, establishes confirmed or unresolved Context Tree exposure
+inside each Task window, judges visible effects, and reports Task-level value.
 
-- the bundled script establishes authorization, trace mapping, reads, timing,
-  visible choices, coverage, and report invariants;
-- the Agent judges whether a passage was decision-bearing, relevant, and
-  visibly influential.
+Keep three responsibilities separate:
 
-This umbrella Skill may gain other Context Tree insight capabilities later.
-V0 contains only this audit.
+- `Chat UUID @ Agent UUID` controls authorization, trace mapping, and evidence
+  sourcing;
+- Task reconstruction defines the judgment and counting unit;
+- the bundled script performs deterministic collection, reference validation,
+  deduplication, conservation checks, and reporting.
+
+The collector establishes what records exist. The Agent performs semantic Task
+reconstruction and passage-to-choice judgment. A read or decision receipt is
+evidence, not server-verified causality.
 
 ## Gate the run
 
 Proceed only when a human explicitly invokes `$context-tree-insights` and asks
-for the historical value audit. Do not trigger from an ordinary task, a normal
-Context Tree read, or a request to audit the stored Tree itself.
+for this value audit. Do not trigger from an ordinary task, a normal Context
+Tree read, a stored-tree quality audit, or an implicit analytics request.
 
 Keep the run:
 
 - manual and read-only;
-- limited to one invoking Agent, its one managed workspace, and its one bound
-  Context Tree;
+- limited to one invoking Agent, one managed workspace, and one bound Context
+  Tree;
 - limited to local Codex provider traces;
-- within a positive lookback window, defaulting to seven days;
-- confined to a newly created artifact directory inside the invoking Agent
+- confined to a new private artifact directory inside the invoking Agent
   workspace.
 
 Do not modify Chat history, traces, Tree content, git state, schedules, agent
-configuration, databases, or product state. The normal visible reply and the
-provider's automatic trace append are not audit writes. Do not invoke another
-provider adapter or scan another Agent.
+configuration, databases, or product state. The visible reply and provider's
+automatic trace append are not audit writes. Do not invoke another provider
+adapter or scan another Agent.
 
-## Authorize the scope
+## Authorize the source scope
 
 Resolve the exact current Agent name and UUID from the managed workspace
-identity. Resolve the exact bound Tree root from that workspace's runtime
-configuration. Reject symlinks, missing identity, an Agent mismatch, an
-unbound Tree, or more than one workspace or Tree.
+identity and the exact bound Tree root from runtime configuration. Reject
+symlinks, missing identity, an Agent mismatch, an unbound Tree, or more than
+one workspace or Tree.
 
-Choose exactly one scope mode from the human's explicit request:
+Choose exactly one mode from the human's explicit request:
 
-1. `explicit_agent`: the human authorizes all Chats for this one current Agent.
-2. `explicit_chat`: the human supplies one or more exact Chat UUIDs for this
-   same current Agent, or explicitly authorizes the invoking current Chat,
-   whose exact UUID comes from the runtime-injected `chatId`.
+1. `explicit_agent`: all Chats for this one current Agent;
+2. `explicit_chat`: exact Chat UUIDs for this Agent, or the explicitly
+   authorized invoking Chat resolved from runtime `chatId`.
 
 Do not infer authorization from Team visibility, Chat visibility, Agent
-ownership, or access to the local trace directory. Do not combine the two
-modes in one run. Ask the human when the authorization scope is ambiguous.
+ownership, or local trace access. Do not mix modes. Ask the human only when
+authorization is ambiguous.
 
-Write `scope.json` with one of these shapes:
+Write `scope.json`:
 
 ```json
 {
@@ -73,6 +75,8 @@ Write `scope.json` with one of these shapes:
   "chats": []
 }
 ```
+
+or:
 
 ```json
 {
@@ -89,22 +93,20 @@ Write `scope.json` with one of these shapes:
 }
 ```
 
-Every entry must name the same exact current Agent identity. Each evidence unit
-is one `Chat UUID @ Agent UUID`.
+Every row must name the same current Agent identity.
 
 ## Collect deterministic evidence
 
-Locate this Skill directory, create a private timestamped artifact directory,
-and keep every input and output inside it. Require mode `0700` for the
-directory and `0600` for files. Set `FIRST_TREE_BIN` when the environment uses
-a channel-specific executable such as `first-tree-staging`.
+Read [references/evidence-schema.md](references/evidence-schema.md). Locate the
+Skill directory, create a private timestamped artifact directory, and keep all
+inputs and outputs inside it. Require directory mode `0700` and file mode
+`0600`. Set `FIRST_TREE_BIN` for a channel-specific executable.
 
 ```bash
 python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" export-chats \
   --artifact-root "$CTI_ARTIFACT_DIR" \
   --scope "$CTI_ARTIFACT_DIR/scope.json" \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --days 7 \
   --output "$CTI_ARTIFACT_DIR/chats.jsonl"
 
 python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" collect \
@@ -112,59 +114,71 @@ python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" collect \
   --chats "$CTI_ARTIFACT_DIR/chats.jsonl" \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
   --tree-root "/absolute/current/agent/bound/context-tree" \
-  --days 7 \
   --output "$CTI_ARTIFACT_DIR/candidates.jsonl"
 ```
 
-Use `--now` for reproducible reruns and `--trace-root` only for an explicitly
-resolved local Codex sessions directory.
+There is no default lookback. Use `--days N` only when the human explicitly
+wants a time-based acquisition ceiling. It limits data fetching; it does not
+determine sample size or the stopping rule. Use `--now` for reproducible reruns
+and `--trace-root` only for an explicitly resolved local Codex sessions
+directory.
 
-Before a trace is fully scanned, require a bounded metadata/current-context
-preflight to establish one unambiguous authorized `chatId` for the exact
-workspace. Never search arbitrary full traces to discover an authorized Chat.
-Treat an unmapped, ambiguous, malformed, cleaned, truncated, non-Codex,
-subagent, cross-workspace, or out-of-window trace as a coverage gap. Never
-replace historical tool output with the current Tree file.
+Before fully scanning a trace, require bounded metadata/current-context
+preflight to establish one authorized `chatId` for the exact workspace. Never
+search arbitrary full traces to discover an authorized Chat. Keep the existing
+single-file read isolation, exact output pairing, completion, cross-tree, and
+coverage-gap rules.
 
-Accept a Tree passage only from a successful, attributable read whose output
-can be isolated. Reject or downgrade compound commands or mixed outputs that
-cannot prove which bytes came from the authorized Tree node. Accept only the
-documented built-in read tool identities; reject suffix lookalikes, stdin, and
-extra file operands. Pair calls with their exact outputs and continuations, and
-record read completion before using it as pre-choice evidence.
+For message metadata:
 
-## Judge at passage level
+- project only a valid `metadata.contextDecision` v1 into
+  `decision_receipt`;
+- treat receipt absence as unknown;
+- omit malformed receipts and add `context_decision_invalid`;
+- never fail Chat export because analysis metadata is malformed.
 
-Read [references/evidence-schema.md](references/evidence-schema.md) before
-writing `judgments.jsonl`. Review every row whose `candidate_status` is
-`candidate`; do not turn `outside_candidate_set` rows into failures.
+## Reconstruct and judge Tasks
 
-Apply all five checks:
+Read
+[references/task-analysis-schema.md](references/task-analysis-schema.md), then
+write exactly one `task-judgments.jsonl` row for every reconstructed Task.
 
-1. `real_read`: a successful tool result contains the cited Tree passage.
-2. `decision_bearing_normal_passage`: the passage states a current decision,
-   constraint, rationale, or cross-domain relationship in normal content.
-3. `task_relevant`: the passage could affect a concrete choice in that task.
-4. `read_before_choice`: the read completed before the cited choice.
-5. `influence_visible`: a later visible message from this Agent shows the
-   passage confirmed, constrained, redirected, or conflicted with the choice.
+A clear Task needs a concrete objective, object scope, outcome, Task window,
+source fragments, and one of five task types. Otherwise mark it excluded.
+Excluded Tasks carry no exposure or effects.
 
-Classify conservatively:
+One Chat may contain multiple Tasks. Merge across Chats only for one PR/MR/
+Issue, a visible handoff, or the same objective and primary delivery, and
+record the explicit shared linkage. Do not copy one read or choice into
+different Tasks.
 
-- `verified`: all five checks are true.
-- `probable`: the first four are true and the outcome aligns, but visible
-  causality is incomplete.
-- `unproven`: available evidence does not meet the bar; this is not proof of
-  no value.
+Exposure is only:
 
-Assign one effect to a `verified` or `probable` judgment:
-`confirmed`, `constrained`, `redirected`, or `conflicted`. Do not assign an
-effect to `unproven`. A file read, selector, index, member route, workflow
-instruction, archive, proposal, or Tree mention is not value by itself.
+- `confirmed`, with attributable Task-window reads;
+- `unresolved`, with a reason explaining the evidence gap.
 
-Minimize sensitive content in model context. Inspect only the candidate
-passages and visible choices needed for the rubric. Do not print full traces,
-raw evidence bundles, or long passages into the Chat.
+Do not invent `not_observed`. Missing telemetry and receipt absence are
+unknown, not proof of non-use.
+
+Effects are only `confirmed`, `constrained`, `redirected`, or `conflicted`.
+Keep the original passage-level confidence as `verified` or `probable`. Do not
+use `informed`, `none`, or numeric weights. Every effect needs Task-window
+reads, later same-Agent choice messages, and an outcome anchor.
+
+Do not write `support`. The reporter derives definite support from confirmed
+exposure plus verified judgment; every other valid positive effect is limited
+support.
+
+## Apply Task quota and saturation
+
+Acquire and judge at least 100 clear Tasks, with all five task types represented
+in that initial cohort. Then expand by 20 clear Tasks per batch. Stop only after
+two consecutive complete expansion batches add no new effect type, key
+counterexample, or conclusion change.
+
+Record `sampling_order` and any `saturation_signals` on each clear Task so the
+stop is reproducible. A partial run remains incomplete or continuing. Do not
+turn a time bound or Chat count into a sample-size rule.
 
 ## Validate and report
 
@@ -173,27 +187,30 @@ python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" report \
   --artifact-root "$CTI_ARTIFACT_DIR" \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
   --candidates "$CTI_ARTIFACT_DIR/candidates.jsonl" \
-  --judgments "$CTI_ARTIFACT_DIR/judgments.jsonl" \
+  --task-judgments "$CTI_ARTIFACT_DIR/task-judgments.jsonl" \
   --evidence-output "$CTI_ARTIFACT_DIR/evidence.jsonl" \
   --report-output "$CTI_ARTIFACT_DIR/REPORT.md"
 ```
 
-The deterministic reporter must reject missing candidate judgments, unknown
-IDs, invalid rubric/result combinations, evidence-free positive results, and
-post-choice reads claimed as pre-choice.
+The deterministic reporter rejects unauthorized source messages, Task-window
+violations, unlinked cross-Chat merges, duplicated reads/choices, invalid
+effects or confidence, missing outcome anchors, persisted support, and
+non-conserving aggregates.
 
 The report must include:
 
-- `verified`, `probable`, and `unproven` counts;
-- effect distribution and representative passage-to-choice cases;
-- authorized Chat, visible-message, mapped-trace, candidate, and judgment
-  coverage;
-- every material coverage gap and the local-Codex V0 boundary;
-- an explicit statement that read counts do not equal value;
-- an explicit statement that all authorized Chats are not an eligible
-  denominator because historical records cannot show which tasks had relevant
-  decision-bearing Tree content available.
+- clear and excluded Tasks;
+- confirmed and unresolved exposure Tasks;
+- effect Tasks and deduplicated independent effects;
+- the four-effect distribution;
+- task type × effect;
+- derived definite/limited support;
+- quota and saturation status;
+- authorized Chat, message, trace, and coverage-gap counts;
+- explicit language that unresolved and receipt absence are unknown;
+- no global effectiveness rate.
 
-Return local links to `REPORT.md` and `evidence.jsonl`, the exact time window
-and authorization mode, and any gap that materially limits interpretation.
-Keep artifacts in the invoking Agent workspace and never commit them.
+Because all authorized Chats are not an eligible value denominator, return local links
+to `REPORT.md` and `evidence.jsonl`, the acquisition bound if one was supplied,
+authorization mode, sample status, and any material coverage gap. Keep
+artifacts private in the invoking Agent workspace and never commit them.

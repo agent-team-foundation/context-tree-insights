@@ -18,6 +18,7 @@ EXPECTED_FILES = (
     SKILL_ROOT / "VERSION",
     SKILL_ROOT / "scripts" / "context_tree_insights.py",
     SKILL_ROOT / "references" / "evidence-schema.md",
+    SKILL_ROOT / "references" / "task-analysis-schema.md",
 )
 FORBIDDEN_PATH_FRAGMENTS = ("/Users/", "\\Users\\")
 FORBIDDEN_ARTIFACT_NAMES = {
@@ -26,6 +27,7 @@ FORBIDDEN_ARTIFACT_NAMES = {
     "candidates.jsonl",
     "chats.jsonl",
     "judgments.jsonl",
+    "task-judgments.jsonl",
 }
 
 

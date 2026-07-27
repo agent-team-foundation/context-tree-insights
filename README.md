@@ -1,37 +1,37 @@
 # Context Tree Insights
 
-`context-tree-insights` is an umbrella Codex Skill for evidence-first analysis
-of Context Tree use. The private V0 pilot contains one capability: a manual,
-read-only retrospective that reconstructs whether a passage read from the
-Context Tree visibly influenced a later Agent choice.
+`context-tree-insights` 0.2.0 is an explicit-only Codex Skill for task-first,
+evidence-first analysis of Context Tree decision value. It reconstructs Tasks
+from authorized Chats, separates confirmed from unresolved exposure, judges
+four visible effect types, and stops sampling through a Task quota plus
+saturation.
 
-It is intentionally not integrated into First Tree core. It does not add a
-bundled Skill, CLI contract, client briefing, database table, schedule, Tree
-write, or provider adapter. It runs for one First Tree Codex Agent, one managed
-workspace, and one bound Tree at a time.
+It is intentionally separate from First Tree core. It does not add a bundled
+Skill, runtime event, database table, message-path validation, schedule,
+Context Tree write, Web surface, or another provider adapter. It runs for one
+First Tree Codex Agent, one managed workspace, and one bound Tree at a time.
 
 ## Safety and interpretation
 
 - Invocation is explicit only: `$context-tree-insights`.
-- The invoking human must authorize either all Chats for the current Agent,
-  exact Chat UUIDs for that Agent, or the invoking current Chat resolved to its
-  runtime `chatId`.
-- Local Codex traces are preflighted against exact authorized `chatId` values
-  before full content is scanned. Only canonical Codex user-message rows can
-  establish identity; the adjacent event mirror must agree, while tool-output
-  and compaction echoes cannot authorize or invalidate a trace.
+- The invoking human authorizes all Chats for the current Agent, exact Chat
+  UUIDs for that Agent, or the invoking Chat resolved from runtime `chatId`.
+- `Chat UUID @ Agent UUID` remains the authorization and trace-mapping unit;
+  Task is the judgment and counting unit.
+- Local Codex traces are preflighted against authorized Chat IDs before full
+  content is scanned.
 - Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
-  reported as coverage gaps.
-- Evidence uses opaque Tree and trace identities rather than leaking local
-  filesystem paths.
-- A Tree read is not value by itself. Positive evidence requires a
-  decision-bearing passage, task relevance, pre-choice timing, and conservative
-  passage-to-choice analysis.
-- Authorized Chats are coverage, not an eligible denominator for a value rate.
+  coverage gaps.
+- A valid `contextDecision` is projected minimally. Absence is unknown;
+  malformed metadata is diagnostic and never blocks Chat export.
+- A Tree read is evidence of explicit activity, not semantic use or causal
+  value by itself.
+- Unresolved exposure is never counted as unused.
+- The report does not produce a global effectiveness rate.
 
 The audit writes only private local artifacts in the invoking Agent workspace.
-Do not commit real Chat exports, provider traces, raw passages, evidence JSONL,
-reports, or any artifact derived from production activity to this repository.
+Never commit real Chat exports, traces, passages, task judgments, evidence
+JSONL, reports, or production-derived artifacts.
 
 ## Repository layout
 
@@ -40,7 +40,9 @@ skills/context-tree-insights/
   SKILL.md
   VERSION
   agents/openai.yaml
-  references/evidence-schema.md
+  references/
+    evidence-schema.md
+    task-analysis-schema.md
   scripts/context_tree_insights.py
 tests/
 evals/manual-behavior-checklist.md
@@ -52,8 +54,7 @@ evaluation material, and repository documentation stay outside it.
 ## Install into one Agent workspace
 
 This repository does not install or enable the Skill automatically. Project
-the `skills/context-tree-insights` directory into the selected Agent
-workspace's local Skill directory:
+the Skill directory into one selected Agent workspace:
 
 ```bash
 CTI_REPO="/absolute/path/to/context-tree-insights"
@@ -65,33 +66,37 @@ mkdir -p "$CTI_AGENT_WORKSPACE/.agents/skills"
 cp -R "$CTI_REPO/skills/context-tree-insights" "$CTI_DESTINATION"
 ```
 
-Start a new Codex session in that workspace after installation. The
-`allow_implicit_invocation: false` policy keeps it out of normal tasks; invoke
-it with `$context-tree-insights`.
+Start a new Codex session after installation. The
+`allow_implicit_invocation: false` policy keeps the Skill out of ordinary
+tasks. Pin a reviewed commit or release when installing for another Agent.
 
-Pin a reviewed commit or release when installing for another Agent. Updating
-the repository does not update an installed projection; replace it only as an
-explicit administrative action.
+## Pipeline
 
-## Run
+The Skill orchestrates four stages:
 
-The Skill orchestrates three deterministic stages:
+1. `export-chats` resolves explicit authorization and exports visible records.
+2. `collect` maps authorized Chats to local Codex traces and reconstructs
+   isolated Tree reads plus visible choice candidates.
+3. The Agent reconstructs Tasks, Task-window exposure, effects, and sampling
+   signals in `task-judgments.jsonl`.
+4. `report` validates source ownership, windows, cross-Chat linkage,
+   deduplication, sampling, and aggregate conservation, then creates
+   `evidence.jsonl` and `REPORT.md`.
 
-1. `export-chats` resolves the explicit authorization scope and exports only
-   visible records for that scope.
-2. `collect` maps authorized Chats to local Codex traces, reconstructs isolated
-   Tree reads and later visible choices, and records coverage gaps.
-3. The Agent applies the documented passage-level rubric, then `report`
-   validates judgments and creates `evidence.jsonl` plus `REPORT.md`.
+There is no default time window. `--days` is an optional data-acquisition
+bound. Sample size is controlled by at least 100 clear Tasks with all five task
+types represented, followed by 20-Task expansions until two consecutive
+batches add no effect type, key counterexample, or conclusion change.
 
-The default window is seven days and can be changed with a positive `--days`
-value. Set `FIRST_TREE_BIN` for the active channel when needed, for example
-`first-tree-staging`. Detailed commands and scope examples are in
-[`SKILL.md`](skills/context-tree-insights/SKILL.md).
+Detailed commands and schemas are in
+[`SKILL.md`](skills/context-tree-insights/SKILL.md),
+[`evidence-schema.md`](skills/context-tree-insights/references/evidence-schema.md),
+and
+[`task-analysis-schema.md`](skills/context-tree-insights/references/task-analysis-schema.md).
 
 ## Validate
 
-Run the deterministic floor before publishing a revision:
+Run the deterministic floor before publishing:
 
 ```bash
 python3 scripts/validate_skill.py
@@ -101,6 +106,5 @@ python3 -m unittest discover -s tests -v
 
 Then execute
 [`evals/manual-behavior-checklist.md`](evals/manual-behavior-checklist.md)
-against a designated pilot Agent with authorized, disposable or sanitized
-records. Model-backed evaluation is outside the V0 gate; the observable manual
-checklist covers the Agent-controlled behavior.
+against a designated pilot Agent with authorized disposable or sanitized
+records. Model-backed evaluation remains outside the deterministic gate.
