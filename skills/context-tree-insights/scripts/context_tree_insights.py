@@ -627,9 +627,20 @@ def supported_repository_identity(value: Any) -> str | None:
     try:
         address = ipaddress.ip_address(lowered_host)
     except ValueError:
+        if re.fullmatch(r"[0-9.]+", lowered_host):
+            return None
         address = None
-    if address is not None and address.is_loopback:
-        return None
+    if address is not None:
+        mapped_address = getattr(address, "ipv4_mapped", None)
+        if (
+            address.is_loopback
+            or address.is_unspecified
+            or (
+                mapped_address is not None
+                and (mapped_address.is_loopback or mapped_address.is_unspecified)
+            )
+        ):
+            return None
     path_parts = path.removesuffix(".git").split("/")
     if (
         len(path_parts) < 2

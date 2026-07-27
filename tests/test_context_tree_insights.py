@@ -425,6 +425,17 @@ print(json.dumps({{"ok": True, "data": data}}))
             ),
             ("local-receipt.jsonl", "/private/context-tree"),
             ("non-repository-receipt.jsonl", "not-a-repository"),
+            ("short-loopback-receipt.jsonl", "https://127.1/org/tree"),
+            (
+                "integer-loopback-receipt.jsonl",
+                "https://2130706433/org/tree",
+            ),
+            ("unspecified-ipv4-receipt.jsonl", "https://0.0.0.0/org/tree"),
+            ("unspecified-ipv6-receipt.jsonl", "https://[::]/org/tree"),
+            (
+                "mapped-loopback-receipt.jsonl",
+                "https://[::ffff:127.0.0.1]/org/tree",
+            ),
         ):
             unsafe_receipt = json.loads(json.dumps(valid_receipt))
             unsafe_receipt["contextDecision"]["evidence"][0][

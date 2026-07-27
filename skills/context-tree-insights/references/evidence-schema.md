@@ -54,8 +54,10 @@ rows, a 40-character Git commit, and a relative Markdown node path.
 `repoUrl` must be a remote repository identity with at least an owner/group
 and repository path. HTTP(S) identities must not contain user info; SSH
 identities may use only the conventional `git` user; local paths, `file:`
-URLs, loopback hosts, credentials, query strings, and fragments are malformed.
-Rejected values are never echoed into artifacts or diagnostics.
+URLs, loopback or unspecified hosts, non-canonical numeric hosts, credentials,
+query strings, and fragments are malformed. Host validation is purely
+syntactic and never performs DNS resolution. Rejected values are never echoed
+into artifacts or diagnostics.
 
 Receipt absence is unknown and creates no negative diagnostic. A malformed
 receipt is omitted and adds `context_decision_invalid` to the Chat coverage
