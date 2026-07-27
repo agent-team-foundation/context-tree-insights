@@ -622,12 +622,16 @@ def supported_repository_identity(value: Any) -> str | None:
         path = parsed.path.lstrip("/")
 
     lowered_host = host.lower().rstrip(".")
-    if lowered_host == "localhost":
+    if lowered_host == "localhost" or "%" in lowered_host:
         return None
     try:
         address = ipaddress.ip_address(lowered_host)
     except ValueError:
-        if re.fullmatch(r"[0-9.]+", lowered_host):
+        numeric_components = lowered_host.split(".")
+        if re.fullmatch(r"[0-9.]+", lowered_host) or all(
+            re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]+)", component)
+            for component in numeric_components
+        ):
             return None
         address = None
     if address is not None:

@@ -436,6 +436,22 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "mapped-loopback-receipt.jsonl",
                 "https://[::ffff:127.0.0.1]/org/tree",
             ),
+            (
+                "hex-integer-loopback-receipt.jsonl",
+                "https://0x7f000001/org/tree",
+            ),
+            (
+                "hex-scp-loopback-receipt.jsonl",
+                "git@0x7f000001:org/tree",
+            ),
+            (
+                "hex-components-loopback-receipt.jsonl",
+                "https://0x7f.0x0.0x0.0x1/org/tree",
+            ),
+            (
+                "encoded-loopback-receipt.jsonl",
+                "https://127%2e0%2e0%2e1/org/tree",
+            ),
         ):
             unsafe_receipt = json.loads(json.dumps(valid_receipt))
             unsafe_receipt["contextDecision"]["evidence"][0][
