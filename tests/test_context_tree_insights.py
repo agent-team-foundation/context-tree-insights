@@ -20,6 +20,7 @@ CHAT_ID = "11111111-1111-4111-8111-111111111111"
 SECOND_CHAT_ID = "22222222-2222-4222-8222-222222222222"
 UNAUTHORIZED_CHAT_ID = "88888888-8888-4888-8888-888888888888"
 MESSAGE_ID = "33333333-3333-4333-8333-333333333333"
+SECOND_MESSAGE_ID = "44444444-4444-4444-8444-444444444444"
 NOW = "2026-07-24T00:00:00Z"
 
 
@@ -120,6 +121,9 @@ class RepositoryContractTests(unittest.TestCase):
         reference = (SKILL_ROOT / "references" / "evidence-schema.md").read_text(
             encoding="utf-8"
         )
+        task_reference = (
+            SKILL_ROOT / "references" / "task-analysis-schema.md"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("name: context-tree-insights", skill)
         self.assertIn("$context-tree-insights", skill)
@@ -129,7 +133,19 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("allow_implicit_invocation: false", openai)
         self.assertIn("explicit_agent", reference)
         self.assertIn("explicit_chat", reference)
-        self.assertNotIn("/Users/", "\n".join((skill, openai, reference)))
+        for rubric_key in (
+            "real_read",
+            "decision_bearing_normal_passage",
+            "task_relevant",
+            "read_before_choice",
+            "influence_visible",
+        ):
+            self.assertIn(rubric_key, task_reference)
+        self.assertIn("all five checks are `true`", task_reference)
+        self.assertIn("first four checks are `true`", task_reference)
+        self.assertNotIn(
+            "/Users/", "\n".join((skill, openai, reference, task_reference))
+        )
 
 
 class DeterministicPipelineTests(unittest.TestCase):
@@ -153,7 +169,9 @@ class DeterministicPipelineTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def make_fake_first_tree(self) -> tuple[Path, Path]:
+    def make_fake_first_tree(
+        self, message_metadata: dict[str, Any] | None = None
+    ) -> tuple[Path, Path]:
         binary = self.root / "fake-first-tree"
         log = self.root / "first-tree-commands.log"
         source = f"""#!/usr/bin/env python3
@@ -181,9 +199,10 @@ elif "chat" in args and "history" in args:
     data = {{
         "items": [{{
             "id": {MESSAGE_ID!r},
-            "createdAt": "2026-07-22T10:05:00Z",
-            "senderId": {AGENT_ID!r},
-            "content": "The Context Tree constraint keeps one authoritative state source."
+        "createdAt": "2026-07-22T10:05:00Z",
+        "senderId": {AGENT_ID!r},
+        "content": "The Context Tree constraint keeps one authoritative state source.",
+        "metadata": {message_metadata!r}
         }}],
         "nextCursor": None
     }}
@@ -196,12 +215,19 @@ print(json.dumps({{"ok": True, "data": data}}))
         binary.chmod(0o755)
         return binary, log
 
-    def export_scope(self, scope: dict[str, Any], output_name: str = "chats.jsonl") -> subprocess.CompletedProcess[str]:
+    def export_scope(
+        self,
+        scope: dict[str, Any],
+        output_name: str = "chats.jsonl",
+        message_metadata: dict[str, Any] | None = None,
+        *,
+        days: int | None = 7,
+    ) -> subprocess.CompletedProcess[str]:
         scope_path = self.artifacts / "scope.json"
         output_path = self.artifacts / output_name
         write_json(scope_path, scope)
-        binary, _ = self.make_fake_first_tree()
-        return run_cli(
+        binary, _ = self.make_fake_first_tree(message_metadata)
+        arguments = [
             "export-chats",
             "--artifact-root",
             str(self.artifacts),
@@ -211,13 +237,14 @@ print(json.dumps({{"ok": True, "data": data}}))
             f"{AGENT_ID}={self.workspace}",
             "--first-tree-bin",
             str(binary),
-            "--days",
-            "7",
             "--now",
             NOW,
             "--output",
             str(output_path),
-        )
+        ]
+        if days is not None:
+            arguments.extend(["--days", str(days)])
+        return run_cli(*arguments)
 
     def test_scope_is_single_agent_and_uses_one_explicit_mode(self) -> None:
         mixed = {
@@ -313,6 +340,155 @@ print(json.dumps({{"ok": True, "data": data}}))
         commands = (self.root / "first-tree-commands.log").read_text(encoding="utf-8")
         self.assertIn("chat list", commands)
         self.assertNotIn("agent list", commands)
+
+    def test_receipt_projection_is_minimal_and_absence_stays_unknown(self) -> None:
+        scope = {
+            "schema_version": 1,
+            "agents": [],
+            "chats": [
+                {
+                    "chat_id": CHAT_ID,
+                    "agent": "fixture-agent",
+                    "agent_id": AGENT_ID,
+                    "authorization": "explicit_chat",
+                }
+            ],
+        }
+        valid_receipt = {
+            "contextDecision": {
+                "version": 1,
+                "effect": "constrained",
+                "summary": "  Kept one state source.  ",
+                "ignored": "do not persist",
+                "evidence": [
+                    {
+                        "repoUrl": "https://github.com/example/tree",
+                        "commit": "a" * 40,
+                        "nodePath": "system/architecture.md",
+                        "heading": "Decision",
+                        "ignored": "do not persist",
+                    }
+                ],
+            },
+            "other": "private metadata",
+        }
+        valid = self.export_scope(
+            scope,
+            "valid-receipt.jsonl",
+            valid_receipt,
+        )
+        self.assertEqual(0, valid.returncode, valid.stderr)
+        row = read_jsonl(self.artifacts / "valid-receipt.jsonl")[0]
+        receipt = row["messages"][0]["decision_receipt"]
+        self.assertEqual(
+            {"version", "effect", "summary", "evidence"},
+            set(receipt),
+        )
+        self.assertEqual(
+            {"repoUrl", "commit", "nodePath", "heading"},
+            set(receipt["evidence"][0]),
+        )
+        self.assertNotIn("context_decision_invalid", row["coverage_gaps"])
+        receipt_chat = json.loads(json.dumps(row))
+        receipt_chat["messages"][0]["content"] = "Kept one source."
+        write_jsonl(self.artifacts / "chats.jsonl", [receipt_chat])
+        receipt_only = self.collect("receipt-only-candidates.jsonl")
+        self.assertEqual(0, receipt_only.returncode, receipt_only.stderr)
+        receipt_candidate = read_jsonl(
+            self.artifacts / "receipt-only-candidates.jsonl"
+        )[0]
+        self.assertEqual("candidate", receipt_candidate["candidate_status"])
+        self.assertEqual(
+            [MESSAGE_ID],
+            [
+                message["message_id"]
+                for message in receipt_candidate["visible_choice_candidates"]
+            ],
+        )
+
+        malformed = self.export_scope(
+            scope,
+            "malformed-receipt.jsonl",
+            {"contextDecision": {"version": 1, "effect": ["not", "valid"]}},
+        )
+        self.assertEqual(0, malformed.returncode, malformed.stderr)
+        malformed_row = read_jsonl(self.artifacts / "malformed-receipt.jsonl")[0]
+        self.assertNotIn("decision_receipt", malformed_row["messages"][0])
+        self.assertIn(
+            "context_decision_invalid", malformed_row["coverage_gaps"]
+        )
+
+        for output_name, rejected_url in (
+            (
+                "credential-receipt.jsonl",
+                "https://secret-token@example.com/org/tree.git",
+            ),
+            ("local-receipt.jsonl", "/private/context-tree"),
+            ("non-repository-receipt.jsonl", "not-a-repository"),
+            ("short-loopback-receipt.jsonl", "https://127.1/org/tree"),
+            (
+                "integer-loopback-receipt.jsonl",
+                "https://2130706433/org/tree",
+            ),
+            ("unspecified-ipv4-receipt.jsonl", "https://0.0.0.0/org/tree"),
+            ("unspecified-ipv6-receipt.jsonl", "https://[::]/org/tree"),
+            (
+                "mapped-loopback-receipt.jsonl",
+                "https://[::ffff:127.0.0.1]/org/tree",
+            ),
+            (
+                "hex-integer-loopback-receipt.jsonl",
+                "https://0x7f000001/org/tree",
+            ),
+            (
+                "hex-scp-loopback-receipt.jsonl",
+                "git@0x7f000001:org/tree",
+            ),
+            (
+                "hex-components-loopback-receipt.jsonl",
+                "https://0x7f.0x0.0x0.0x1/org/tree",
+            ),
+            (
+                "encoded-loopback-receipt.jsonl",
+                "https://127%2e0%2e0%2e1/org/tree",
+            ),
+        ):
+            unsafe_receipt = json.loads(json.dumps(valid_receipt))
+            unsafe_receipt["contextDecision"]["evidence"][0][
+                "repoUrl"
+            ] = rejected_url
+            unsafe = self.export_scope(
+                scope,
+                output_name,
+                unsafe_receipt,
+            )
+            self.assertEqual(0, unsafe.returncode, unsafe.stderr)
+            unsafe_text = (self.artifacts / output_name).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn(rejected_url, unsafe_text)
+            unsafe_row = read_jsonl(self.artifacts / output_name)[0]
+            self.assertNotIn("decision_receipt", unsafe_row["messages"][0])
+            self.assertIn(
+                "context_decision_invalid", unsafe_row["coverage_gaps"]
+            )
+
+        absent = self.export_scope(scope, "absent-receipt.jsonl", None)
+        self.assertEqual(0, absent.returncode, absent.stderr)
+        absent_row = read_jsonl(self.artifacts / "absent-receipt.jsonl")[0]
+        self.assertNotIn("decision_receipt", absent_row["messages"][0])
+        self.assertNotIn("context_decision_invalid", absent_row["coverage_gaps"])
+
+        unbounded = self.export_scope(
+            scope,
+            "unbounded-window.jsonl",
+            None,
+            days=None,
+        )
+        self.assertEqual(0, unbounded.returncode, unbounded.stderr)
+        self.assertIsNone(
+            read_jsonl(self.artifacts / "unbounded-window.jsonl")[0]["window"]["start"]
+        )
 
     def write_chat_export(self) -> Path:
         path = self.artifacts / "chats.jsonl"
@@ -480,6 +656,104 @@ print(json.dumps({{"ok": True, "data": data}}))
             NOW,
             "--output",
             str(self.artifacts / output_name),
+        )
+
+    def task_judgment(
+        self,
+        candidate: dict[str, Any],
+        *,
+        task_id: str = "task-1",
+        message_id: str = MESSAGE_ID,
+        sampling_order: int = 1,
+        exposure_status: str = "confirmed",
+        read_ids: list[str] | None = None,
+        effects: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        selected_reads = (
+            read_ids
+            if read_ids is not None
+            else [candidate["reads"][0]["read_id"]]
+            if candidate["reads"]
+            else []
+        )
+        if effects is None:
+            effects = (
+                [
+                    {
+                        "effect": "constrained",
+                        "original_judgment": "verified",
+                        "rubric": {
+                            "real_read": True,
+                            "decision_bearing_normal_passage": True,
+                            "task_relevant": True,
+                            "read_before_choice": True,
+                            "influence_visible": True,
+                        },
+                        "read_ids": selected_reads,
+                        "choice_message_ids": [message_id],
+                        "outcome_anchor": message_id,
+                        "summary": "The Tree constraint prevented a second state table.",
+                    }
+                ]
+                if selected_reads and exposure_status == "confirmed"
+                else []
+            )
+        return {
+            "schema_version": 1,
+            "task_id": task_id,
+            "status": "clear",
+            "objective": "Choose one state source",
+            "object_scope": "state persistence",
+            "outcome": "Kept the existing authoritative state source.",
+            "task_type": "solution_design",
+            "started_at": "2026-07-22T10:00:00Z",
+            "ended_at": "2026-07-22T10:06:00Z",
+            "source_fragments": [
+                {
+                    "audit_id": candidate["audit_id"],
+                    "message_ids": [message_id],
+                }
+            ],
+            "sampling_order": sampling_order,
+            "saturation_signals": [],
+            "exposure": {
+                "status": exposure_status,
+                "read_ids": selected_reads,
+                "reason": (
+                    "Historical trace coverage cannot confirm a read."
+                    if exposure_status == "unresolved"
+                    else None
+                ),
+            },
+            "effects": effects,
+        }
+
+    def report(
+        self,
+        tasks: list[dict[str, Any]],
+        *,
+        candidates_name: str = "candidates.jsonl",
+        evidence_name: str = "evidence.jsonl",
+        report_name: str = "REPORT.md",
+    ) -> subprocess.CompletedProcess[str]:
+        task_path = self.artifacts / "task-judgments.jsonl"
+        write_jsonl(task_path, tasks)
+        return run_cli(
+            "report",
+            "--artifact-root",
+            str(self.artifacts),
+            "--agent-workspace",
+            f"{AGENT_ID}={self.workspace}",
+            "--candidates",
+            str(self.artifacts / candidates_name),
+            "--task-judgments",
+            str(task_path),
+            "--evidence-output",
+            str(self.artifacts / evidence_name),
+            "--report-output",
+            str(self.artifacts / report_name),
+            "--generated-at",
+            NOW,
         )
 
     def test_collect_prefilters_trace_and_isolates_single_tree_reads(self) -> None:
@@ -669,55 +943,24 @@ print(json.dumps({{"ok": True, "data": data}}))
             candidate["coverage_gaps"],
         )
 
-    def test_report_is_deterministic_and_rejects_overstated_probable(self) -> None:
+    def test_report_is_task_first_deterministic_and_rejects_invalid_effects(self) -> None:
         self.write_chat_export()
         self.write_trace_fixtures()
         result = self.collect("candidates.jsonl")
         self.assertEqual(0, result.returncode, result.stderr)
         candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
-        read_id = candidate["reads"][0]["read_id"]
-        judgments = self.artifacts / "judgments.jsonl"
-        judgment = {
-            "audit_id": f"{CHAT_ID}@{AGENT_ID}",
-            "result": "verified",
-            "effect": "constrained",
-            "rubric": {
-                "real_read": True,
-                "decision_bearing_normal_passage": True,
-                "task_relevant": True,
-                "read_before_choice": True,
-                "influence_visible": True,
-            },
-            "read_ids": [read_id],
-            "choice_message_ids": [MESSAGE_ID],
-            "decision_theme": "One authoritative state source",
-            "summary": "The Tree constraint prevented a second state table.",
-            "representative": True,
-            "coverage_gaps": [],
-        }
-        write_jsonl(judgments, [judgment])
+        task = self.task_judgment(candidate)
 
-        def report(evidence: str, markdown: str) -> subprocess.CompletedProcess[str]:
-            return run_cli(
-                "report",
-                "--artifact-root",
-                str(self.artifacts),
-                "--agent-workspace",
-                f"{AGENT_ID}={self.workspace}",
-                "--candidates",
-                str(self.artifacts / "candidates.jsonl"),
-                "--judgments",
-                str(judgments),
-                "--evidence-output",
-                str(self.artifacts / evidence),
-                "--report-output",
-                str(self.artifacts / markdown),
-                "--generated-at",
-                NOW,
-            )
-
-        first = report("evidence-one.jsonl", "REPORT-one.md")
-        second = report("evidence-two.jsonl", "REPORT-two.md")
+        first = self.report(
+            [task],
+            evidence_name="evidence-one.jsonl",
+            report_name="REPORT-one.md",
+        )
+        second = self.report(
+            [task],
+            evidence_name="evidence-two.jsonl",
+            report_name="REPORT-two.md",
+        )
         self.assertEqual(0, first.returncode, first.stderr)
         self.assertEqual(0, second.returncode, second.stderr)
         self.assertEqual(
@@ -729,36 +972,101 @@ print(json.dumps({{"ok": True, "data": data}}))
             (self.artifacts / "REPORT-two.md").read_bytes(),
         )
         markdown = (self.artifacts / "REPORT-one.md").read_text(encoding="utf-8")
-        self.assertIn("| verified | 1 |", markdown)
+        self.assertIn("| Clear Tasks | 1 |", markdown)
+        self.assertIn("| Confirmed exposure Tasks | 1 |", markdown)
+        self.assertIn("| Independent effects | 1 |", markdown)
         self.assertIn("| constrained | 1 |", markdown)
-        self.assertIn("not an eligible denominator", markdown)
-        self.assertIn("not an effective-read rate", markdown)
-
-        judgment["result"] = "probable"
-        write_jsonl(judgments, [judgment])
-        overstated = report("evidence-invalid.jsonl", "REPORT-invalid.md")
-        self.assertEqual(2, overstated.returncode)
-        self.assertIn("satisfies the verified bar", overstated.stderr)
-
-        judgment["result"] = "verified"
-        write_jsonl(judgments, [judgment])
-        candidate["reads"][0]["completed_at"] = None
-        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
-        missing_completion = report(
-            "evidence-missing-completion.jsonl",
-            "REPORT-missing-completion.md",
+        self.assertIn("definite **1**", markdown)
+        self.assertIn("not a global effectiveness rate", markdown)
+        evidence = read_jsonl(self.artifacts / "evidence-one.jsonl")
+        self.assertEqual(
+            "definite", evidence[0]["effects"][0]["derived_support"]
         )
-        self.assertEqual(2, missing_completion.returncode)
-        self.assertIn("completion timestamps", missing_completion.stderr)
 
+        duplicate_task = json.loads(json.dumps(task))
+        duplicate_task["effects"].append(
+            json.loads(json.dumps(duplicate_task["effects"][0]))
+        )
+        deduplicated = self.report(
+            [duplicate_task],
+            evidence_name="deduplicated-evidence.jsonl",
+            report_name="deduplicated-REPORT.md",
+        )
+        self.assertEqual(0, deduplicated.returncode, deduplicated.stderr)
+        deduplicated_report = (
+            self.artifacts / "deduplicated-REPORT.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("| Independent effects | 1 |", deduplicated_report)
+        self.assertIn("| solution_design | 0 | 1 | 0 | 0 | 1 |", deduplicated_report)
+
+        limited_task = json.loads(json.dumps(task))
+        limited_task["effects"][0]["original_judgment"] = "probable"
+        limited_task["effects"][0]["rubric"]["influence_visible"] = False
+        limited = self.report(
+            [limited_task],
+            evidence_name="limited-evidence.jsonl",
+            report_name="limited-REPORT.md",
+        )
+        self.assertEqual(0, limited.returncode, limited.stderr)
+        self.assertEqual(
+            "limited",
+            read_jsonl(self.artifacts / "limited-evidence.jsonl")[0]["effects"][0][
+                "derived_support"
+            ],
+        )
+
+        missing_rubric_task = json.loads(json.dumps(task))
+        missing_rubric_task["effects"][0].pop("rubric")
+        missing_rubric = self.report(
+            [missing_rubric_task],
+            evidence_name="missing-rubric-evidence.jsonl",
+            report_name="missing-rubric-REPORT.md",
+        )
+        self.assertEqual(2, missing_rubric.returncode)
+        self.assertIn(".rubric must be an object", missing_rubric.stderr)
+
+        overstated_probable_task = json.loads(json.dumps(task))
+        overstated_probable_task["effects"][0]["original_judgment"] = "probable"
+        overstated_probable = self.report(
+            [overstated_probable_task],
+            evidence_name="overstated-probable-evidence.jsonl",
+            report_name="overstated-probable-REPORT.md",
+        )
+        self.assertEqual(2, overstated_probable.returncode)
+        self.assertIn("influence_visible false or null", overstated_probable.stderr)
+
+        task["effects"][0]["effect"] = "informed"
+        invalid_effect = self.report(
+            [task],
+            evidence_name="evidence-invalid.jsonl",
+            report_name="REPORT-invalid.md",
+        )
+        self.assertEqual(2, invalid_effect.returncode)
+        self.assertIn(".effect must be one of", invalid_effect.stderr)
+
+        task["effects"][0]["effect"] = "constrained"
+        task["effects"][0].pop("outcome_anchor")
+        missing_anchor = self.report(
+            [task],
+            evidence_name="evidence-missing-anchor.jsonl",
+            report_name="REPORT-missing-anchor.md",
+        )
+        self.assertEqual(2, missing_anchor.returncode)
+        self.assertIn("outcome_anchor", missing_anchor.stderr)
+
+        task = self.task_judgment(candidate)
         candidate["reads"][0]["completed_at"] = "2026-07-22T10:02:01Z"
         candidate["tree_identity"] = "tree-tampered"
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
-        wrong_tree = report("evidence-wrong-tree.jsonl", "REPORT-wrong-tree.md")
+        wrong_tree = self.report(
+            [task],
+            evidence_name="evidence-wrong-tree.jsonl",
+            report_name="REPORT-wrong-tree.md",
+        )
         self.assertEqual(2, wrong_tree.returncode)
         self.assertIn("workspace-bound Tree", wrong_tree.stderr)
 
-    def test_report_handles_outside_candidate_without_representative_case(
+    def test_report_handles_excluded_task_without_representative_case(
         self,
     ) -> None:
         self.write_chat_export()
@@ -771,29 +1079,295 @@ print(json.dumps({{"ok": True, "data": data}}))
         candidate["reads"] = []
         candidate["visible_tree_mentions"] = []
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
-        write_jsonl(self.artifacts / "judgments.jsonl", [])
-
-        result = run_cli(
-            "report",
-            "--artifact-root",
-            str(self.artifacts),
-            "--agent-workspace",
-            f"{AGENT_ID}={self.workspace}",
-            "--candidates",
-            str(self.artifacts / "candidates.jsonl"),
-            "--judgments",
-            str(self.artifacts / "judgments.jsonl"),
-            "--evidence-output",
-            str(self.artifacts / "outside-evidence.jsonl"),
-            "--report-output",
-            str(self.artifacts / "outside-REPORT.md"),
-            "--generated-at",
-            NOW,
+        excluded = {
+            "schema_version": 1,
+            "task_id": "excluded-1",
+            "status": "excluded",
+            "objective": None,
+            "object_scope": "unknown",
+            "outcome": None,
+            "task_type": None,
+            "started_at": "2026-07-22T10:00:00Z",
+            "ended_at": "2026-07-22T10:06:00Z",
+            "source_fragments": [
+                {
+                    "audit_id": candidate["audit_id"],
+                    "message_ids": [MESSAGE_ID],
+                }
+            ],
+            "exclusion_reason": "No clear objective and outcome boundary.",
+        }
+        result = self.report(
+            [excluded],
+            evidence_name="outside-evidence.jsonl",
+            report_name="outside-REPORT.md",
         )
         self.assertEqual(0, result.returncode, result.stderr)
         report = (self.artifacts / "outside-REPORT.md").read_text(encoding="utf-8")
-        self.assertIn("No representative verified case was selected.", report)
-        self.assertIn("| Outside candidate set | 1 |", report)
+        self.assertIn("No representative effect Task was selected.", report)
+        self.assertIn("| Excluded Tasks | 1 |", report)
+
+    def test_one_chat_splits_into_two_tasks_and_duplicate_read_is_rejected(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        self.write_trace_fixtures()
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
+        candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        second_message = {
+            "message_id": SECOND_MESSAGE_ID,
+            "created_at": "2026-07-22T10:05:30Z",
+            "sender_id": AGENT_ID,
+            "sender_kind": None,
+            "content": "A separate coordination task completed.",
+        }
+        candidate["visible_messages"].append(second_message)
+        candidate["chat"]["message_count"] += 1
+        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
+
+        first_task = self.task_judgment(candidate)
+        second_task = self.task_judgment(
+            candidate,
+            task_id="task-2",
+            message_id=SECOND_MESSAGE_ID,
+            sampling_order=2,
+            exposure_status="unresolved",
+            read_ids=[],
+            effects=[],
+        )
+        second_task["objective"] = "Coordinate delivery"
+        second_task["object_scope"] = "handoff status"
+        second_task["outcome"] = "Recorded a separate coordination outcome."
+        second_task["task_type"] = "coordination_progress"
+
+        split = self.report(
+            [first_task, second_task],
+            evidence_name="split-evidence.jsonl",
+            report_name="split-REPORT.md",
+        )
+        self.assertEqual(0, split.returncode, split.stderr)
+        report = (self.artifacts / "split-REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("| Clear Tasks | 2 |", report)
+        self.assertIn("| Unresolved exposure Tasks | 1 |", report)
+        self.assertIn(
+            "Unresolved exposure is unknown coverage, not an unused/no-value denominator.",
+            report,
+        )
+
+        unresolved_with_read = json.loads(json.dumps(second_task))
+        unresolved_with_read["sampling_order"] = 1
+        unresolved_with_read["exposure"]["read_ids"] = [
+            candidate["reads"][0]["read_id"]
+        ]
+        unresolved_read_result = self.report(
+            [unresolved_with_read],
+            evidence_name="unresolved-read-evidence.jsonl",
+            report_name="unresolved-read-REPORT.md",
+        )
+        self.assertEqual(2, unresolved_read_result.returncode)
+        self.assertIn(
+            "must not contain read_ids", unresolved_read_result.stderr
+        )
+
+        unresolved_with_effect = json.loads(json.dumps(second_task))
+        unresolved_with_effect["sampling_order"] = 1
+        unresolved_with_effect["effects"] = [
+            json.loads(json.dumps(first_task["effects"][0]))
+        ]
+        unresolved_effect_result = self.report(
+            [unresolved_with_effect],
+            evidence_name="unresolved-effect-evidence.jsonl",
+            report_name="unresolved-effect-REPORT.md",
+        )
+        self.assertEqual(2, unresolved_effect_result.returncode)
+        self.assertIn(
+            "must not contain effects", unresolved_effect_result.stderr
+        )
+
+        duplicated = self.task_judgment(
+            candidate,
+            task_id="task-2",
+            message_id=SECOND_MESSAGE_ID,
+            sampling_order=2,
+            exposure_status="confirmed",
+            read_ids=[candidate["reads"][0]["read_id"]],
+            effects=[],
+        )
+        duplicate_result = self.report(
+            [first_task, duplicated],
+            evidence_name="duplicate-evidence.jsonl",
+            report_name="duplicate-REPORT.md",
+        )
+        self.assertEqual(2, duplicate_result.returncode)
+        self.assertIn("copied across incompatible Tasks", duplicate_result.stderr)
+
+    def test_cross_chat_task_requires_explicit_linkage(self) -> None:
+        self.write_chat_export()
+        self.write_trace_fixtures()
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
+        first = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        second = json.loads(json.dumps(first))
+        second["audit_id"] = f"{SECOND_CHAT_ID}@{AGENT_ID}"
+        second["chat"]["chat_id"] = SECOND_CHAT_ID
+        second["chat"]["title"] = "Follow-up Chat"
+        second["mapped_trace_files"] = []
+        second["reads"] = []
+        second["visible_messages"] = [
+            {
+                "message_id": SECOND_MESSAGE_ID,
+                "created_at": "2026-07-22T10:05:30Z",
+                "sender_id": AGENT_ID,
+                "sender_kind": None,
+                "content": "Follow-up delivery for the same objective.",
+            }
+        ]
+        second["visible_choice_candidates"] = []
+        second["visible_tree_mentions"] = []
+        second["chat"]["message_count"] = 1
+        write_jsonl(self.artifacts / "candidates.jsonl", [first, second])
+
+        task = self.task_judgment(first)
+        task["source_fragments"].append(
+            {
+                "audit_id": second["audit_id"],
+                "message_ids": [SECOND_MESSAGE_ID],
+            }
+        )
+        no_linkage = self.report(
+            [task],
+            evidence_name="no-linkage-evidence.jsonl",
+            report_name="no-linkage-REPORT.md",
+        )
+        self.assertEqual(2, no_linkage.returncode)
+        self.assertIn("requires one explicit shared linkage", no_linkage.stderr)
+
+        linkage = {
+            "kind": "same_objective_delivery",
+            "key": "deliver-one-state-source",
+        }
+        for fragment in task["source_fragments"]:
+            fragment["linkage"] = linkage
+        linked = self.report(
+            [task],
+            evidence_name="linked-evidence.jsonl",
+            report_name="linked-REPORT.md",
+        )
+        self.assertEqual(0, linked.returncode, linked.stderr)
+
+    def test_sampling_saturates_reproducibly_at_100_plus_20_plus_20(self) -> None:
+        self.write_chat_export()
+        self.write_trace_fixtures()
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
+        candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        source_candidate = json.loads(json.dumps(candidate))
+        candidate["candidate_status"] = "outside_candidate_set"
+        candidate["mapped_trace_files"] = []
+        candidate["reads"] = []
+        candidate["visible_choice_candidates"] = []
+        candidate["visible_tree_mentions"] = []
+        candidate["visible_messages"] = [
+            {
+                "message_id": f"sample-message-{index:03d}",
+                "created_at": "2026-07-22T10:05:00Z",
+                "sender_id": AGENT_ID,
+                "sender_kind": None,
+                "content": f"Sample task {index}",
+            }
+            for index in range(1, 141)
+        ]
+        candidate["chat"]["message_count"] = 140
+        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
+        tasks = [
+            self.task_judgment(
+                candidate,
+                task_id=f"sample-task-{index:03d}",
+                message_id=f"sample-message-{index:03d}",
+                sampling_order=index,
+                exposure_status="unresolved",
+                read_ids=[],
+                effects=[],
+            )
+            for index in range(1, 141)
+        ]
+        task_types = [
+            "solution_design",
+            "implementation_delivery",
+            "review_qa_debugging",
+            "research_explanation",
+            "coordination_progress",
+        ]
+        for index, task in enumerate(tasks):
+            task["task_type"] = task_types[index % len(task_types)]
+        result = self.report(
+            tasks,
+            evidence_name="saturation-evidence.jsonl",
+            report_name="saturation-REPORT.md",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        report = (self.artifacts / "saturation-REPORT.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Status: `saturated`; clear Tasks: **140**", report)
+        self.assertIn("| 101–120 | none |", report)
+        self.assertIn("| 121–140 | none |", report)
+
+        spurious_signal_tasks = json.loads(json.dumps(tasks))
+        spurious_signal_tasks[100]["saturation_signals"] = ["new_effect_type"]
+        spurious_signal = self.report(
+            spurious_signal_tasks,
+            evidence_name="spurious-signal-evidence.jsonl",
+            report_name="spurious-signal-REPORT.md",
+        )
+        self.assertEqual(2, spurious_signal.returncode)
+        self.assertIn("must not declare new_effect_type", spurious_signal.stderr)
+
+        effect_candidate = json.loads(json.dumps(candidate))
+        effect_candidate["candidate_status"] = "candidate"
+        effect_candidate["mapped_trace_files"] = source_candidate[
+            "mapped_trace_files"
+        ]
+        effect_candidate["reads"] = source_candidate["reads"]
+        effect_candidate["visible_messages"][120] = source_candidate[
+            "visible_choice_candidates"
+        ][0]
+        effect_candidate["visible_choice_candidates"] = source_candidate[
+            "visible_choice_candidates"
+        ]
+        write_jsonl(self.artifacts / "candidates.jsonl", [effect_candidate])
+
+        novel_tasks = json.loads(json.dumps(tasks))
+        novel_tasks[120] = self.task_judgment(
+            effect_candidate,
+            task_id="sample-task-121",
+            message_id=MESSAGE_ID,
+            sampling_order=121,
+        )
+        missing_signal = self.report(
+            novel_tasks,
+            evidence_name="missing-signal-evidence.jsonl",
+            report_name="missing-signal-REPORT.md",
+        )
+        self.assertEqual(2, missing_signal.returncode)
+        self.assertIn("must declare new_effect_type", missing_signal.stderr)
+
+        novel_tasks[120]["saturation_signals"] = ["new_effect_type"]
+        reset = self.report(
+            novel_tasks,
+            evidence_name="reset-evidence.jsonl",
+            report_name="reset-REPORT.md",
+        )
+        self.assertEqual(0, reset.returncode, reset.stderr)
+        reset_report = (self.artifacts / "reset-REPORT.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "Status: `continue_sampling`; clear Tasks: **140**",
+            reset_report,
+        )
+        self.assertIn("| 121–140 | new_effect_type |", reset_report)
 
     def test_symlinked_artifact_output_is_rejected(self) -> None:
         self.write_chat_export()

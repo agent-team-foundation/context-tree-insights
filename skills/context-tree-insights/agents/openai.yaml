@@ -1,6 +1,6 @@
 interface:
   display_name: "Context Tree Insights"
-  short_description: "Audit historical Context Tree decision influence"
-  default_prompt: "Use $context-tree-insights to audit how Context Tree influenced this Agent over the past seven days."
+  short_description: "Audit task-level Context Tree decision value"
+  default_prompt: "Use $context-tree-insights to run a task-first Context Tree value audit for this Agent with task-quota sampling."
 policy:
   allow_implicit_invocation: false
