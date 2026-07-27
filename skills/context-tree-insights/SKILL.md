@@ -155,15 +155,19 @@ different Tasks.
 Exposure is only:
 
 - `confirmed`, with attributable Task-window reads;
-- `unresolved`, with a reason explaining the evidence gap.
+- `unresolved`, with a reason explaining the evidence gap, no reads, and no
+  effects.
 
 Do not invent `not_observed`. Missing telemetry and receipt absence are
 unknown, not proof of non-use.
 
 Effects are only `confirmed`, `constrained`, `redirected`, or `conflicted`.
-Keep the original passage-level confidence as `verified` or `probable`. Do not
-use `informed`, `none`, or numeric weights. Every effect needs Task-window
-reads, later same-Agent choice messages, and an outcome anchor.
+Keep the original passage-level confidence as `verified` or `probable`, and
+persist its five checks: real read, decision-bearing normal passage, Task
+relevance, read before choice, and visible influence. `verified` requires all
+five; `probable` requires the first four while visible influence is false or
+unknown. Do not use `informed`, `none`, or numeric weights. Every effect needs
+Task-window reads, later same-Agent choice messages, and an outcome anchor.
 
 Do not write `support`. The reporter derives definite support from confirmed
 exposure plus verified judgment; every other valid positive effect is limited
@@ -177,8 +181,10 @@ two consecutive complete expansion batches add no new effect type, key
 counterexample, or conclusion change.
 
 Record `sampling_order` and any `saturation_signals` on each clear Task so the
-stop is reproducible. A partial run remains incomplete or continuing. Do not
-turn a time bound or Chat count into a sample-size rule.
+stop is reproducible. The reporter derives effect-type novelty from actual
+effects and rejects a missing or spurious `new_effect_type` annotation before
+counting an empty batch. A partial run remains incomplete or continuing. Do
+not turn a time bound or Chat count into a sample-size rule.
 
 ## Validate and report
 

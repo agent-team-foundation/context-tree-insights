@@ -66,6 +66,8 @@ Pass when:
 
 - the valid receipt is saved as the minimal v1 projection only;
 - unrelated message metadata and extra receipt fields are not copied;
+- credential-bearing URLs, local paths, loopback hosts, and non-repository
+  identities are omitted without echoing their raw values;
 - receipt absence stays unknown and adds no negative gap;
 - malformed receipt is omitted with `context_decision_invalid`;
 - no malformed receipt blocks the message, Chat export, or audit.
@@ -102,6 +104,7 @@ Pass when:
 
 - the first is `confirmed` with valid read IDs;
 - the second is `unresolved` with a reason;
+- unresolved exposure has no reads and no effects;
 - no `not_observed`, `unused`, or negative-value state is emitted;
 - reads outside the Task window or source Chats are rejected;
 - unresolved Tasks appear in coverage counts, never an unused denominator.
@@ -116,6 +119,9 @@ Pass when:
 - `informed`, `none`, unknown effects, and numeric weights are rejected;
 - every effect has Task exposure reads, later same-Agent choices, an outcome
   anchor, and a summary;
+- every effect persists the five passage-to-choice rubric checks; `verified`
+  requires all five while `probable` requires the first four and no visible
+  influence;
 - post-choice reads and out-of-window choices are rejected;
 - duplicate effect evidence does not inflate independent-effect totals;
 - input `support` is rejected;
@@ -137,6 +143,8 @@ Pass when:
 - the report records 100 + 20 + 20 and saturation at 140;
 - a new effect type, key counterexample, or conclusion change resets the
   consecutive-empty counter;
+- missing or spurious `new_effect_type` annotations are rejected against the
+  actual cumulative effect-type set;
 - rows beyond an already established saturation point are rejected;
 - an incomplete sample is reported as incomplete/continuing rather than a
   stable rate;

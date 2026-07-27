@@ -121,6 +121,9 @@ class RepositoryContractTests(unittest.TestCase):
         reference = (SKILL_ROOT / "references" / "evidence-schema.md").read_text(
             encoding="utf-8"
         )
+        task_reference = (
+            SKILL_ROOT / "references" / "task-analysis-schema.md"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("name: context-tree-insights", skill)
         self.assertIn("$context-tree-insights", skill)
@@ -130,7 +133,19 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("allow_implicit_invocation: false", openai)
         self.assertIn("explicit_agent", reference)
         self.assertIn("explicit_chat", reference)
-        self.assertNotIn("/Users/", "\n".join((skill, openai, reference)))
+        for rubric_key in (
+            "real_read",
+            "decision_bearing_normal_passage",
+            "task_relevant",
+            "read_before_choice",
+            "influence_visible",
+        ):
+            self.assertIn(rubric_key, task_reference)
+        self.assertIn("all five checks are `true`", task_reference)
+        self.assertIn("first four checks are `true`", task_reference)
+        self.assertNotIn(
+            "/Users/", "\n".join((skill, openai, reference, task_reference))
+        )
 
 
 class DeterministicPipelineTests(unittest.TestCase):
@@ -403,6 +418,34 @@ print(json.dumps({{"ok": True, "data": data}}))
             "context_decision_invalid", malformed_row["coverage_gaps"]
         )
 
+        for output_name, rejected_url in (
+            (
+                "credential-receipt.jsonl",
+                "https://secret-token@example.com/org/tree.git",
+            ),
+            ("local-receipt.jsonl", "/private/context-tree"),
+            ("non-repository-receipt.jsonl", "not-a-repository"),
+        ):
+            unsafe_receipt = json.loads(json.dumps(valid_receipt))
+            unsafe_receipt["contextDecision"]["evidence"][0][
+                "repoUrl"
+            ] = rejected_url
+            unsafe = self.export_scope(
+                scope,
+                output_name,
+                unsafe_receipt,
+            )
+            self.assertEqual(0, unsafe.returncode, unsafe.stderr)
+            unsafe_text = (self.artifacts / output_name).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn(rejected_url, unsafe_text)
+            unsafe_row = read_jsonl(self.artifacts / output_name)[0]
+            self.assertNotIn("decision_receipt", unsafe_row["messages"][0])
+            self.assertIn(
+                "context_decision_invalid", unsafe_row["coverage_gaps"]
+            )
+
         absent = self.export_scope(scope, "absent-receipt.jsonl", None)
         self.assertEqual(0, absent.returncode, absent.stderr)
         absent_row = read_jsonl(self.artifacts / "absent-receipt.jsonl")[0]
@@ -612,6 +655,13 @@ print(json.dumps({{"ok": True, "data": data}}))
                     {
                         "effect": "constrained",
                         "original_judgment": "verified",
+                        "rubric": {
+                            "real_read": True,
+                            "decision_bearing_normal_passage": True,
+                            "task_relevant": True,
+                            "read_before_choice": True,
+                            "influence_visible": True,
+                        },
                         "read_ids": selected_reads,
                         "choice_message_ids": [message_id],
                         "outcome_anchor": message_id,
@@ -924,6 +974,7 @@ print(json.dumps({{"ok": True, "data": data}}))
 
         limited_task = json.loads(json.dumps(task))
         limited_task["effects"][0]["original_judgment"] = "probable"
+        limited_task["effects"][0]["rubric"]["influence_visible"] = False
         limited = self.report(
             [limited_task],
             evidence_name="limited-evidence.jsonl",
@@ -936,6 +987,26 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "derived_support"
             ],
         )
+
+        missing_rubric_task = json.loads(json.dumps(task))
+        missing_rubric_task["effects"][0].pop("rubric")
+        missing_rubric = self.report(
+            [missing_rubric_task],
+            evidence_name="missing-rubric-evidence.jsonl",
+            report_name="missing-rubric-REPORT.md",
+        )
+        self.assertEqual(2, missing_rubric.returncode)
+        self.assertIn(".rubric must be an object", missing_rubric.stderr)
+
+        overstated_probable_task = json.loads(json.dumps(task))
+        overstated_probable_task["effects"][0]["original_judgment"] = "probable"
+        overstated_probable = self.report(
+            [overstated_probable_task],
+            evidence_name="overstated-probable-evidence.jsonl",
+            report_name="overstated-probable-REPORT.md",
+        )
+        self.assertEqual(2, overstated_probable.returncode)
+        self.assertIn("influence_visible false or null", overstated_probable.stderr)
 
         task["effects"][0]["effect"] = "informed"
         invalid_effect = self.report(
@@ -1057,6 +1128,36 @@ print(json.dumps({{"ok": True, "data": data}}))
             report,
         )
 
+        unresolved_with_read = json.loads(json.dumps(second_task))
+        unresolved_with_read["sampling_order"] = 1
+        unresolved_with_read["exposure"]["read_ids"] = [
+            candidate["reads"][0]["read_id"]
+        ]
+        unresolved_read_result = self.report(
+            [unresolved_with_read],
+            evidence_name="unresolved-read-evidence.jsonl",
+            report_name="unresolved-read-REPORT.md",
+        )
+        self.assertEqual(2, unresolved_read_result.returncode)
+        self.assertIn(
+            "must not contain read_ids", unresolved_read_result.stderr
+        )
+
+        unresolved_with_effect = json.loads(json.dumps(second_task))
+        unresolved_with_effect["sampling_order"] = 1
+        unresolved_with_effect["effects"] = [
+            json.loads(json.dumps(first_task["effects"][0]))
+        ]
+        unresolved_effect_result = self.report(
+            [unresolved_with_effect],
+            evidence_name="unresolved-effect-evidence.jsonl",
+            report_name="unresolved-effect-REPORT.md",
+        )
+        self.assertEqual(2, unresolved_effect_result.returncode)
+        self.assertIn(
+            "must not contain effects", unresolved_effect_result.stderr
+        )
+
         duplicated = self.task_judgment(
             candidate,
             task_id="task-2",
@@ -1134,6 +1235,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         collected = self.collect("candidates.jsonl")
         self.assertEqual(0, collected.returncode, collected.stderr)
         candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        source_candidate = json.loads(json.dumps(candidate))
         candidate["candidate_status"] = "outside_candidate_set"
         candidate["mapped_trace_files"] = []
         candidate["reads"] = []
@@ -1184,6 +1286,61 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertIn("Status: `saturated`; clear Tasks: **140**", report)
         self.assertIn("| 101–120 | none |", report)
         self.assertIn("| 121–140 | none |", report)
+
+        spurious_signal_tasks = json.loads(json.dumps(tasks))
+        spurious_signal_tasks[100]["saturation_signals"] = ["new_effect_type"]
+        spurious_signal = self.report(
+            spurious_signal_tasks,
+            evidence_name="spurious-signal-evidence.jsonl",
+            report_name="spurious-signal-REPORT.md",
+        )
+        self.assertEqual(2, spurious_signal.returncode)
+        self.assertIn("must not declare new_effect_type", spurious_signal.stderr)
+
+        effect_candidate = json.loads(json.dumps(candidate))
+        effect_candidate["candidate_status"] = "candidate"
+        effect_candidate["mapped_trace_files"] = source_candidate[
+            "mapped_trace_files"
+        ]
+        effect_candidate["reads"] = source_candidate["reads"]
+        effect_candidate["visible_messages"][120] = source_candidate[
+            "visible_choice_candidates"
+        ][0]
+        effect_candidate["visible_choice_candidates"] = source_candidate[
+            "visible_choice_candidates"
+        ]
+        write_jsonl(self.artifacts / "candidates.jsonl", [effect_candidate])
+
+        novel_tasks = json.loads(json.dumps(tasks))
+        novel_tasks[120] = self.task_judgment(
+            effect_candidate,
+            task_id="sample-task-121",
+            message_id=MESSAGE_ID,
+            sampling_order=121,
+        )
+        missing_signal = self.report(
+            novel_tasks,
+            evidence_name="missing-signal-evidence.jsonl",
+            report_name="missing-signal-REPORT.md",
+        )
+        self.assertEqual(2, missing_signal.returncode)
+        self.assertIn("must declare new_effect_type", missing_signal.stderr)
+
+        novel_tasks[120]["saturation_signals"] = ["new_effect_type"]
+        reset = self.report(
+            novel_tasks,
+            evidence_name="reset-evidence.jsonl",
+            report_name="reset-REPORT.md",
+        )
+        self.assertEqual(0, reset.returncode, reset.stderr)
+        reset_report = (self.artifacts / "reset-REPORT.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "Status: `continue_sampling`; clear Tasks: **140**",
+            reset_report,
+        )
+        self.assertIn("| 121–140 | new_effect_type |", reset_report)
 
     def test_symlinked_artifact_output_is_rejected(self) -> None:
         self.write_chat_export()

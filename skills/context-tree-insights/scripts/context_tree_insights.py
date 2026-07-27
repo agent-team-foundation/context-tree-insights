@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
+from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
 AUTHORIZATION_VALUES = {"explicit_agent", "explicit_chat"}
@@ -46,6 +48,13 @@ SATURATION_SIGNAL_VALUES = {
     "key_counterexample",
     "conclusion_change",
 }
+RUBRIC_KEYS = (
+    "real_read",
+    "decision_bearing_normal_passage",
+    "task_relevant",
+    "read_before_choice",
+    "influence_visible",
+)
 TRACE_PREFLIGHT_MAX_BYTES = 512 * 1024
 TRACE_PREFLIGHT_MAX_LINES = 512
 PURE_READ_COMMANDS = {"bat", "cat", "head", "nl", "sed", "tail"}
@@ -574,6 +583,62 @@ def paginated_items(binary: str, arguments: Sequence[str], *, agent: str | None)
     return items
 
 
+def supported_repository_identity(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    repository = value.strip()
+    if (
+        not repository
+        or any(character.isspace() or ord(character) < 32 for character in repository)
+        or repository.startswith(("/", "./", "../", "~"))
+    ):
+        return None
+
+    scp_match = re.fullmatch(
+        r"git@(?P<host>[A-Za-z0-9.-]+):(?P<path>[^?#]+)",
+        repository,
+    )
+    if scp_match is not None:
+        host = scp_match.group("host")
+        path = scp_match.group("path")
+    else:
+        try:
+            parsed = urlsplit(repository)
+            parsed_host = parsed.hostname
+            parsed.port
+        except ValueError:
+            return None
+        if parsed.scheme not in {"http", "https", "ssh", "git"}:
+            return None
+        if parsed.query or parsed.fragment or not parsed_host:
+            return None
+        if parsed.password is not None:
+            return None
+        if parsed.scheme in {"http", "https", "git"} and parsed.username is not None:
+            return None
+        if parsed.scheme == "ssh" and parsed.username not in {None, "git"}:
+            return None
+        host = parsed_host
+        path = parsed.path.lstrip("/")
+
+    lowered_host = host.lower().rstrip(".")
+    if lowered_host == "localhost":
+        return None
+    try:
+        address = ipaddress.ip_address(lowered_host)
+    except ValueError:
+        address = None
+    if address is not None and address.is_loopback:
+        return None
+    path_parts = path.removesuffix(".git").split("/")
+    if (
+        len(path_parts) < 2
+        or any(part in {"", ".", ".."} for part in path_parts)
+    ):
+        return None
+    return repository
+
+
 def normalize_context_decision(value: Any) -> dict[str, Any] | None:
     """Return the minimal valid contextDecision v1 projection.
 
@@ -599,14 +664,13 @@ def normalize_context_decision(value: Any) -> dict[str, Any] | None:
     for item in evidence:
         if not isinstance(item, Mapping):
             return None
-        repo_url = item.get("repoUrl")
+        repo_url = supported_repository_identity(item.get("repoUrl"))
         commit = item.get("commit")
         node_path = item.get("nodePath")
         heading = item.get("heading")
         normalized_node_path = node_path.strip() if isinstance(node_path, str) else ""
         if (
-            not isinstance(repo_url, str)
-            or not repo_url.strip()
+            repo_url is None
             or not isinstance(commit, str)
             or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None
             or not normalized_node_path
@@ -618,7 +682,7 @@ def normalize_context_decision(value: Any) -> dict[str, Any] | None:
         ):
             return None
         projected = {
-            "repoUrl": repo_url.strip(),
+            "repoUrl": repo_url,
             "commit": commit.lower(),
             "nodePath": normalized_node_path,
         }
@@ -1674,6 +1738,35 @@ def optional_text(value: Any, *, field: str) -> str | None:
     return value.strip() or None
 
 
+def validate_effect_rubric(
+    value: Any,
+    *,
+    field: str,
+    original_judgment: str,
+) -> dict[str, bool | None]:
+    if not isinstance(value, dict):
+        raise AuditError(f"{field} must be an object.")
+    rubric: dict[str, bool | None] = {}
+    for key in RUBRIC_KEYS:
+        item = value.get(key)
+        if item is not True and item is not False and item is not None:
+            raise AuditError(f"{field}.{key} must be true, false, or null.")
+        rubric[key] = item
+    if original_judgment == "verified":
+        if any(rubric[key] is not True for key in RUBRIC_KEYS):
+            raise AuditError(
+                f"{field} must make all five checks true for verified."
+            )
+    elif (
+        any(rubric[key] is not True for key in RUBRIC_KEYS[:4])
+        or rubric["influence_visible"] is True
+    ):
+        raise AuditError(
+            f"{field} requires the first four checks true and influence_visible false or null for probable."
+        )
+    return rubric
+
+
 def load_task_judgments(path: Path) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     task_ids: set[str] = set()
@@ -1825,6 +1918,10 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             raise AuditError(f"Confirmed exposure for task[{task_id}] requires read_ids.")
         if exposure_status == "unresolved" and reason is None:
             raise AuditError(f"Unresolved exposure for task[{task_id}] requires a reason.")
+        if exposure_status == "unresolved" and exposure_reads:
+            raise AuditError(
+                f"Unresolved exposure for task[{task_id}] must not contain read_ids."
+            )
         normalized["exposure"] = {
             "status": exposure_status,
             "read_ids": exposure_reads,
@@ -1855,6 +1952,11 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
                 raise AuditError(
                     f"{field}.original_judgment must be verified or probable."
                 )
+            rubric = validate_effect_rubric(
+                effect.get("rubric"),
+                field=f"{field}.rubric",
+                original_judgment=original_judgment,
+            )
             effect_reads = string_id_list(
                 effect.get("read_ids"), field=f"{field}.read_ids"
             )
@@ -1868,6 +1970,7 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
                 {
                     "effect": effect_value,
                     "original_judgment": original_judgment,
+                    "rubric": rubric,
                     "read_ids": effect_reads,
                     "choice_message_ids": choice_ids,
                     "outcome_anchor": require_string(
@@ -1877,6 +1980,10 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
                 }
             )
         normalized["effects"] = normalized_effects
+        if exposure_status == "unresolved" and normalized_effects:
+            raise AuditError(
+                f"Unresolved exposure for task[{task_id}] must not contain effects."
+            )
         tasks.append(normalized)
     return tasks
 
@@ -2063,32 +2170,7 @@ def validate_task_refs(
         raise AuditError(
             "Clear Task sampling_order values must be unique and contiguous from 1."
         )
-
-    ordered_clear = sorted(
-        (task for task in tasks if task["status"] == "clear"),
-        key=lambda task: task["sampling_order"],
-    )
-    initial_task_types = {
-        task["task_type"] for task in ordered_clear[:100]
-    }
-    type_coverage_complete = TASK_TYPE_VALUES.issubset(initial_task_types)
-    empty_expansions = 0
-    stop_at: int | None = None
-    for offset in range(100, len(ordered_clear), 20):
-        batch = ordered_clear[offset : offset + 20]
-        if len(batch) < 20:
-            break
-        if any(task["saturation_signals"] for task in batch):
-            empty_expansions = 0
-        else:
-            empty_expansions += 1
-        if empty_expansions == 2 and type_coverage_complete:
-            stop_at = offset + 20
-            break
-    if stop_at is not None and len(ordered_clear) > stop_at:
-        raise AuditError(
-            f"Task sample continued past reproducible saturation at {stop_at} clear Tasks."
-        )
+    sampling_summary(tasks)
 
 
 def table_row(columns: Sequence[Any]) -> str:
@@ -2145,6 +2227,11 @@ def sampling_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     initial_task_types = {task["task_type"] for task in clear[:100]}
     missing_task_types = sorted(TASK_TYPE_VALUES - initial_task_types)
     type_coverage_complete = not missing_task_types and len(clear) >= 100
+    cumulative_effect_types = {
+        effect["effect"]
+        for task in clear[:100]
+        for effect in task["effects"]
+    }
     consecutive_empty = 0
     saturated_at: int | None = None
     for offset in range(100, len(clear), 20):
@@ -2158,12 +2245,33 @@ def sampling_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 for signal in task.get("saturation_signals", [])
             }
         )
-        consecutive_empty = consecutive_empty + 1 if not signals else 0
+        batch_effect_types = {
+            effect["effect"] for task in batch for effect in task["effects"]
+        }
+        new_effect_types = sorted(batch_effect_types - cumulative_effect_types)
+        declares_new_effect_type = "new_effect_type" in signals
+        if bool(new_effect_types) != declares_new_effect_type:
+            expectation = (
+                "must declare new_effect_type"
+                if new_effect_types
+                else "must not declare new_effect_type"
+            )
+            raise AuditError(
+                f"Sampling expansion {offset + 1}-{offset + 20} {expectation}; "
+                "the annotation disagrees with observed effect types."
+            )
+        cumulative_effect_types.update(batch_effect_types)
+        non_effect_signals = {
+            signal for signal in signals if signal != "new_effect_type"
+        }
+        batch_has_novelty = bool(new_effect_types or non_effect_signals)
+        consecutive_empty = 0 if batch_has_novelty else consecutive_empty + 1
         expansions.append(
             {
                 "start": offset + 1,
                 "end": offset + 20,
                 "signals": signals,
+                "new_effect_types": new_effect_types,
             }
         )
         if consecutive_empty == 2 and type_coverage_complete:
@@ -2177,6 +2285,10 @@ def sampling_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         status = "saturated"
     else:
         status = "continue_sampling"
+    if saturated_at is not None and len(clear) > saturated_at:
+        raise AuditError(
+            f"Task sample continued past reproducible saturation at {saturated_at} clear Tasks."
+        )
     return {
         "clear_tasks": len(clear),
         "status": status,

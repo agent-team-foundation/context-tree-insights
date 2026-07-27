@@ -37,6 +37,13 @@ split tasks, exposures, and effects into separate artifact files.
     {
       "effect": "constrained",
       "original_judgment": "verified",
+      "rubric": {
+        "real_read": true,
+        "decision_bearing_normal_passage": true,
+        "task_relevant": true,
+        "read_before_choice": true,
+        "influence_visible": true
+      },
       "read_ids": ["read-id"],
       "choice_message_ids": ["message-id"],
       "outcome_anchor": "message-id-or-stable-outcome-reference",
@@ -61,6 +68,10 @@ Allowed `task_type` values are:
 `sampling_order` is the acquisition order among clear Tasks and must be
 unique and contiguous from 1. `saturation_signals` may contain only
 `new_effect_type`, `key_counterexample`, or `conclusion_change`.
+`new_effect_type` is not a free-form annotation: every complete expansion
+batch must declare it exactly when that batch contains an effect type not seen
+in the cumulative earlier sample. Missing or spurious declarations are
+rejected.
 
 ## Excluded Task
 
@@ -124,7 +135,7 @@ Exposure has only two states:
 
 - `confirmed` — one or more attributable `read_ids` are available;
 - `unresolved` — historical evidence cannot resolve exposure; include a
-  concrete `reason`.
+  concrete `reason`, keep `read_ids` empty, and keep `effects` empty.
 
 Do not use `not_observed`. Missing telemetry and an absent decision receipt are
 unknown, not evidence that the Tree was not read or did not matter. An
@@ -143,10 +154,26 @@ Effects use only:
 - `conflicted`.
 
 Do not use `informed`, `none`, or a numeric weight. `original_judgment` reuses
-`verified` and `probable`. Every effect requires read IDs, later same-Agent
-choice message IDs, a non-empty outcome anchor, and a concise summary. Effect
-reads must be included in the Task exposure and must complete no later than the
-earliest cited choice.
+`verified` and `probable`, and every effect persists the five checks that make
+that classification reproducible:
+
+- `real_read`: a successful tool result contains the cited Tree passage;
+- `decision_bearing_normal_passage`: the passage states a current decision,
+  constraint, rationale, or cross-domain relationship in normal content;
+- `task_relevant`: the passage can affect a concrete choice in this Task;
+- `read_before_choice`: every cited read completes before the earliest cited
+  choice;
+- `influence_visible`: a later visible same-Agent message shows the passage
+  confirmed, constrained, redirected, or conflicted with the choice.
+
+Use `verified` only when all five checks are `true`. Use `probable` only when
+the first four checks are `true` and `influence_visible` is `false` or `null`
+because the aligned outcome does not expose complete causality. Do not soften a
+failed real-read, normal-passage, relevance, or timing check into `probable`.
+
+Every effect requires read IDs, later same-Agent choice message IDs, a
+non-empty outcome anchor, and a concise summary. Effect reads must be included
+in the Task exposure and must complete no later than the earliest cited choice.
 
 The same read or choice cannot be copied across different reconstructed Tasks.
 The reporter derives an independent effect identity from effect type, reads,
@@ -171,6 +198,12 @@ Start with at least 100 clear Tasks and represent all five task types in that
 initial cohort. Then expand by 20 clear Tasks at a time. Stop only after two
 consecutive complete expansion batches contain no
 `new_effect_type`, `key_counterexample`, or `conclusion_change`.
+
+The reporter derives new effect types from the Task effects and cross-validates
+the batch annotation before counting an empty batch. A newly observed effect
+type therefore resets the consecutive-empty counter even when an auditor
+forgets the annotation; the missing annotation is rejected rather than silently
+declaring saturation.
 
 A partial run is reported as incomplete or continuing; it is not silently
 promoted to a stable rate. If two empty expansion batches establish saturation,

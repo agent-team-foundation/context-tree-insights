@@ -23,7 +23,8 @@ First Tree Codex Agent, one managed workspace, and one bound Tree at a time.
 - Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
   coverage gaps.
 - A valid `contextDecision` is projected minimally. Absence is unknown;
-  malformed metadata is diagnostic and never blocks Chat export.
+  malformed metadata is diagnostic and never blocks Chat export; repository
+  identities must be remote and credential-free.
 - A Tree read is evidence of explicit activity, not semantic use or causal
   value by itself.
 - Unresolved exposure is never counted as unused.
@@ -78,7 +79,8 @@ The Skill orchestrates four stages:
 2. `collect` maps authorized Chats to local Codex traces and reconstructs
    isolated Tree reads plus visible choice candidates.
 3. The Agent reconstructs Tasks, Task-window exposure, effects, and sampling
-   signals in `task-judgments.jsonl`.
+   signals in `task-judgments.jsonl`, including the reproducible five-check
+   rubric behind each `verified` or `probable` effect.
 4. `report` validates source ownership, windows, cross-Chat linkage,
    deduplication, sampling, and aggregate conservation, then creates
    `evidence.jsonl` and `REPORT.md`.
