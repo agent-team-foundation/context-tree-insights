@@ -32,11 +32,12 @@ producer-owned local binding loader—the same mapping used by later
 `chat --agent` commands. The local Agent listing exists only in memory for this
 identity preflight; it is not persisted, analyzed, or used to broaden consent.
 Workspace `displayName` is a mutable human-facing label and is never a CLI
-selector or authorization identity. The consumer accepts the current 1-64
-character Agent-name grammar and the same grammar up to 100 characters for
-still-runnable grandfathered Agent names; it does not reinterpret arbitrary
-filesystem text as a selector or parse the local YAML mirror independently of
-its producer.
+selector or authorization identity. The consumer accepts both the current
+1-64 character Agent-name grammar and the complete historical
+`[a-z0-9_-]{1,100}` grammar for still-runnable grandfathered Agent names,
+including legacy names with a leading `-` or `_`. It does not reinterpret
+arbitrary filesystem text as a selector or parse the local YAML mirror
+independently of its producer.
 
 ## Chat export
 

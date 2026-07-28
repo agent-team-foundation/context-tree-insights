@@ -32,9 +32,10 @@ Pass when:
   workspace `displayName` differs;
 - a missing or malformed runtime slug, or a runtime/workspace UUID mismatch,
   fails closed;
-- current underscore/trailing-separator Agent names and still-runnable
-  grandfathered names remain selectable, while names outside the producer
-  grammar fail closed;
+- current underscore/trailing-separator Agent names and the complete
+  historical `[a-z0-9_-]{1,100}` grammar, including leading `-` / `_`, remain
+  selectable for still-runnable grandfathered Agents, while names outside the
+  producer grammar fail closed;
 - the First Tree CLI's producer-owned local binding resolution of the runtime
   slug must return the same UUID as later `chat --agent` calls; the Skill does
   not reimplement the local YAML parser or persist/enumerate other Agents into

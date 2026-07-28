@@ -75,11 +75,12 @@ MIXED_OR_MUTATING_TOOLS = {
 }
 _ARTIFACT_LEXICAL_ROOTS: dict[Path, Path] = {}
 UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-# Current Agent names are 1-64 lowercase ASCII slug characters. First Tree
-# still runs older, grandfathered 1-100 character names, so an audit must not
-# reject an already-bound runtime merely because it predates the tighter
-# create-time limit.
-AGENT_SLUG_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
+# Current Agent names use the tighter 1-64 grammar with an alphanumeric first
+# character. First Tree still runs older names created under
+# `[a-z0-9_-]{1,100}`, including leading separators, so an audit must accept
+# that complete path-safe grandfathered grammar and let the producer-owned
+# local binding UUID check establish the exact identity.
+AGENT_SLUG_PATTERN = re.compile(r"[a-z0-9_-]{1,100}")
 CHAT_CONTEXT_PATTERN = re.compile(
     r"<first-tree-current-chat-context[\s\S]*?</first-tree-current-chat-context>",
     re.UNICODE,
@@ -631,7 +632,11 @@ def paginated_items(binary: str, arguments: Sequence[str], *, agent: str | None)
         if cursor is not None:
             page_args.extend(["--cursor", cursor])
         if agent is not None:
-            page_args.extend(["--agent", agent])
+            # The historical Agent-name grammar permits leading `-`, including
+            # option-looking names such as `--json`. The `--option=value`
+            # form keeps the selector bound to this argument instead of
+            # allowing the CLI parser to reinterpret it as another option.
+            page_args.append(f"--agent={agent}")
         data = run_first_tree_json(binary, page_args)
         page_items = data.get("items")
         if not isinstance(page_items, list):

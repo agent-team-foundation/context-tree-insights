@@ -409,7 +409,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         commands = (self.root / "first-tree-commands.log").read_text(encoding="utf-8")
         self.assertIn("agent list", commands)
         self.assertIn("chat list", commands)
-        self.assertIn("--agent fixture-agent", commands)
+        self.assertIn("--agent=fixture-agent", commands)
         self.assertNotIn("Fixture Agent", commands)
 
     def test_runtime_slug_and_uuid_bind_the_cli_selector(self) -> None:
@@ -446,6 +446,12 @@ print(json.dumps({{"ok": True, "data": data}}))
             "fixture_agent",
             "fixture-agent-",
             "fixture-agent_",
+            "-fixture-agent",
+            "_fixture-agent",
+            "-",
+            "_",
+            "--json",
+            "--help",
             "a" * 64,
             "a" * 100,
         ):
@@ -458,9 +464,14 @@ print(json.dumps({{"ok": True, "data": data}}))
             )
             self.assertEqual(0, accepted.returncode, accepted.stderr)
 
+        commands = (self.root / "first-tree-commands.log").read_text(encoding="utf-8")
+        self.assertIn("--agent=--json", commands)
+        self.assertIn("--agent=--help", commands)
+        self.assertNotIn("--agent --json", commands)
+        self.assertNotIn("--agent --help", commands)
+
         for invalid_slug_value in (
             "Fixture Agent",
-            "-fixture-agent",
             "fixture.agent",
             "a" * 101,
         ):
