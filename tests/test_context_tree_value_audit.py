@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -12,8 +14,11 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_ROOT = ROOT / "skills" / "context-tree-insights"
-SCRIPT = SKILL_ROOT / "scripts" / "context_tree_insights.py"
+SKILL_ROOT = ROOT / "skills" / "context-tree-value-audit"
+CLAUDE_SKILL_ROOT = (
+    ROOT / "projections" / "claude" / "context-tree-value-audit"
+)
+SCRIPT = SKILL_ROOT / "scripts" / "context_tree_value_audit.py"
 AGENT_ID = "55555555-5555-4555-8555-555555555555"
 OTHER_AGENT_ID = "99999999-9999-4999-8999-999999999999"
 CHAT_ID = "11111111-1111-4111-8111-111111111111"
@@ -35,6 +40,7 @@ def write_jsonl(path: Path, rows: list[Any]) -> None:
         "".join(f"{json.dumps(row, sort_keys=True)}\n" for row in rows),
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -49,14 +55,22 @@ def run_cli(
     *arguments: str,
     runtime_agent_id: str | None = AGENT_ID,
     runtime_agent_slug: str | None = "fixture-agent",
+    runtime_provider: str | None = "codex",
     first_tree_json: str | None = None,
+    environment_overrides: dict[str, str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     for key, value in (
         ("FIRST_TREE_AGENT_ID", runtime_agent_id),
         ("FIRST_TREE_AGENT_SLUG", runtime_agent_slug),
+        ("FIRST_TREE_PROVIDER", runtime_provider),
         ("FIRST_TREE_JSON", first_tree_json),
     ):
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = value
+    for key, value in (environment_overrides or {}).items():
         if value is None:
             environment.pop(key, None)
         else:
@@ -137,6 +151,7 @@ def context_mirror_row(chat_id: str) -> dict[str, Any]:
 
 class RepositoryContractTests(unittest.TestCase):
     def test_skill_is_an_explicit_only_umbrella(self) -> None:
+        self.assertFalse((ROOT / "skills" / "context-tree-insights").exists())
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         openai = (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
         reference = (SKILL_ROOT / "references" / "evidence-schema.md").read_text(
@@ -145,15 +160,21 @@ class RepositoryContractTests(unittest.TestCase):
         task_reference = (
             SKILL_ROOT / "references" / "task-analysis-schema.md"
         ).read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         version = (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
-        self.assertIn("name: context-tree-insights", skill)
-        self.assertIn("$context-tree-insights", skill)
+        self.assertIn("name: context-tree-value-audit", skill)
+        self.assertIn("$context-tree-value-audit", skill)
         self.assertIn("manual and read-only", skill)
         self.assertIn("Do not trigger from an ordinary task", skill)
         self.assertIn("all authorized Chats are not an eligible", skill)
         self.assertIn("accepted_read_only_composite", skill)
         self.assertIn("N/A / pending", skill)
+        claude_skill = (CLAUDE_SKILL_ROOT / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("disable-model-invocation: true", claude_skill)
+        self.assertNotIn("disable-model-invocation", skill)
         self.assertIn("allow_implicit_invocation: false", openai)
         self.assertIn("explicit_agent", reference)
         self.assertIn("explicit_chat", reference)
@@ -170,15 +191,99 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("in_window_tree_read_attempts", reference)
         self.assertIn("unresolved_opaque", reference)
         self.assertIn("collector failure never reverses", task_reference)
-        self.assertEqual("0.2.3", version)
+        self.assertEqual("0.2.4", version)
+        self.assertIn(".skill-quarantine/", readme)
+        self.assertIn("diff -qr", readme)
+        self.assertIn("rollback", readme)
         self.assertNotIn(
             "/Users/", "\n".join((skill, openai, reference, task_reference))
         )
 
+    def test_install_layout_supports_codex_and_claude_upgrade_and_rollback(
+        self,
+    ) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(
+            'projections/claude/context-tree-value-audit',
+            readme,
+        )
+        self.assertIn(
+            '../../.agents/skills/context-tree-insights',
+            readme,
+        )
+        with tempfile.TemporaryDirectory(prefix="context-tree-value-audit-install-") as raw:
+            root = Path(raw)
+
+            fresh = root / "fresh"
+            fresh_agents = fresh / ".agents" / "skills"
+            fresh_claude = fresh / ".claude" / "skills"
+            fresh_agents.mkdir(parents=True)
+            fresh_claude.mkdir(parents=True)
+            fresh_payload = fresh_agents / "context-tree-value-audit"
+            fresh_projection = fresh_claude / "context-tree-value-audit"
+            shutil.copytree(SKILL_ROOT, fresh_payload)
+            shutil.copytree(CLAUDE_SKILL_ROOT, fresh_projection)
+            self.assertTrue((fresh_payload / "SKILL.md").is_file())
+            self.assertTrue((fresh_projection / "SKILL.md").is_file())
+            self.assertEqual(
+                (fresh_payload / "SKILL.md").resolve(),
+                (
+                    fresh_projection
+                    / "../../../.agents/skills/context-tree-value-audit/SKILL.md"
+                ).resolve(),
+            )
+
+            upgrade = root / "upgrade"
+            upgrade_agents = upgrade / ".agents" / "skills"
+            upgrade_claude = upgrade / ".claude" / "skills"
+            quarantine = upgrade / ".skill-quarantine"
+            upgrade_agents.mkdir(parents=True)
+            upgrade_claude.mkdir(parents=True)
+            quarantine.mkdir(parents=True)
+            old_payload = upgrade_agents / "context-tree-insights"
+            old_payload.mkdir()
+            (old_payload / "SKILL.md").write_text(
+                "---\nname: context-tree-insights\n---\n",
+                encoding="utf-8",
+            )
+            old_link = upgrade_claude / "context-tree-insights"
+            old_link.symlink_to("../../.agents/skills/context-tree-insights")
+            retired_payload = quarantine / "context-tree-insights"
+            retired_link = quarantine / "context-tree-insights.claude-link"
+            old_link.rename(retired_link)
+            old_payload.rename(retired_payload)
+            new_payload = upgrade_agents / "context-tree-value-audit"
+            new_projection = upgrade_claude / "context-tree-value-audit"
+            shutil.copytree(SKILL_ROOT, new_payload)
+            shutil.copytree(CLAUDE_SKILL_ROOT, new_projection)
+
+            self.assertFalse(old_payload.exists())
+            self.assertFalse(old_link.exists())
+            self.assertTrue((new_payload / "SKILL.md").is_file())
+            self.assertTrue((new_projection / "SKILL.md").is_file())
+            self.assertEqual(
+                (new_payload / "SKILL.md").resolve(),
+                (
+                    new_projection
+                    / "../../../.agents/skills/context-tree-value-audit/SKILL.md"
+                ).resolve(),
+            )
+
+            new_projection.rename(
+                quarantine / "context-tree-value-audit.failed-claude"
+            )
+            new_payload.rename(quarantine / "context-tree-value-audit.failed")
+            retired_payload.rename(old_payload)
+            retired_link.rename(old_link)
+            self.assertFalse(new_payload.exists())
+            self.assertFalse(new_projection.exists())
+            self.assertTrue((old_payload / "SKILL.md").is_file())
+            self.assertTrue((old_link / "SKILL.md").is_file())
+
 
 class DeterministicPipelineTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="context-tree-insights-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="context-tree-value-audit-")
         self.root = Path(self.temporary.name)
         self.workspace = self.root / "workspace"
         self.artifacts = self.workspace / "artifacts"
@@ -195,6 +300,50 @@ class DeterministicPipelineTests(unittest.TestCase):
         self.second_tree_file.write_text(
             "# Dogfooding\n\n## Decision\n\nUse First Tree in daily work.\n",
             encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "init", "-b", "main", str(self.tree_root)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.tree_root), "config", "user.email", "tests@example.com"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.tree_root), "config", "user.name", "Tests"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.tree_root), "add", "."],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.tree_root), "commit", "-m", "seed"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.tree_root),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/tree.git",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
         )
         write_workspace_identity(self.workspace, self.tree_root)
         self.trace_root = self.root / "sessions"
@@ -961,6 +1110,35 @@ print(json.dumps({{"ok": True, "data": data}}))
             str(self.artifacts / output_name),
         )
 
+    def collect_for_provider(
+        self,
+        provider: str,
+        trace_root: Path,
+        output_name: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return run_cli(
+            "collect",
+            "--artifact-root",
+            str(self.artifacts),
+            "--chats",
+            str(self.artifacts / "chats.jsonl"),
+            "--trace-root",
+            str(trace_root),
+            "--runtime-provider",
+            provider,
+            "--agent-workspace",
+            f"{AGENT_ID}={self.workspace}",
+            "--tree-root",
+            str(self.tree_root),
+            "--days",
+            "7",
+            "--now",
+            NOW,
+            "--output",
+            str(self.artifacts / output_name),
+            runtime_provider=provider,
+        )
+
     def task_judgment(
         self,
         candidate: dict[str, Any],
@@ -1149,6 +1327,586 @@ print(json.dumps({{"ok": True, "data": data}}))
             0o600,
             stat.S_IMODE((self.artifacts / "candidates-one.jsonl").stat().st_mode),
         )
+
+    def test_collects_claude_code_native_tool_results(self) -> None:
+        self.write_chat_export()
+        claude_config_root = self.root / "claude-config"
+        trace_root = claude_config_root / "projects"
+        write_jsonl(
+            trace_root / "project" / "session.jsonl",
+            [
+                {
+                    "type": "user",
+                    "sessionId": "claude-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:01:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "sessionId": "claude-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "claude-read",
+                                "name": "Read",
+                                "input": {"file_path": str(self.tree_file)},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "sessionId": "claude-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "claude-read",
+                                "content": self.tree_file.read_text(encoding="utf-8"),
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        write_jsonl(
+            trace_root / "unrelated" / "session.jsonl",
+            [
+                {
+                    "type": "user",
+                    "sessionId": "unrelated-session",
+                    "cwd": str(self.root / "another-workspace"),
+                    "timestamp": "2026-07-22T10:01:00Z",
+                    "message": {"role": "user", "content": "unrelated"},
+                }
+            ],
+        )
+
+        result = self.collect_for_provider(
+            "claude-code",
+            trace_root,
+            "claude-candidates.jsonl",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(self.artifacts / "claude-candidates.jsonl")[0]
+        self.assertEqual("claude-code", candidate["runtime_provider"])
+        self.assertEqual(1, len(candidate["reads"]))
+        self.assertEqual(
+            "claude-code",
+            candidate["reads"][0]["runtime_provider"],
+        )
+        self.assertEqual(
+            1,
+            candidate["collector_diagnostics"]["attempt_status_counts"][
+                "accepted_exact"
+            ],
+        )
+        self.assertNotIn(
+            "claude_trace_preflight_malformed_or_unmapped",
+            candidate["coverage_gaps"],
+        )
+        tui_result = self.collect_for_provider(
+            "claude-code-tui",
+            trace_root,
+            "claude-tui-candidates.jsonl",
+        )
+        self.assertEqual(0, tui_result.returncode, tui_result.stderr)
+        self.assertEqual(
+            "claude-code",
+            read_jsonl(self.artifacts / "claude-tui-candidates.jsonl")[0][
+                "runtime_provider"
+            ],
+        )
+        default_root_result = run_cli(
+            "collect",
+            "--artifact-root",
+            str(self.artifacts),
+            "--chats",
+            str(self.artifacts / "chats.jsonl"),
+            "--runtime-provider",
+            "claude-code",
+            "--agent-workspace",
+            f"{AGENT_ID}={self.workspace}",
+            "--tree-root",
+            str(self.tree_root),
+            "--days",
+            "7",
+            "--now",
+            NOW,
+            "--output",
+            str(self.artifacts / "claude-custom-root-candidates.jsonl"),
+            runtime_provider="claude-code",
+            environment_overrides={
+                "CLAUDE_CONFIG_DIR": str(claude_config_root),
+            },
+        )
+        self.assertEqual(0, default_root_result.returncode, default_root_result.stderr)
+        self.assertEqual(
+            1,
+            len(
+                read_jsonl(
+                    self.artifacts / "claude-custom-root-candidates.jsonl"
+                )[0]["reads"]
+            ),
+        )
+
+    def test_claude_tool_result_context_echo_is_not_identity(self) -> None:
+        self.write_chat_export()
+        trace_root = self.root / "claude-echo"
+        write_jsonl(
+            trace_root / "project" / "session.jsonl",
+            [
+                {
+                    "type": "user",
+                    "sessionId": "claude-echo-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:01:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "echo",
+                                "content": context_block(CHAT_ID),
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+
+        result = self.collect_for_provider(
+            "claude-code",
+            trace_root,
+            "claude-echo-candidates.jsonl",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "claude-echo-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertIn(
+            "claude_trace_preflight_malformed_or_unmapped",
+            candidate["coverage_gaps"],
+        )
+
+    def test_claude_ignores_native_non_message_metadata_rows(self) -> None:
+        self.write_chat_export()
+        trace_root = self.root / "claude-native-metadata"
+        session_id = "claude-native-metadata-session"
+        metadata_rows = [
+            {
+                "type": row_type,
+                "sessionId": session_id,
+                "timestamp": f"2026-07-22T10:01:0{index}Z",
+            }
+            for index, row_type in enumerate(
+                ("queue-operation", "last-prompt", "mode"),
+                start=1,
+            )
+        ]
+        write_jsonl(
+            trace_root / "project" / "session.jsonl",
+            [
+                {
+                    "type": "user",
+                    "sessionId": session_id,
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:01:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+                    },
+                },
+                *metadata_rows,
+                {
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "claude-metadata-read",
+                                "name": "Read",
+                                "input": {"file_path": str(self.tree_file)},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "last-prompt",
+                    "sessionId": session_id,
+                    "timestamp": "2026-07-22T10:02:00.500Z",
+                },
+                {
+                    "type": "user",
+                    "sessionId": session_id,
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "claude-metadata-read",
+                                "content": self.tree_file.read_text(encoding="utf-8"),
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+
+        result = self.collect_for_provider(
+            "claude-code",
+            trace_root,
+            "claude-native-metadata-candidates.jsonl",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "claude-native-metadata-candidates.jsonl"
+        )[0]
+        self.assertEqual(1, len(candidate["reads"]))
+        self.assertNotIn(
+            "claude_trace_workspace_changed",
+            candidate["coverage_gaps"],
+        )
+
+    def test_claude_compact_and_meta_context_echoes_are_not_identity(self) -> None:
+        self.write_chat_export()
+        for marker in ("isCompactSummary", "isMeta"):
+            with self.subTest(marker=marker, position="only"):
+                trace_root = self.root / f"claude-{marker}-only"
+                write_jsonl(
+                    trace_root / "project" / "session.jsonl",
+                    [
+                        {
+                            "type": "user",
+                            marker: True,
+                            "sessionId": "claude-synthetic-session",
+                            "cwd": str(self.workspace),
+                            "timestamp": "2026-07-22T10:01:00Z",
+                            "message": {
+                                "role": "user",
+                                "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+                            },
+                        }
+                    ],
+                )
+                result = self.collect_for_provider(
+                    "claude-code",
+                    trace_root,
+                    f"claude-{marker}-only-candidates.jsonl",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                candidate = read_jsonl(
+                    self.artifacts / f"claude-{marker}-only-candidates.jsonl"
+                )[0]
+                self.assertEqual([], candidate["reads"])
+                self.assertIn(
+                    "no_mapped_claude_code_evidence",
+                    candidate["coverage_gaps"],
+                )
+
+            with self.subTest(marker=marker, position="after-preflight"):
+                trace_root = self.root / f"claude-{marker}-late"
+                session_id = "claude-late-session"
+                canonical = {
+                    "type": "user",
+                    "sessionId": session_id,
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:01:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+                    },
+                }
+                filler = [
+                    {
+                        "type": "assistant",
+                        "sessionId": session_id,
+                        "cwd": str(self.workspace),
+                        "timestamp": "2026-07-22T10:01:01Z",
+                        "message": {"role": "assistant", "content": []},
+                    }
+                    for _ in range(511)
+                ]
+                synthetic = {
+                    "type": "user",
+                    marker: True,
+                    "sessionId": session_id,
+                    "timestamp": "2026-07-22T10:01:02Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": context_block(SECOND_CHAT_ID)}],
+                    },
+                }
+                call = {
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": f"claude-{marker}-read",
+                                "name": "Read",
+                                "input": {"file_path": str(self.tree_file)},
+                            }
+                        ],
+                    },
+                }
+                tool_result = {
+                    "type": "user",
+                    "sessionId": session_id,
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": f"claude-{marker}-read",
+                                "content": self.tree_file.read_text(encoding="utf-8"),
+                            }
+                        ],
+                    },
+                }
+                write_jsonl(
+                    trace_root / "project" / "session.jsonl",
+                    [canonical, *filler, synthetic, call, tool_result],
+                )
+                result = self.collect_for_provider(
+                    "claude-code",
+                    trace_root,
+                    f"claude-{marker}-late-candidates.jsonl",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                candidate = read_jsonl(
+                    self.artifacts / f"claude-{marker}-late-candidates.jsonl"
+                )[0]
+                self.assertEqual(1, len(candidate["reads"]))
+                self.assertNotIn(
+                    "claude_trace_chat_boundary_changed",
+                    candidate["coverage_gaps"],
+                )
+
+    def test_claude_full_scan_rejects_post_preflight_session_and_chat_drift(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        initial = {
+            "type": "user",
+            "sessionId": "claude-session-a",
+            "cwd": str(self.workspace),
+            "timestamp": "2026-07-22T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+            },
+        }
+        filler = [
+            {
+                "type": "assistant",
+                "sessionId": "claude-session-a",
+                "cwd": str(self.workspace),
+                "timestamp": "2026-07-22T10:01:01Z",
+                "message": {"role": "assistant", "content": []},
+            }
+            for _ in range(511)
+        ]
+        cases = {
+            "session": {
+                "type": "assistant",
+                "sessionId": "claude-session-b",
+                "cwd": str(self.workspace),
+                "timestamp": "2026-07-22T10:02:00Z",
+                "message": {"role": "assistant", "content": []},
+            },
+            "chat": {
+                "type": "user",
+                "sessionId": "claude-session-a",
+                "cwd": str(self.workspace),
+                "timestamp": "2026-07-22T10:02:00Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": context_block(SECOND_CHAT_ID),
+                        }
+                    ],
+                },
+            },
+        }
+        expected = {
+            "session": "claude_trace_session_changed",
+            "chat": "claude_trace_chat_boundary_changed",
+        }
+        for name, drift in cases.items():
+            with self.subTest(name=name):
+                trace_root = self.root / f"claude-{name}-drift"
+                write_jsonl(
+                    trace_root / "project" / "session.jsonl",
+                    [initial, *filler, drift],
+                )
+                result = self.collect_for_provider(
+                    "claude-code",
+                    trace_root,
+                    f"claude-{name}-drift-candidates.jsonl",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                candidate = read_jsonl(
+                    self.artifacts / f"claude-{name}-drift-candidates.jsonl"
+                )[0]
+                self.assertEqual([], candidate["reads"])
+                self.assertIn(expected[name], candidate["coverage_gaps"])
+
+    def test_runtimes_without_complete_native_evidence_stay_pending(self) -> None:
+        self.write_chat_export()
+        for provider in ("cursor", "kimi-code"):
+            with self.subTest(provider=provider):
+                result = self.collect_for_provider(
+                    provider,
+                    self.trace_root,
+                    f"{provider}-unsupported-candidates.jsonl",
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                candidate = read_jsonl(
+                    self.artifacts / f"{provider}-unsupported-candidates.jsonl"
+                )[0]
+                self.assertEqual([], candidate["reads"])
+                self.assertIn(
+                    f"{provider.replace('-', '_')}_historical_evidence_not_supported",
+                    candidate["coverage_gaps"],
+                )
+
+    def test_claude_pairing_fail_closes_duplicate_calls(self) -> None:
+        self.write_chat_export()
+        claude_root = self.root / "claude-duplicate"
+        claude_rows = [
+            {
+                "type": "user",
+                "sessionId": "claude-duplicate-session",
+                "cwd": str(self.workspace),
+                "timestamp": "2026-07-22T10:01:00Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+                },
+            },
+            *[
+                {
+                    "type": "assistant",
+                    "sessionId": "claude-duplicate-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": f"2026-07-22T10:02:0{index}Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "duplicate-read",
+                                "name": "Read",
+                                "input": {"file_path": str(self.tree_file)},
+                            }
+                        ],
+                    },
+                }
+                for index in (0, 1)
+            ],
+            {
+                "type": "user",
+                "sessionId": "claude-duplicate-session",
+                "cwd": str(self.workspace),
+                "timestamp": "2026-07-22T10:02:02Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "duplicate-read",
+                            "content": self.tree_file.read_text(encoding="utf-8"),
+                        }
+                    ],
+                },
+            },
+        ]
+        write_jsonl(claude_root / "project" / "session.jsonl", claude_rows)
+        claude_result = self.collect_for_provider(
+            "claude-code",
+            claude_root,
+            "claude-duplicate-candidates.jsonl",
+        )
+        self.assertEqual(0, claude_result.returncode, claude_result.stderr)
+        claude_candidate = read_jsonl(
+            self.artifacts / "claude-duplicate-candidates.jsonl"
+        )[0]
+        self.assertEqual([], claude_candidate["reads"])
+        self.assertIn(
+            "claude_tool_call_duplicate",
+            claude_candidate["coverage_gaps"],
+        )
+
+    def test_provider_mismatch_fails_before_trace_collection(self) -> None:
+        self.write_chat_export()
+        result = run_cli(
+            "collect",
+            "--artifact-root",
+            str(self.artifacts),
+            "--chats",
+            str(self.artifacts / "chats.jsonl"),
+            "--trace-root",
+            str(self.trace_root),
+            "--runtime-provider",
+            "claude-code",
+            "--agent-workspace",
+            f"{AGENT_ID}={self.workspace}",
+            "--tree-root",
+            str(self.tree_root),
+            "--output",
+            str(self.artifacts / "mismatch.jsonl"),
+            runtime_provider="cursor",
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("must match FIRST_TREE_PROVIDER", result.stderr)
+
+    def test_missing_runtime_provider_fails_before_trace_collection(self) -> None:
+        self.write_chat_export()
+        result = run_cli(
+            "collect",
+            "--artifact-root",
+            str(self.artifacts),
+            "--chats",
+            str(self.artifacts / "chats.jsonl"),
+            "--trace-root",
+            str(self.trace_root),
+            "--agent-workspace",
+            f"{AGENT_ID}={self.workspace}",
+            "--tree-root",
+            str(self.tree_root),
+            "--output",
+            str(self.artifacts / "missing-provider.jsonl"),
+            runtime_provider=None,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("FIRST_TREE_PROVIDER is required", result.stderr)
 
     def test_preflight_accepts_same_id_mirror_and_ignores_noncanonical_echoes(
         self,
@@ -2174,6 +2932,26 @@ print(json.dumps({{"ok": True, "data": data}}))
         evidence = read_jsonl(self.artifacts / "evidence-one.jsonl")
         self.assertEqual(
             "definite", evidence[0]["effects"][0]["derived_support"]
+        )
+
+        legacy_candidate = json.loads(json.dumps(candidate))
+        legacy_candidate.pop("runtime_provider")
+        for read in legacy_candidate["reads"]:
+            read.pop("runtime_provider")
+        write_jsonl(
+            self.artifacts / "legacy-candidates.jsonl",
+            [legacy_candidate],
+        )
+        legacy = self.report(
+            [task],
+            candidates_name="legacy-candidates.jsonl",
+            evidence_name="legacy-evidence.jsonl",
+            report_name="legacy-REPORT.md",
+        )
+        self.assertEqual(0, legacy.returncode, legacy.stderr)
+        self.assertIn(
+            "| Runtime evidence provider | codex |",
+            (self.artifacts / "legacy-REPORT.md").read_text(encoding="utf-8"),
         )
 
         pilot_counts_candidate = json.loads(json.dumps(candidate))

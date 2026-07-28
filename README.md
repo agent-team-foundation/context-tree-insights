@@ -1,25 +1,36 @@
-# Context Tree Insights
+# Context Tree Value Audit
 
-`context-tree-insights` 0.2.3 is an explicit-only Codex Skill for task-first,
-evidence-first analysis of Context Tree decision value. It reconstructs Tasks
-from authorized Chats, separates confirmed from unresolved exposure, judges
-four visible effect types, and stops sampling through a Task quota plus
+`context-tree-value-audit` 0.2.4 is an explicit-only Skill for task-first,
+evidence-first analysis of Context Tree decision value for the current First
+Tree Runtime when its native historical evidence is supported. It reconstructs
+Tasks from authorized Chats, separates confirmed from unresolved exposure,
+judges four visible effect types, and stops sampling through a Task quota plus
 saturation.
 
-It is intentionally separate from First Tree core. It does not add a bundled
-Skill, runtime event, database table, message-path validation, schedule,
-Context Tree write, Web surface, or another provider adapter. It runs for one
-First Tree Codex Agent, one managed workspace, and one bound Tree at a time.
+Version 0.2.4 also renames the installable Skill from
+`context-tree-insights` to `context-tree-value-audit`. Replace the old Skill
+directory during upgrade; do not install both names because they represent one
+explicit audit capability, not two independent workflows.
+
+The audit core remains separate from First Tree core. Codex, Claude Code, and
+Claude Code TUI use their existing native local transcripts. Cursor and Kimi
+Code remain pending for historical value audits because their existing local
+records cannot yet prove complete, Chat-bound Tree reads.
+There is no shared Tree-read CLI, generic tool abstraction, runtime event,
+database table, schedule, Context Tree write, or Web surface. Each run covers
+one First Tree Agent, one managed workspace, one current Runtime, and one bound
+Tree.
 
 ## Safety and interpretation
 
-- Invocation is explicit only: `$context-tree-insights`.
+- Invocation is explicit only: `$context-tree-value-audit` in Codex or
+  `/context-tree-value-audit` in Claude Code / Claude Code TUI.
 - The invoking human authorizes all Chats for the current Agent, exact Chat
   UUIDs for that Agent, or the invoking Chat resolved from runtime `chatId`.
 - `Chat UUID @ Agent UUID` remains the authorization and trace-mapping unit;
   Task is the judgment and counting unit.
-- Local Codex traces are preflighted against authorized Chat IDs before full
-  content is scanned.
+- Local Runtime evidence is preflighted against authorized Chat and Agent IDs
+  before complete recorded output is scanned.
 - Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
   coverage gaps.
 - A valid `contextDecision` is projected minimally. Absence is unknown;
@@ -40,38 +51,113 @@ JSONL, reports, or production-derived artifacts.
 ## Repository layout
 
 ```text
-skills/context-tree-insights/
+skills/context-tree-value-audit/
   SKILL.md
   VERSION
   agents/openai.yaml
   references/
     evidence-schema.md
+    runtime-evidence-adapters.md
     task-analysis-schema.md
-  scripts/context_tree_insights.py
+  scripts/context_tree_value_audit.py
+projections/claude/context-tree-value-audit/
+  SKILL.md
 tests/
 evals/manual-behavior-checklist.md
 ```
 
-Only `skills/context-tree-insights` is the installable Skill payload. Tests,
-evaluation material, and repository documentation stay outside it.
+`skills/context-tree-value-audit` is the canonical payload. The small Claude
+projection supplies Claude's manual-invocation metadata and delegates to the
+canonical payload. Tests, evaluation material, and repository documentation
+stay outside both.
 
 ## Install into one Agent workspace
 
 This repository does not install or enable the Skill automatically. Project
-the Skill directory into one selected Agent workspace:
+the Skill directory into one selected Agent workspace. For a fresh install:
 
 ```bash
-CTI_REPO="/absolute/path/to/context-tree-insights"
-CTI_AGENT_WORKSPACE="/absolute/path/to/selected/agent/workspace"
-CTI_DESTINATION="$CTI_AGENT_WORKSPACE/.agents/skills/context-tree-insights"
+CTVA_REPO="/absolute/path/to/context-tree-insights"
+CTVA_AGENT_WORKSPACE="/absolute/path/to/selected/agent/workspace"
+CTVA_SKILLS_ROOT="$CTVA_AGENT_WORKSPACE/.agents/skills"
+CTVA_DESTINATION="$CTVA_SKILLS_ROOT/context-tree-value-audit"
+CTVA_CLAUDE_ROOT="$CTVA_AGENT_WORKSPACE/.claude/skills"
+CTVA_CLAUDE_DESTINATION="$CTVA_CLAUDE_ROOT/context-tree-value-audit"
+CTVA_CLAUDE_SOURCE="$CTVA_REPO/projections/claude/context-tree-value-audit"
 
-test ! -e "$CTI_DESTINATION"
-mkdir -p "$CTI_AGENT_WORKSPACE/.agents/skills"
-cp -R "$CTI_REPO/skills/context-tree-insights" "$CTI_DESTINATION"
+test ! -e "$CTVA_DESTINATION"
+test ! -e "$CTVA_CLAUDE_DESTINATION"
+test ! -L "$CTVA_CLAUDE_DESTINATION"
+mkdir -p "$CTVA_SKILLS_ROOT" "$CTVA_CLAUDE_ROOT"
+cp -R "$CTVA_REPO/skills/context-tree-value-audit" "$CTVA_DESTINATION"
+cp -R "$CTVA_CLAUDE_SOURCE" "$CTVA_CLAUDE_DESTINATION"
+diff -qr "$CTVA_CLAUDE_SOURCE" "$CTVA_CLAUDE_DESTINATION"
+test -f "$CTVA_CLAUDE_DESTINATION/SKILL.md"
+python3 "$CTVA_REPO/scripts/validate_skill.py"
 ```
 
-Start a new Codex session after installation. The
-`allow_implicit_invocation: false` policy keeps the Skill out of ordinary
+For an upgrade from the old 0.2.x name, move the exact legacy payload to a
+recoverable directory outside every Skill discovery root, then install and
+compare the new payload:
+
+```bash
+CTVA_REPO="/absolute/path/to/context-tree-insights"
+CTVA_AGENT_WORKSPACE="/absolute/path/to/selected/agent/workspace"
+CTVA_SKILLS_ROOT="$CTVA_AGENT_WORKSPACE/.agents/skills"
+CTVA_OLD="$CTVA_SKILLS_ROOT/context-tree-insights"
+CTVA_NEW="$CTVA_SKILLS_ROOT/context-tree-value-audit"
+CTVA_SOURCE="$CTVA_REPO/skills/context-tree-value-audit"
+CTVA_QUARANTINE="$CTVA_AGENT_WORKSPACE/.skill-quarantine/context-tree-insights"
+CTVA_CLAUDE_ROOT="$CTVA_AGENT_WORKSPACE/.claude/skills"
+CTVA_OLD_CLAUDE="$CTVA_CLAUDE_ROOT/context-tree-insights"
+CTVA_NEW_CLAUDE="$CTVA_CLAUDE_ROOT/context-tree-value-audit"
+CTVA_OLD_CLAUDE_TARGET="../../.agents/skills/context-tree-insights"
+CTVA_CLAUDE_SOURCE="$CTVA_REPO/projections/claude/context-tree-value-audit"
+CTVA_QUARANTINE_CLAUDE="$CTVA_AGENT_WORKSPACE/.skill-quarantine/context-tree-insights.claude-link"
+
+test -f "$CTVA_OLD/SKILL.md"
+test "$(sed -n 's/^name:[[:space:]]*//p' "$CTVA_OLD/SKILL.md")" = "context-tree-insights"
+test ! -e "$CTVA_NEW"
+test ! -e "$CTVA_NEW_CLAUDE"
+test ! -L "$CTVA_NEW_CLAUDE"
+test ! -e "$CTVA_QUARANTINE"
+test ! -e "$CTVA_QUARANTINE_CLAUDE"
+test ! -L "$CTVA_QUARANTINE_CLAUDE"
+mkdir -p "$(dirname "$CTVA_QUARANTINE")" "$CTVA_CLAUDE_ROOT"
+if test -e "$CTVA_OLD_CLAUDE" || test -L "$CTVA_OLD_CLAUDE"; then
+  test -L "$CTVA_OLD_CLAUDE"
+  test "$(readlink "$CTVA_OLD_CLAUDE")" = "$CTVA_OLD_CLAUDE_TARGET"
+  mv "$CTVA_OLD_CLAUDE" "$CTVA_QUARANTINE_CLAUDE"
+fi
+mv "$CTVA_OLD" "$CTVA_QUARANTINE"
+cp -R "$CTVA_SOURCE" "$CTVA_NEW"
+cp -R "$CTVA_CLAUDE_SOURCE" "$CTVA_NEW_CLAUDE"
+diff -qr "$CTVA_SOURCE" "$CTVA_NEW"
+diff -qr "$CTVA_CLAUDE_SOURCE" "$CTVA_NEW_CLAUDE"
+test -f "$CTVA_NEW_CLAUDE/SKILL.md"
+python3 "$CTVA_REPO/scripts/validate_skill.py"
+test ! -e "$CTVA_OLD"
+```
+
+To roll back, move the new payload aside and restore the quarantined directory:
+
+```bash
+test -d "$CTVA_QUARANTINE"
+test -d "$CTVA_NEW"
+test -d "$CTVA_NEW_CLAUDE"
+diff -qr "$CTVA_CLAUDE_SOURCE" "$CTVA_NEW_CLAUDE"
+mv "$CTVA_NEW_CLAUDE" "$CTVA_QUARANTINE.failed-new.claude"
+mv "$CTVA_NEW" "$CTVA_QUARANTINE.failed-new"
+mv "$CTVA_QUARANTINE" "$CTVA_OLD"
+if test -L "$CTVA_QUARANTINE_CLAUDE"; then
+  mv "$CTVA_QUARANTINE_CLAUDE" "$CTVA_OLD_CLAUDE"
+fi
+```
+
+Start a new Runtime session after a successful install, upgrade, or rollback,
+then confirm the intended single Skill name is callable. The Codex
+`allow_implicit_invocation: false` policy and Claude
+`disable-model-invocation: true` frontmatter keep the Skill out of ordinary
 tasks. Pin a reviewed commit or release when installing for another Agent.
 
 ## Pipeline
@@ -79,9 +165,10 @@ tasks. Pin a reviewed commit or release when installing for another Agent.
 The Skill orchestrates four stages:
 
 1. `export-chats` resolves explicit authorization and exports visible records.
-2. `collect` maps authorized Chats to local Codex traces, classifies every
-   in-window Tree-read attempt into a conserving four-state grammar, and
-   reconstructs exact or read-only-composite evidence plus visible choices.
+2. `collect` maps authorized Chats to supported native local evidence,
+   classifies every in-window Tree-read attempt into a conserving four-state
+   grammar, and reconstructs exact or read-only-composite evidence plus visible
+   choices. Unsupported Runtime history stays pending.
 3. The Agent reconstructs Tasks, Task-window exposure, effects, and sampling
    signals in `task-judgments.jsonl`, including the reproducible five-check
    rubric behind each `verified` or `probable` effect.
@@ -97,10 +184,11 @@ types represented, followed by 20-Task expansions until two consecutive
 batches add no effect type, key counterexample, or conclusion change.
 
 Detailed commands and schemas are in
-[`SKILL.md`](skills/context-tree-insights/SKILL.md),
-[`evidence-schema.md`](skills/context-tree-insights/references/evidence-schema.md),
+[`SKILL.md`](skills/context-tree-value-audit/SKILL.md),
+[`evidence-schema.md`](skills/context-tree-value-audit/references/evidence-schema.md),
+[runtime-evidence-adapters.md](skills/context-tree-value-audit/references/runtime-evidence-adapters.md),
 and
-[`task-analysis-schema.md`](skills/context-tree-insights/references/task-analysis-schema.md).
+[`task-analysis-schema.md`](skills/context-tree-value-audit/references/task-analysis-schema.md).
 
 ## Validate
 

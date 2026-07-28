@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build task-first Context Tree insights from First Tree Chats and Codex traces.
+"""Build task-first Context Tree audits from First Tree Chats and local runtime evidence.
 
 Collection remains deliberately conservative and read-only.  Semantic value is
 judged at Task level after authorized Chat evidence has been collected.
@@ -58,6 +58,14 @@ RUBRIC_KEYS = (
 )
 TRACE_PREFLIGHT_MAX_BYTES = 512 * 1024
 TRACE_PREFLIGHT_MAX_LINES = 512
+RUNTIME_PROVIDER_VALUES = {
+    "codex",
+    "claude-code",
+    "claude-code-tui",
+    "cursor",
+    "kimi-code",
+}
+SUPPORTED_EVIDENCE_PROVIDERS = {"codex", "claude-code"}
 PURE_READ_COMMANDS = {"bat", "cat", "head", "nl", "sed", "tail"}
 EXEC_COMMAND_TOOLS = {"exec_command", "functions.exec_command"}
 EXEC_ORCHESTRATION_TOOLS = {"exec", "functions.exec"}
@@ -245,6 +253,8 @@ class TracePreflight:
     audit_id: str
     agent_id: str
     workspace: Path
+    runtime_provider: str
+    provider_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3046,9 +3056,62 @@ def is_root_managed_session(meta: Mapping[str, Any], workspace_roots: set[str]) 
     return True
 
 
-def trace_root_default() -> Path:
-    codex_root = os.environ.get("CODEX_HOME")
-    return Path(codex_root).expanduser() / "sessions" if codex_root else Path.home() / ".codex" / "sessions"
+def canonical_runtime_provider(value: str) -> str:
+    if value not in RUNTIME_PROVIDER_VALUES:
+        raise AuditError(
+            f"Unsupported runtime provider {value!r}; expected one of "
+            + ", ".join(sorted(RUNTIME_PROVIDER_VALUES))
+            + "."
+        )
+    return "claude-code" if value == "claude-code-tui" else value
+
+
+def resolve_runtime_provider(explicit: str | None) -> str:
+    runtime_value = os.environ.get("FIRST_TREE_PROVIDER")
+    if not runtime_value:
+        raise AuditError(
+            "FIRST_TREE_PROVIDER is required to select the invoking Agent's evidence adapter."
+        )
+    runtime_canonical = canonical_runtime_provider(runtime_value)
+    if explicit:
+        canonical = canonical_runtime_provider(explicit)
+        if canonical != runtime_canonical:
+            raise AuditError(
+                "--runtime-provider must match FIRST_TREE_PROVIDER for the current Agent runtime."
+            )
+    return runtime_canonical
+
+
+def candidate_runtime_provider(value: Mapping[str, Any]) -> str:
+    """Read the v1 provider extension; 0.2.x artifacts were Codex-only."""
+    raw = value.get("runtime_provider", "codex")
+    if not isinstance(raw, str):
+        raise AuditError("candidate.runtime_provider must be a string.")
+    canonical = canonical_runtime_provider(raw)
+    if canonical != raw:
+        raise AuditError("candidate.runtime_provider must use the canonical provider value.")
+    return canonical
+
+
+def trace_root_default(
+    runtime_provider: str,
+    workspace_identity: WorkspaceIdentity,
+) -> Path:
+    if runtime_provider == "codex":
+        codex_root = os.environ.get("CODEX_HOME")
+        return (
+            Path(codex_root).expanduser() / "sessions"
+            if codex_root
+            else Path.home() / ".codex" / "sessions"
+        )
+    if runtime_provider == "claude-code":
+        claude_root = os.environ.get("CLAUDE_CONFIG_DIR")
+        return (
+            Path(claude_root).expanduser() / "projects"
+            if claude_root
+            else Path.home() / ".claude" / "projects"
+        )
+    raise AuditError(f"No local evidence adapter exists for {runtime_provider}.")
 
 
 def normalize_chat(value: Mapping[str, Any], window: Window) -> dict[str, Any]:
@@ -3095,17 +3158,25 @@ def normalize_chat(value: Mapping[str, Any], window: Window) -> dict[str, Any]:
     }
 
 
-def recent_trace_files(trace_root: Path, window: Window) -> list[Path]:
+def recent_trace_files(
+    trace_root: Path,
+    window: Window,
+    runtime_provider: str,
+) -> list[Path]:
     """Return traces that could contain an in-window call without reading their contents."""
     minimum_mtime = window.start.timestamp() if window.start is not None else None
     files: list[Path] = []
-    for path in trace_root.rglob("*.jsonl"):
+    candidates = trace_root.rglob("*.jsonl")
+    for path in candidates:
         try:
             if path.is_symlink() or not path.is_file():
                 continue
+            path_stat = path.stat()
+            if runtime_provider == "claude-code" and "subagents" in path.parts:
+                continue
             resolved = path.resolve(strict=True)
             resolved.relative_to(trace_root)
-            if minimum_mtime is None or resolved.stat().st_mtime >= minimum_mtime:
+            if minimum_mtime is None or path_stat.st_mtime >= minimum_mtime:
                 files.append(resolved)
         except (OSError, ValueError):
             continue
@@ -3130,7 +3201,7 @@ def tree_identity(identity: WorkspaceIdentity) -> str:
     return opaque_identity("tree", value)
 
 
-def preflight_trace(
+def preflight_codex_trace(
     path: Path,
     trace_root: Path,
     workspace_identity: WorkspaceIdentity,
@@ -3271,6 +3342,7 @@ def preflight_trace(
             audit_id=current_audit_id,
             agent_id=workspace_identity.agent_id,
             workspace=workspace_identity.workspace,
+            runtime_provider="codex",
         ),
         gaps,
     )
@@ -3310,7 +3382,7 @@ def redact_local_roots(
     return result
 
 
-def trace_reads(
+def codex_trace_reads(
     preflight: TracePreflight,
     tree_root: Path,
     tree_id: str,
@@ -3614,6 +3686,7 @@ def trace_reads(
                         read_index if sliced else None
                     ),
                     "tool_name": tool_name,
+                    "runtime_provider": preflight.runtime_provider,
                     "reader_agent_id": preflight.agent_id,
                     "tree_identity": tree_id,
                     "node_paths": node_paths,
@@ -3642,6 +3715,523 @@ def trace_reads(
                 }
             )
     return reads, sessions, gaps, attempt_counts
+
+
+def provider_timestamp(value: Any) -> str | None:
+    if isinstance(value, str):
+        try:
+            return isoformat(parse_datetime(value))
+        except (AuditError, ValueError):
+            return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = value / 1000 if value > 10_000_000_000 else value
+        try:
+            return isoformat(datetime.fromtimestamp(seconds, tz=timezone.utc))
+        except (OSError, OverflowError, ValueError):
+            return None
+    return None
+
+
+def normalized_provider_tool(
+    runtime_provider: str,
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    default_workdir: Path,
+) -> tuple[str, dict[str, Any]]:
+    if runtime_provider == "claude-code":
+        if tool_name == "Read":
+            return "read_file", {"input": dict(arguments)}
+        if tool_name == "Bash":
+            command = arguments.get("command")
+            workdir = arguments.get("cwd")
+            return (
+                "exec_command",
+                {
+                    "arguments": {
+                        "cmd": command,
+                        "workdir": workdir if isinstance(workdir, str) else str(default_workdir),
+                    }
+                },
+            )
+    return tool_name, {"input": dict(arguments)}
+
+
+def provider_read_rows(
+    preflight: TracePreflight,
+    pairs: Sequence[Mapping[str, Any]],
+    tree_root: Path,
+    tree_id: str,
+    window: Window,
+    max_passage_chars: int,
+) -> tuple[list[dict[str, Any]], set[str], set[str], Counter[str]]:
+    reads: list[dict[str, Any]] = []
+    sessions = {preflight.trace_id}
+    gaps: set[str] = set()
+    attempt_counts: Counter[str] = Counter()
+    for pair in pairs:
+        started_at = provider_timestamp(pair.get("started_at"))
+        completed_at = provider_timestamp(pair.get("completed_at"))
+        if (
+            started_at is None
+            or completed_at is None
+        ):
+            gaps.add(f"{preflight.runtime_provider.replace('-', '_')}_tool_timestamp_missing")
+            continue
+        if (
+            not in_window(started_at, window)
+            or not in_window(completed_at, window)
+        ):
+            continue
+        started_index = pair.get("started_index")
+        completed_index = pair.get("completed_index")
+        if (
+            isinstance(started_index, int)
+            and isinstance(completed_index, int)
+            and completed_index <= started_index
+        ):
+            gaps.add(
+                f"{preflight.runtime_provider.replace('-', '_')}_tool_result_out_of_order"
+            )
+            continue
+        if parse_datetime(completed_at) < parse_datetime(started_at):
+            gaps.add(f"{preflight.runtime_provider.replace('-', '_')}_tool_result_out_of_order")
+            continue
+        tool_name = pair.get("tool_name")
+        arguments = pair.get("arguments")
+        call_id = pair.get("call_id")
+        if (
+            not isinstance(tool_name, str)
+            or not isinstance(arguments, Mapping)
+            or not isinstance(call_id, str)
+        ):
+            continue
+        normalized_name, payload = normalized_provider_tool(
+            preflight.runtime_provider,
+            tool_name,
+            arguments,
+            preflight.workspace,
+        )
+        assessment = markdown_read_plan(
+            normalized_name,
+            payload,
+            tree_root,
+            preflight.workspace,
+        )
+        if assessment.status is None:
+            continue
+        attempt_counts[assessment.status] += 1
+        if assessment.reason is not None:
+            attempt_counts[f"reason:{assessment.reason}"] += 1
+        if assessment.status in {"unresolved_opaque", "rejected_unsafe"}:
+            gaps.add(assessment.reason or assessment.status)
+            continue
+        if pair.get("success") is not True:
+            gaps.add("tree_read_command_failed")
+            continue
+        raw_output = pair.get("output")
+        if not isinstance(raw_output, str) or not raw_output.strip():
+            gaps.add("tree_read_output_missing")
+            continue
+        output, output_truncated = clipped(
+            redact_local_roots(
+                raw_output,
+                preflight.workspace,
+                tree_root,
+            ),
+            max_passage_chars,
+        )
+        plan = assessment.plan
+        if plan is None:
+            continue
+        content_parts = [
+            cleaned
+            for raw_part in pair.get("output_parts", [output])
+            if isinstance(raw_part, str)
+            and (
+                cleaned := content_output(
+                    redact_local_roots(
+                        raw_part,
+                        preflight.workspace,
+                        tree_root,
+                    ),
+                    normalized_name,
+                )
+            ).strip()
+        ]
+        if not content_parts:
+            gaps.add("tree_read_output_missing")
+            continue
+        subplans = assessment.subplans or (plan,)
+        sliced = len(subplans) > 1 and len(content_parts) == len(subplans)
+        if sliced:
+            plan_outputs = list(zip(subplans, content_parts, strict=True))
+        else:
+            if len(subplans) > 1:
+                gaps.add("tree_read_output_attribution_aggregate")
+            plan_outputs = [(plan, "\n".join(content_parts))]
+        for read_index, (current_plan, passage_source) in enumerate(plan_outputs):
+            passage_source, attribution_gap = attributable_passage(
+                passage_source,
+                current_plan,
+            )
+            if passage_source is None:
+                gaps.add(
+                    attribution_gap
+                    or "tree_read_output_attribution_unresolved"
+                )
+                continue
+            passage, passage_truncated = clipped(
+                passage_source,
+                max_passage_chars,
+            )
+            passage_truncated = passage_truncated or output_truncated
+            if passage_truncated:
+                gaps.add("tree_read_passage_truncated")
+            read_id = hashlib.sha256(
+                f"{preflight.trace_id}:{call_id}:{read_index}".encode()
+            ).hexdigest()[:20]
+            reads.append(
+                {
+                    "read_id": read_id,
+                    "timestamp": started_at,
+                    "completed_at": completed_at,
+                    "session_file": preflight.trace_id,
+                    "call_id": call_id,
+                    "nested_call_index": read_index if sliced else None,
+                    "tool_name": normalized_name,
+                    "runtime_provider": preflight.runtime_provider,
+                    "reader_agent_id": preflight.agent_id,
+                    "tree_identity": tree_id,
+                    "node_paths": list(current_plan.node_paths),
+                    "read_components": [
+                        {
+                            "reader": component.reader,
+                            "node_paths": list(component.node_paths),
+                        }
+                        for component in current_plan.components
+                    ],
+                    "read_mode": current_plan.mode,
+                    "output_attribution": (
+                        "exact"
+                        if current_plan.mode == "isolated"
+                        else "aggregate"
+                    ),
+                    "auxiliary_output_possible": current_plan.auxiliary_output_possible,
+                    "content_class_hint": content_class_hint(current_plan.node_paths),
+                    "command": current_plan.command,
+                    "command_truncated": False,
+                    "passage": passage,
+                    "passage_truncated": passage_truncated,
+                    "success": True,
+                }
+            )
+    return reads, sessions, gaps, attempt_counts
+
+
+def workspace_trace_cwd_matches(
+    value: Any,
+    workspace: Path,
+    chat_id: str | None = None,
+) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        candidate = Path(value).expanduser().resolve(strict=False)
+    except OSError:
+        return False
+    if candidate == workspace:
+        return True
+    return chat_id is not None and candidate == workspace / chat_id
+
+
+def claude_canonical_user_text(row: Mapping[str, Any]) -> str:
+    """Return only external-human text; never accept synthetic mirror rows."""
+    if (
+        row.get("type") != "user"
+        or row.get("isSidechain") is True
+        or row.get("isCompactSummary") is True
+        or row.get("isMeta") is True
+    ):
+        return ""
+    message = row.get("message")
+    if not isinstance(message, Mapping) or message.get("role") != "user":
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def preflight_claude_trace(
+    path: Path,
+    trace_root: Path,
+    workspace_identity: WorkspaceIdentity,
+    authorized_audits: Mapping[tuple[str, str], str],
+) -> tuple[TracePreflight | None, dict[str, set[str]]]:
+    all_audit_ids = set(authorized_audits.values())
+    gaps = {item: set() for item in all_audit_ids}
+    chat_ids: set[str] = set()
+    session_ids: set[str] = set()
+    cwd_values: set[str] = set()
+    malformed = False
+    bytes_seen = 0
+    lines_seen = 0
+    try:
+        with path.open("rb") as handle:
+            while (
+                bytes_seen < TRACE_PREFLIGHT_MAX_BYTES
+                and lines_seen < TRACE_PREFLIGHT_MAX_LINES
+            ):
+                remaining = TRACE_PREFLIGHT_MAX_BYTES - bytes_seen
+                raw_line = handle.readline(remaining + 1)
+                if not raw_line:
+                    break
+                if len(raw_line) > remaining:
+                    break
+                bytes_seen += len(raw_line)
+                lines_seen += 1
+                try:
+                    row = json.loads(raw_line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    malformed = True
+                    continue
+                if (
+                    not isinstance(row, dict)
+                    or row.get("isSidechain") is True
+                    or row.get("isCompactSummary") is True
+                    or row.get("isMeta") is True
+                ):
+                    continue
+                message = row.get("message")
+                if (
+                    row.get("type") not in {"user", "assistant"}
+                    or not isinstance(message, Mapping)
+                ):
+                    continue
+                cwd = row.get("cwd")
+                if isinstance(cwd, str):
+                    cwd_values.add(cwd)
+                session_id = row.get("sessionId")
+                if isinstance(session_id, str):
+                    session_ids.add(session_id)
+                text = claude_canonical_user_text(row)
+                if CHAT_CONTEXT_PATTERN.search(text) is not None:
+                    found = set(chat_ids_from_text(text))
+                    if len(found) != 1:
+                        malformed = True
+                    chat_ids.update(found)
+    except OSError:
+        return None, gaps
+
+    legacy = {
+        Path(cwd).name
+        for cwd in cwd_values
+        if Path(cwd).parent.resolve(strict=False) == workspace_identity.workspace
+        and re.fullmatch(UUID_PATTERN, Path(cwd).name)
+    }
+    workspace_related = any(
+        workspace_trace_cwd_matches(cwd, workspace_identity.workspace)
+        for cwd in cwd_values
+    ) or bool(legacy)
+    if not workspace_related:
+        return None, gaps
+    if not chat_ids:
+        chat_ids.update(legacy)
+    if malformed or len(chat_ids) != 1 or len(session_ids) != 1:
+        for item in all_audit_ids:
+            gaps[item].add("claude_trace_preflight_malformed_or_unmapped")
+        return None, gaps
+    chat_id = next(iter(chat_ids))
+    if not cwd_values or any(
+        not workspace_trace_cwd_matches(
+            cwd,
+            workspace_identity.workspace,
+            chat_id,
+        )
+        for cwd in cwd_values
+    ):
+        for item in all_audit_ids:
+            gaps[item].add("claude_trace_workspace_mismatch")
+        return None, gaps
+    current_audit_id = authorized_audits.get((chat_id, workspace_identity.agent_id))
+    if current_audit_id is None:
+        return None, gaps
+    return (
+        TracePreflight(
+            path=path,
+            trace_id=trace_identity(path, trace_root),
+            audit_id=current_audit_id,
+            agent_id=workspace_identity.agent_id,
+            workspace=workspace_identity.workspace,
+            runtime_provider="claude-code",
+            provider_session_id=next(iter(session_ids)),
+        ),
+        gaps,
+    )
+
+
+def claude_trace_pairs(
+    preflight: TracePreflight,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    calls: dict[str, dict[str, Any]] = {}
+    results: dict[str, dict[str, Any]] = {}
+    invalid_call_ids: set[str] = set()
+    gaps: set[str] = set()
+    expected_chat_id = preflight.audit_id.split("@", 1)[0]
+    identity_changed = False
+    try:
+        with preflight.path.open("r", encoding="utf-8") as handle:
+            for row_index, line in enumerate(handle):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if (
+                    not isinstance(row, dict)
+                    or row.get("isSidechain") is True
+                    or row.get("isCompactSummary") is True
+                    or row.get("isMeta") is True
+                ):
+                    continue
+                message = row.get("message")
+                if (
+                    row.get("type") not in {"user", "assistant"}
+                    or not isinstance(message, dict)
+                ):
+                    continue
+                if row.get("sessionId") != preflight.provider_session_id:
+                    gaps.add("claude_trace_session_changed")
+                    identity_changed = True
+                    break
+                if not workspace_trace_cwd_matches(
+                    row.get("cwd"),
+                    preflight.workspace,
+                    expected_chat_id,
+                ):
+                    gaps.add("claude_trace_workspace_changed")
+                    identity_changed = True
+                    break
+                if row.get("type") == "user" and message.get("role") == "user":
+                    canonical_text = claude_canonical_user_text(row)
+                    if CHAT_CONTEXT_PATTERN.search(canonical_text) is not None:
+                        found = set(chat_ids_from_text(canonical_text))
+                        if found != {expected_chat_id}:
+                            gaps.add("claude_trace_chat_boundary_changed")
+                            identity_changed = True
+                            break
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                if row.get("type") == "assistant":
+                    for block in content:
+                        if not isinstance(block, dict) or block.get("type") != "tool_use":
+                            continue
+                        call_id = block.get("id")
+                        if not isinstance(call_id, str):
+                            continue
+                        if call_id in calls:
+                            invalid_call_ids.add(call_id)
+                            gaps.add("claude_tool_call_duplicate")
+                            continue
+                        calls[call_id] = {
+                            "call_id": call_id,
+                            "tool_name": block.get("name"),
+                            "arguments": block.get("input"),
+                            "started_at": row.get("timestamp"),
+                            "started_index": row_index,
+                        }
+                elif row.get("type") == "user":
+                    for block in content:
+                        if not isinstance(block, dict) or block.get("type") != "tool_result":
+                            continue
+                        call_id = block.get("tool_use_id")
+                        if not isinstance(call_id, str):
+                            continue
+                        if call_id in results:
+                            invalid_call_ids.add(call_id)
+                            gaps.add("claude_tool_result_duplicate")
+                            continue
+                        results[call_id] = {
+                            "completed_at": row.get("timestamp"),
+                            "completed_index": row_index,
+                            "output": payload_text(block.get("content")),
+                            "success": block.get("is_error") is not True,
+                        }
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        gaps.add("claude_trace_malformed_or_partially_cleaned")
+    if identity_changed:
+        return [], gaps
+    pairs = [
+        {**call, **results[call_id]}
+        for call_id, call in calls.items()
+        if call_id in results and call_id not in invalid_call_ids
+    ]
+    if set(calls) != set(results):
+        gaps.add("claude_tool_result_missing")
+    return pairs, gaps
+
+
+def preflight_runtime_trace(
+    runtime_provider: str,
+    path: Path,
+    trace_root: Path,
+    workspace_identity: WorkspaceIdentity,
+    authorized_audits: Mapping[tuple[str, str], str],
+) -> tuple[TracePreflight | None, dict[str, set[str]]]:
+    if runtime_provider == "codex":
+        return preflight_codex_trace(
+            path,
+            trace_root,
+            workspace_identity,
+            authorized_audits,
+        )
+    if runtime_provider == "claude-code":
+        return preflight_claude_trace(
+            path,
+            trace_root,
+            workspace_identity,
+            authorized_audits,
+        )
+    raise AuditError(f"No evidence preflight exists for {runtime_provider}.")
+
+
+def runtime_trace_reads(
+    preflight: TracePreflight,
+    tree_root: Path,
+    tree_id: str,
+    window: Window,
+    max_passage_chars: int,
+) -> tuple[list[dict[str, Any]], set[str], set[str], Counter[str]]:
+    if preflight.runtime_provider == "codex":
+        return codex_trace_reads(
+            preflight,
+            tree_root,
+            tree_id,
+            window,
+            max_passage_chars,
+        )
+    if preflight.runtime_provider != "claude-code":
+        raise AuditError(
+            f"No evidence reader exists for {preflight.runtime_provider}."
+        )
+    pairs, parse_gaps = claude_trace_pairs(preflight)
+    reads, sessions, gaps, counts = provider_read_rows(
+        preflight,
+        pairs,
+        tree_root,
+        tree_id,
+        window,
+        max_passage_chars,
+    )
+    gaps.update(parse_gaps)
+    return reads, sessions, gaps, counts
 
 
 def collect_evidence(args: argparse.Namespace) -> None:
@@ -3691,21 +4281,36 @@ def collect_evidence(args: argparse.Namespace) -> None:
             "--tree-root must exactly match the Context Tree bound in workspace identity."
         )
     current_tree_id = tree_identity(workspace_identity)
+    runtime_provider = resolve_runtime_provider(args.runtime_provider)
 
-    raw_trace_root = (
-        Path(args.trace_root).expanduser()
-        if args.trace_root
-        else trace_root_default()
-    )
-    if raw_trace_root.is_symlink():
-        raise AuditError("--trace-root must not be a symbolic link.")
-    trace_root = raw_trace_root.resolve()
-    if not trace_root.is_dir():
+    if runtime_provider not in SUPPORTED_EVIDENCE_PROVIDERS:
         for chat in chats.values():
-            chat["coverage_gaps"].append("codex_trace_root_missing_or_cleaned")
+            chat["coverage_gaps"].append(
+                f"{runtime_provider.replace('-', '_')}_historical_evidence_not_supported"
+            )
+        trace_root = workspace_identity.workspace
         trace_files: list[Path] = []
     else:
-        trace_files = recent_trace_files(trace_root, window)
+        raw_trace_root = (
+            Path(args.trace_root).expanduser()
+            if args.trace_root
+            else trace_root_default(runtime_provider, workspace_identity)
+        )
+        if raw_trace_root.is_symlink():
+            raise AuditError("--trace-root must not be a symbolic link.")
+        trace_root = raw_trace_root.resolve()
+        if not trace_root.is_dir():
+            for chat in chats.values():
+                chat["coverage_gaps"].append(
+                    f"{runtime_provider.replace('-', '_')}_evidence_root_missing_or_cleaned"
+                )
+            trace_files = []
+        else:
+            trace_files = recent_trace_files(
+                trace_root,
+                window,
+                runtime_provider,
+            )
 
     per_audit_reads: dict[str, list[dict[str, Any]]] = {item: [] for item in chats}
     per_audit_sessions: dict[str, set[str]] = {item: set() for item in chats}
@@ -3715,7 +4320,8 @@ def collect_evidence(args: argparse.Namespace) -> None:
     }
 
     for trace_file in trace_files:
-        preflight, preflight_gaps = preflight_trace(
+        preflight, preflight_gaps = preflight_runtime_trace(
+            runtime_provider,
             trace_file,
             trace_root,
             workspace_identity,
@@ -3725,7 +4331,7 @@ def collect_evidence(args: argparse.Namespace) -> None:
             per_audit_gaps[item].update(preflight_gaps[item])
         if preflight is None:
             continue
-        reads, sessions, gaps, attempt_counts = trace_reads(
+        reads, sessions, gaps, attempt_counts = runtime_trace_reads(
             preflight,
             tree_root,
             current_tree_id,
@@ -3804,8 +4410,13 @@ def collect_evidence(args: argparse.Namespace) -> None:
             for key, count in sorted(attempt_counts.items())
             if key.startswith("reason:")
         }
-        if not per_audit_sessions[current_audit_id]:
-            gaps.add("no_mapped_codex_trace")
+        if (
+            runtime_provider in SUPPORTED_EVIDENCE_PROVIDERS
+            and not per_audit_sessions[current_audit_id]
+        ):
+            gaps.add(
+                f"no_mapped_{runtime_provider.replace('-', '_')}_evidence"
+            )
         elif (
             per_audit_sessions[current_audit_id]
             and not reads
@@ -3826,6 +4437,7 @@ def collect_evidence(args: argparse.Namespace) -> None:
                 },
                 "window": {"start": window_start_text(window), "end": isoformat(window.end)},
                 "tree_identity": current_tree_id,
+                "runtime_provider": runtime_provider,
                 "candidate_status": candidate_status,
                 "mapped_trace_files": sorted(per_audit_sessions[current_audit_id]),
                 "collector_diagnostics": {
@@ -4563,6 +5175,15 @@ def render_report(
     generated_at: datetime,
     reviewed_baseline: Mapping[str, Any] | None = None,
 ) -> str:
+    runtime_providers = {candidate_runtime_provider(row) for row in candidates}
+    if len(runtime_providers) != 1:
+        raise AuditError("One report cannot mix runtime evidence providers.")
+    runtime_provider = next(iter(runtime_providers))
+    provider_note = (
+        f"This audit uses the existing local `{runtime_provider}` evidence adapter."
+        if runtime_provider in SUPPORTED_EVIDENCE_PROVIDERS
+        else f"Historical `{runtime_provider}` evidence is not supported; affected Tasks remain pending."
+    )
     clear_tasks = [task for task in tasks if task["status"] == "clear"]
     excluded_tasks = [task for task in tasks if task["status"] == "excluded"]
     confirmed_exposure_tasks = [
@@ -4645,7 +5266,7 @@ def render_report(
     }
 
     lines = [
-        "# Context Tree Insights: Task-First Value Audit",
+        "# Context Tree Value Audit: Task-First Value Audit",
         "",
         f"Generated: {isoformat(generated_at)}",
         f"Acquisition bound: {window_start} – {window_end}",
@@ -4862,8 +5483,9 @@ def render_report(
             table_row(["Authorized Chats acquired", len(chat_message_counts)]),
             table_row(["Authorized Chat-Agent audit units", len(candidates)]),
             table_row(["Visible messages", message_count]),
-            table_row(["Chats mapped to local Codex traces", len(mapped_chat_ids)]),
-            table_row(["Audit units mapped to local Codex traces", mapped_audits]),
+            table_row(["Runtime evidence provider", runtime_provider]),
+            table_row(["Chats mapped to local runtime evidence", len(mapped_chat_ids)]),
+            table_row(["Audit units mapped to local runtime evidence", mapped_audits]),
             table_row(["In-window Tree-read attempts", attempt_total]),
             table_row(["Chat-Agent evidence rows", len(candidates)]),
             table_row(["Task judgments", len(tasks)]),
@@ -4913,7 +5535,7 @@ def render_report(
             "",
             "Effects retain the four strict values `confirmed`, `constrained`, `redirected`, and `conflicted`. `verified` and `probable` preserve the original passage-level confidence; neither a receipt nor aligned output is server-verified causality.",
             "",
-            "This audit uses local Codex traces mapped by runtime-injected `chatId`. It remains read-only and limited to one explicitly authorized Agent, one workspace, and one bound Tree.",
+            f"{provider_note} The audit remains read-only and limited to one explicitly authorized Agent, one workspace, and one bound Tree.",
             "",
         ]
     )
@@ -4928,6 +5550,7 @@ def validate_report_candidate(
         raise AuditError(
             f"Every candidate must use schema_version {SCHEMA_VERSION}."
         )
+    runtime_provider = candidate_runtime_provider(value)
     chat = value.get("chat")
     if not isinstance(chat, dict):
         raise AuditError("Every candidate must contain a chat object.")
@@ -5062,6 +5685,7 @@ def validate_report_candidate(
         if (
             read.get("reader_agent_id") != workspace_identity.agent_id
             or read.get("tree_identity") != expected_tree_id
+            or read.get("runtime_provider", "codex") != runtime_provider
             or not isinstance(read.get("read_id"), str)
             or not isinstance(read.get("node_paths"), list)
             or not isinstance(read.get("passage"), str)
@@ -5238,7 +5862,7 @@ def finalize_report(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Read-only Context Tree Insights collector with deterministic "
+            "Read-only Context Tree Value Audit collector with deterministic "
             "Task-first judgment validation and reporting."
         )
     )
@@ -5276,7 +5900,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(handler=export_chats)
 
-    collect_parser = subparsers.add_parser("collect", help="Pair authorized Chat records with local Codex trace evidence.")
+    collect_parser = subparsers.add_parser(
+        "collect",
+        help="Pair authorized Chat records with local runtime evidence.",
+    )
     collect_parser.add_argument(
         "--artifact-root",
         required=True,
@@ -5292,7 +5919,15 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--now", help="Fixed RFC 3339 window end for reproducible runs.")
     collect_parser.add_argument(
         "--trace-root",
-        help="Codex sessions root (default: CODEX_HOME/sessions or ~/.codex/sessions).",
+        help="Optional provider-native evidence root; defaults are selected by runtime.",
+    )
+    collect_parser.add_argument(
+        "--runtime-provider",
+        choices=sorted(RUNTIME_PROVIDER_VALUES),
+        help=(
+            "Optional equality assertion for the required FIRST_TREE_PROVIDER "
+            "runtime identity."
+        ),
     )
     collect_parser.add_argument(
         "--agent-workspace",

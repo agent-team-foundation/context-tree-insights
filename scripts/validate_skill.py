@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the repository's Context Tree Insights skill contract."""
+"""Validate the repository's Context Tree Value Audit skill contract."""
 
 from __future__ import annotations
 
@@ -9,16 +9,21 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL_ROOT = ROOT / "skills" / "context-tree-insights"
+SKILL_ROOT = ROOT / "skills" / "context-tree-value-audit"
 SKILL_MD = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
+CLAUDE_SKILL_MD = (
+    ROOT / "projections" / "claude" / "context-tree-value-audit" / "SKILL.md"
+)
 EXPECTED_FILES = (
     SKILL_MD,
     OPENAI_YAML,
+    CLAUDE_SKILL_MD,
     SKILL_ROOT / "VERSION",
-    SKILL_ROOT / "scripts" / "context_tree_insights.py",
+    SKILL_ROOT / "scripts" / "context_tree_value_audit.py",
     SKILL_ROOT / "references" / "evidence-schema.md",
     SKILL_ROOT / "references" / "task-analysis-schema.md",
+    SKILL_ROOT / "references" / "runtime-evidence-adapters.md",
 )
 FORBIDDEN_PATH_FRAGMENTS = ("/Users/", "\\Users\\")
 FORBIDDEN_ARTIFACT_NAMES = {
@@ -69,6 +74,22 @@ def validate() -> None:
         fail("Skill name must match its directory name.")
     if not frontmatter["description"]:
         fail("Skill description must not be empty.")
+    claude_frontmatter = parse_frontmatter(
+        CLAUDE_SKILL_MD.read_text(encoding="utf-8")
+    )
+    if set(claude_frontmatter) != {
+        "name",
+        "description",
+        "disable-model-invocation",
+    }:
+        fail(
+            "Claude projection frontmatter must contain name, description, "
+            "and disable-model-invocation."
+        )
+    if claude_frontmatter["name"] != SKILL_ROOT.name:
+        fail("Claude projection name must match the canonical Skill name.")
+    if claude_frontmatter["disable-model-invocation"] != "true":
+        fail("Claude projection must disable model invocation.")
     version = (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
         fail("VERSION must contain one semantic version.")
@@ -79,8 +100,8 @@ def validate() -> None:
         openai_text,
     ):
         fail("agents/openai.yaml must disable implicit invocation.")
-    if "$context-tree-insights" not in openai_text:
-        fail("agents/openai.yaml default prompt must mention $context-tree-insights.")
+    if "$context-tree-value-audit" not in openai_text:
+        fail("agents/openai.yaml default prompt must mention $context-tree-value-audit.")
 
     for path in SKILL_ROOT.rglob("*"):
         if "__pycache__" in path.parts:

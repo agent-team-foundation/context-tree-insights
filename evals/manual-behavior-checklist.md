@@ -1,8 +1,15 @@
 # Manual Behavior Checklist
 
-Use this checklist before admitting a `context-tree-insights` revision. Run it
-in a designated First Tree Codex Agent workspace against disposable or
-sanitized records. Never commit generated artifacts.
+Use this checklist before admitting a `context-tree-value-audit` revision. Run it
+in designated First Tree Agent workspaces against disposable or sanitized
+records. Never commit generated artifacts.
+
+For a 0.2.4 upgrade, confirm the installed payload exposes only
+`$context-tree-value-audit`; the superseded `$context-tree-insights` directory
+must not remain as a second callable Skill. Exercise the README's minimal
+move/copy/compare flow and confirm the old payload is outside both Skill
+discovery roots. Confirm the Claude manual-invocation projection delegates to
+the new canonical payload.
 
 ## Run record
 
@@ -15,14 +22,16 @@ Record in a private note:
 - optional acquisition bound;
 - artifact directory;
 - clear Task quota and expansion batches.
+- current Runtime and evidence-adapter version.
 
 Capture the Tree HEAD, `git status --short`, and initial artifact directory
 listing. Do not copy real trace passages into the test note.
 
 ## 1. Explicit routing and scope
 
-In a fresh Chat, explicitly invoke `$context-tree-insights` and authorize
-either all Chats for the current Agent or exact Chat UUIDs.
+In a fresh Chat, explicitly invoke `$context-tree-value-audit` in Codex or
+`/context-tree-value-audit` in Claude and authorize either all Chats for the
+current Agent or exact Chat UUIDs.
 
 Pass when:
 
@@ -45,7 +54,32 @@ Pass when:
 - ordinary tasks do not load the Skill or scan history;
 - `policy.allow_implicit_invocation` remains `false`.
 
-## 2. Collector safety remains intact
+## 2. Runtime evidence adapters remain isolated
+
+Run the supported matrix with sanitized records:
+
+- Codex root session JSONL;
+- Claude Code root transcript JSONL;
+- Claude Code TUI through the same Claude transcript family.
+
+Pass when:
+
+- the selected adapter exactly matches `FIRST_TREE_PROVIDER`;
+- missing or invalid `FIRST_TREE_PROVIDER` fails closed instead of defaulting
+  to an adapter;
+- every adapter maps one authorized Chat, current Agent, workspace, and bound
+  Tree before accepting complete output;
+- Claude sidechain/subagent rows, tool-result echoes, and later session/Chat
+  drift do not become root evidence;
+- Cursor and Kimi Code produce explicit
+  `historical_evidence_not_supported` gaps, no read IDs, and pending Tasks;
+- no First Tree Runtime handler, local state schema, server, database, or Web
+  surface is changed for the audit;
+- equal-timestamp results appended before their calls remain unresolved;
+- a missing, cleaned, malformed, or unmapped source remains unresolved;
+- the audit core emits the same candidate and Task schema for every Runtime.
+
+## 3. Collector safety remains intact
 
 Use sanitized traces covering:
 
@@ -85,7 +119,7 @@ Pass when:
 - gaps remain diagnostic rather than being turned into negative exposure;
 - artifacts keep `0700`/`0600` permissions and opaque local identities.
 
-## 3. Receipt present, absent, and malformed
+## 4. Receipt present, absent, and malformed
 
 Export three sanitized messages:
 
@@ -104,7 +138,7 @@ Pass when:
 - malformed receipt is omitted with `context_decision_invalid`;
 - no malformed receipt blocks the message, Chat export, or audit.
 
-## 4. One Chat splits into multiple Tasks
+## 5. One Chat splits into multiple Tasks
 
 Use one Chat containing two distinct objectives and outcomes.
 
@@ -116,7 +150,7 @@ Pass when:
 - excluded Tasks contain no exposure or effects;
 - one read or choice copied into both Tasks is rejected.
 
-## 5. Cross-Chat handoff merge
+## 6. Cross-Chat handoff merge
 
 Use two Chats for one PR/MR/Issue or a visible handoff.
 
@@ -127,7 +161,7 @@ Pass when:
 - the same fragments without linkage are rejected;
 - unrelated Chats cannot be merged by topical similarity alone.
 
-## 6. Confirmed and unresolved exposure
+## 7. Confirmed and unresolved exposure
 
 Create one Task with attributable Task-window reads and one historical Task
 whose trace coverage cannot resolve exposure.
@@ -141,7 +175,7 @@ Pass when:
 - reads outside the Task window or source Chats are rejected;
 - unresolved Tasks appear in coverage counts, never an unused denominator.
 
-## 7. Four effects, anchors, and deduplication
+## 8. Four effects, anchors, and deduplication
 
 Prepare valid examples of `confirmed`, `constrained`, `redirected`, and
 `conflicted`, with `verified` or `probable` original judgments.
@@ -160,7 +194,7 @@ Pass when:
 - reporter-derived support is definite only for confirmed + verified and
   limited otherwise.
 
-## 8. Task quota and saturation
+## 9. Task quota and saturation
 
 Run a sanitized sequence with:
 
@@ -186,7 +220,7 @@ Pass when:
 - a Chat with messages inside the bound but later activity after `window.end`
   is fetched and filtered rather than omitted.
 
-## 9. Report conservation and language
+## 10. Report conservation and language
 
 Pass when the report includes:
 
@@ -222,7 +256,7 @@ After collection, redo Task-level exposure and effect judgment. Never reuse
 the old blanket `unresolved` / empty-effects rows as negative cases, and never
 let the current rerun erase the separately reviewed 37 positive effect Tasks.
 
-## 10. No product or source mutation
+## 11. No product or source mutation
 
 Compare pre-run and post-run state.
 

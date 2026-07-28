@@ -100,6 +100,7 @@ gaps. It never blocks Chat export or the full audit.
     "end": "RFC3339"
   },
   "tree_identity": "tree-opaque-hash",
+  "runtime_provider": "claude-code",
   "candidate_status": "candidate",
   "mapped_trace_files": ["trace-opaque-hash"],
   "collector_diagnostics": {
@@ -121,6 +122,7 @@ gaps. It never blocks Chat export or the full audit.
       "call_id": "provider-call-id",
       "nested_call_index": null,
       "tool_name": "exec_command",
+      "runtime_provider": "claude-code",
       "reader_agent_id": "AGENT_UUID",
       "tree_identity": "tree-opaque-hash",
       "node_paths": ["system/example.md"],
@@ -172,11 +174,16 @@ before `window.start`.
 
 `tree_identity` is a deterministic opaque identity for the exact
 Agent/workspace-bound Tree. The audit-row and read-level values must match.
+`runtime_provider` is the canonical local evidence adapter. Schema-v1
+artifacts produced by 0.2.x omitted it because that release was Codex-only;
+the reporter interprets that legacy omission as `codex`.
 
 `mapped_trace_files` and the compatibility-named `session_file` field contain
-opaque trace identities, never local filesystem paths. Only local root Codex
-sessions that pass bounded preflight for the exact workspace and one authorized
-runtime-injected `chatId` may be scanned.
+opaque evidence identities, never local filesystem paths. Each local Runtime
+source must pass its adapter's bounded preflight for the exact workspace, one
+authorized Chat, and the current Agent before complete outputs may be scanned.
+The exact sources and support matrix are defined in
+[runtime-evidence-adapters.md](runtime-evidence-adapters.md).
 
 `collector_diagnostics` counts command-shape decisions, not effects. Every
 in-window call whose payload can be tied to bound-Tree Markdown is classified
@@ -255,5 +262,5 @@ equal attempt count.
 effect still requires the Agent to judge a current decision, constraint,
 rationale, or cross-domain relationship in normal content.
 
-Missing, cleaned, malformed, truncated, unsupported, or non-Codex traces remain
-coverage gaps. They do not become negative exposure evidence.
+Missing, cleaned, malformed, truncated, unsupported, or unmapped Runtime
+evidence remains a coverage gap. It does not become negative exposure evidence.
