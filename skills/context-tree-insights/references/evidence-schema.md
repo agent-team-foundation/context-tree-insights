@@ -214,11 +214,16 @@ read-only command shapes:
 - one trace must map unambiguously to one authorized Chat and exact workspace;
 - documented direct readers and statically extractable
   `functions.exec`/`exec_command` content reads are accepted;
+- an outer `functions.exec` assignment may omit only the final JavaScript
+  semicolon when it still forwards the same nested result's `.output` directly;
+  every nested command and workdir must remain literal;
 - a call is paired with its exact output and continuations;
 - explicit multi-file reads, multiple read statements, static `for` loops,
-  read-only pipelines, filesystem predicates, hierarchy selectors, labels,
-  line counts, and bounded read-only git diagnostics may coexist at the
-  command-classification layer;
+  single-branch literal filesystem guards, read-only pipelines, filesystem
+  predicates, hierarchy selectors, labels, line counts, and bounded read-only
+  git diagnostics may coexist at the command-classification layer;
+- conditional guards with dynamic values, alternate branches, nested control,
+  or an unsafe body stay unresolved or rejected;
 - null-sink diagnostic output is allowed, while file output is rejected;
 - nested shell calls are kept as separate read slices when provider output
   preserves that boundary; otherwise the read is marked

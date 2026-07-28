@@ -170,7 +170,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("in_window_tree_read_attempts", reference)
         self.assertIn("unresolved_opaque", reference)
         self.assertIn("collector failure never reverses", task_reference)
-        self.assertEqual("0.2.2", version)
+        self.assertEqual("0.2.3", version)
         self.assertNotIn(
             "/Users/", "\n".join((skill, openai, reference, task_reference))
         )
@@ -1527,6 +1527,199 @@ print(json.dumps({{"ok": True, "data": data}}))
             candidate["coverage_gaps"],
         )
 
+    def test_literal_if_guards_preserve_reads_and_fail_closed(self) -> None:
+        self.write_chat_export()
+        commands = {
+            "test-guard": (
+                f"if test -f {self.tree_file}; then "
+                f"sed -n '1,80p' {self.tree_file}; fi"
+            ),
+            "bracket-guard": (
+                f"if [ -r {self.second_tree_file} ]; then "
+                f"cat {self.second_tree_file}; fi"
+            ),
+            "read-sequence": (
+                f"cat {self.tree_file} && "
+                f"if [ -r {self.second_tree_file} ]; then "
+                f"sed -n '1,80p' {self.second_tree_file}; fi && "
+                f"cat {self.tree_file}"
+            ),
+            "mixed-diagnostic": (
+                f"git -C {self.tree_root} status && "
+                f"cat {self.tree_file} && "
+                f"if [ -r {self.second_tree_file} ]; then "
+                f"cat {self.second_tree_file}; fi"
+            ),
+            "else-branch": (
+                f"if test -f {self.tree_file}; then "
+                f"cat {self.tree_file}; else cat {self.second_tree_file}; fi"
+            ),
+            "dynamic-guard": (
+                f'if test -f "$NODE"; then cat {self.tree_file}; fi'
+            ),
+            "mutating-body": (
+                f"if test -f {self.tree_file}; then "
+                f"git -C {self.tree_root} pull; cat {self.tree_file}; fi"
+            ),
+        }
+        for index, (label, command) in enumerate(commands.items(), start=1):
+            call_id = f"call-if-{label}"
+            write_jsonl(
+                self.trace_root / f"if-{label}.jsonl",
+                [
+                    session_meta(self.workspace),
+                    context_row(CHAT_ID),
+                    {
+                        "timestamp": f"2026-07-22T12:0{index}:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "call_id": call_id,
+                            "arguments": json.dumps(
+                                {
+                                    "cmd": command,
+                                    "workdir": str(self.workspace),
+                                }
+                            ),
+                        },
+                    },
+                    {
+                        "timestamp": f"2026-07-22T12:0{index}:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": f"literal-if-output-{label}",
+                        },
+                    },
+                ],
+            )
+
+        result = self.collect("literal-if-candidate.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "literal-if-candidate.jsonl"
+        )[0]
+        self.assertEqual(3, len(candidate["reads"]))
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 4,
+                "unresolved_opaque": 2,
+                "rejected_unsafe": 1,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {
+                "unresolved_shell_conditional": 1,
+                "unresolved_unknown_program": 1,
+                "unsafe_git_mutation": 1,
+            },
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+        self.assertIn(
+            "tree_read_auxiliary_output_unresolved",
+            candidate["coverage_gaps"],
+        )
+
+    def test_semicolonless_forwarding_rechecks_inner_literals(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        sources = {
+            "literal-first": (
+                "const result = await tools.exec_command({"
+                f"cmd: `cat {self.tree_file}`, "
+                f"workdir: `{self.workspace}`"
+                "});\n"
+                "text(result.output)"
+            ),
+            "literal-second": (
+                "const result = await tools.exec_command({"
+                f"cmd: `cat {self.second_tree_file}`, "
+                f"workdir: `{self.workspace}`"
+                "});\n"
+                "text(result.output)"
+            ),
+            "dynamic-command": (
+                "const result = await tools.exec_command({"
+                f"cmd: prefix + `cat {self.tree_file}`, "
+                f"workdir: `{self.workspace}`"
+                "});\n"
+                "text(result.output)"
+            ),
+            "dynamic-workdir": (
+                "const result = await tools.exec_command({"
+                f"cmd: `cat {self.tree_file}`, workdir: selectedWorkdir"
+                "});\n"
+                "text(result.output)"
+            ),
+            "dynamic-options": (
+                "const result = await tools.exec_command({"
+                f"cmd: `cat {self.tree_file}`, "
+                f"workdir: `{self.workspace}`, yield_time_ms: selectedYield"
+                "});\n"
+                "text(result.output)"
+            ),
+        }
+        for index, (label, source) in enumerate(sources.items(), start=1):
+            call_id = f"call-semicolonless-{label}"
+            write_jsonl(
+                self.trace_root / f"semicolonless-{label}.jsonl",
+                [
+                    session_meta(self.workspace),
+                    context_row(CHAT_ID),
+                    {
+                        "timestamp": f"2026-07-22T13:0{index}:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "name": "functions.exec",
+                            "call_id": call_id,
+                            "input": source,
+                        },
+                    },
+                    {
+                        "timestamp": f"2026-07-22T13:0{index}:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": call_id,
+                            "output": [
+                                {
+                                    "type": "input_text",
+                                    "text": f"semicolonless-output-{label}",
+                                }
+                            ],
+                        },
+                    },
+                ],
+            )
+
+        result = self.collect("semicolonless-candidate.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "semicolonless-candidate.jsonl"
+        )[0]
+        self.assertEqual(2, len(candidate["reads"]))
+        self.assertEqual(
+            {
+                "accepted_exact": 2,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 3,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {
+                "unresolved_exec_dynamic_arguments": 3,
+            },
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+
     def test_exec_orchestration_fail_closes_dynamic_and_unsafe_shapes(self) -> None:
         self.write_chat_export()
         shapes = (
@@ -1967,10 +2160,58 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertIn("Tree-read grammar conservation", markdown)
         self.assertIn("| accepted_exact | 1 |", markdown)
         self.assertIn("| accepted_read_only_composite | 3 |", markdown)
+        for status in (
+            "accepted_exact",
+            "accepted_read_only_composite",
+            "unresolved_opaque",
+            "rejected_unsafe",
+        ):
+            self.assertEqual(
+                1,
+                markdown.count(f"| {status} |"),
+                f"report duplicated the {status} conservation row",
+            )
         evidence = read_jsonl(self.artifacts / "evidence-one.jsonl")
         self.assertEqual(
             "definite", evidence[0]["effects"][0]["derived_support"]
         )
+
+        pilot_counts_candidate = json.loads(json.dumps(candidate))
+        pilot_counts_candidate["collector_diagnostics"] = {
+            "in_window_tree_read_attempts": 210,
+            "attempt_status_counts": {
+                "accepted_exact": 24,
+                "accepted_read_only_composite": 75,
+                "unresolved_opaque": 101,
+                "rejected_unsafe": 10,
+            },
+            "attempt_reason_counts": {
+                "unresolved_exec_wrapper_shape": 101,
+                "unsafe_shell_shape": 10,
+            },
+        }
+        write_jsonl(
+            self.artifacts / "pilot-counts-candidates.jsonl",
+            [pilot_counts_candidate],
+        )
+        pilot_counts = self.report(
+            [task],
+            candidates_name="pilot-counts-candidates.jsonl",
+            evidence_name="pilot-counts-evidence.jsonl",
+            report_name="pilot-counts-REPORT.md",
+        )
+        self.assertEqual(0, pilot_counts.returncode, pilot_counts.stderr)
+        pilot_markdown = (
+            self.artifacts / "pilot-counts-REPORT.md"
+        ).read_text(encoding="utf-8")
+        for expected_row in (
+            "| accepted_exact | 24 |",
+            "| accepted_read_only_composite | 75 |",
+            "| unresolved_opaque | 101 |",
+            "| rejected_unsafe | 10 |",
+            "| Total | 210 |",
+        ):
+            self.assertEqual(1, pilot_markdown.count(expected_row))
 
         nonconserving_candidate = json.loads(json.dumps(candidate))
         nonconserving_candidate["collector_diagnostics"][

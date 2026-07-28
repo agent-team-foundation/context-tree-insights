@@ -1439,6 +1439,103 @@ def expand_static_for_loop(
     return expanded, None
 
 
+def expand_literal_if_guard(
+    segments: Sequence[ShellSegment],
+) -> tuple[list[ShellSegment] | None, str | None]:
+    """Flatten one literal if/test guard while preserving its guarded body."""
+    control_indexes = [
+        index
+        for index, segment in enumerate(segments)
+        if segment.tokens
+        and segment.tokens[0] in {"if", "then", "elif", "else", "fi"}
+    ]
+    if not control_indexes:
+        return list(segments), None
+    if any(
+        segments[index].tokens[0] in {"elif", "else"}
+        for index in control_indexes
+    ):
+        return None, "unresolved_shell_conditional"
+    if_indexes = [
+        index
+        for index in control_indexes
+        if segments[index].tokens[0] == "if"
+    ]
+    fi_indexes = [
+        index
+        for index in control_indexes
+        if segments[index].tokens[0] == "fi"
+    ]
+    then_indexes = [
+        index
+        for index in control_indexes
+        if segments[index].tokens[0] == "then"
+    ]
+    if (
+        len(if_indexes) != 1
+        or len(fi_indexes) != 1
+        or len(then_indexes) != 1
+    ):
+        return None, "unresolved_shell_conditional"
+    if_index = if_indexes[0]
+    then_index = then_indexes[0]
+    fi_index = fi_indexes[0]
+    if not if_index < then_index < fi_index:
+        return None, "unresolved_shell_conditional"
+
+    header = segments[if_index]
+    terminator = segments[fi_index]
+    if (
+        header.input_mode != "none"
+        or header.output_discarded
+        or len(header.tokens) < 2
+        or terminator.tokens != ("fi",)
+        or terminator.input_mode != "none"
+        or terminator.output_discarded
+    ):
+        return None, "unresolved_shell_conditional"
+    guard_tokens = header.tokens[1:]
+    if Path(guard_tokens[0]).name not in {"test", "["}:
+        return None, "unresolved_shell_conditional"
+
+    body = list(segments[then_index:fi_index])
+    first = body.pop(0)
+    if len(first.tokens) > 1:
+        body.insert(
+            0,
+            ShellSegment(
+                tokens=first.tokens[1:],
+                input_mode=first.input_mode,
+                output_discarded=first.output_discarded,
+            ),
+        )
+    if not body or any(
+        segment.tokens
+        and segment.tokens[0] in {"if", "then", "elif", "else", "fi"}
+        for segment in body
+    ):
+        return None, "unresolved_shell_conditional"
+
+    prefix = list(segments[:if_index])
+    suffix = list(segments[fi_index + 1 :])
+    if any(
+        segment.tokens
+        and segment.tokens[0] in {"if", "then", "elif", "else", "fi"}
+        for segment in (*prefix, *suffix)
+    ):
+        return None, "unresolved_shell_conditional"
+    return [
+        *prefix,
+        ShellSegment(
+            tokens=guard_tokens,
+            input_mode="none",
+            output_discarded=False,
+        ),
+        *body,
+        *suffix,
+    ], None
+
+
 def markdown_token_path(
     token: str,
     workdir: Path,
@@ -2192,6 +2289,13 @@ def shell_command_assessment(
             if node_paths or allow_diagnostic_plan
             else ReadAssessment(None, None, "not_a_tree_markdown_read")
         )
+    segments, reason = expand_literal_if_guard(segments)
+    if segments is None:
+        return (
+            rejected_assessment(reason or "unresolved_shell_conditional")
+            if node_paths or allow_diagnostic_plan
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
 
     workdir = command_workdir(payload, default_workdir)
     current_workdir = workdir
@@ -2614,6 +2718,15 @@ def orchestration_wrapper_shape(
 ) -> str | None:
     identifier = r"[A-Za-z_][A-Za-z0-9_]*"
     call = r"__EXEC_CALL__"
+
+    single_forward = re.fullmatch(
+        rf"\s*(?:const|let|var)\s+(?P<result>{identifier})\s*=\s*"
+        rf"await\s+{call}\s*;\s*"
+        rf"text\s*\(\s*(?P=result)\.output\s*\)\s*;?\s*",
+        skeleton,
+    )
+    if single_forward is not None and nested_count == 1:
+        return "sequential"
 
     sequential = re.fullmatch(
         rf"\s*(?P<decls>(?:(?:const|let|var)\s+{identifier}\s*=\s*"
