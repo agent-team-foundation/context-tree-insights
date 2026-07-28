@@ -102,6 +102,16 @@ gaps. It never blocks Chat export or the full audit.
   "tree_identity": "tree-opaque-hash",
   "candidate_status": "candidate",
   "mapped_trace_files": ["trace-opaque-hash"],
+  "collector_diagnostics": {
+    "in_window_tree_read_attempts": 1,
+    "attempt_status_counts": {
+      "accepted_exact": 1,
+      "accepted_read_only_composite": 0,
+      "unresolved_opaque": 0,
+      "rejected_unsafe": 0
+    },
+    "attempt_reason_counts": {}
+  },
   "reads": [
     {
       "read_id": "stable-id",
@@ -109,10 +119,20 @@ gaps. It never blocks Chat export or the full audit.
       "completed_at": "RFC3339",
       "session_file": "trace-opaque-hash",
       "call_id": "provider-call-id",
+      "nested_call_index": null,
       "tool_name": "exec_command",
       "reader_agent_id": "AGENT_UUID",
       "tree_identity": "tree-opaque-hash",
       "node_paths": ["system/example.md"],
+      "read_components": [
+        {
+          "reader": "sed",
+          "node_paths": ["system/example.md"]
+        }
+      ],
+      "read_mode": "isolated",
+      "output_attribution": "exact",
+      "auxiliary_output_possible": false,
       "content_class_hint": "normal",
       "command": "normalized read descriptor",
       "command_truncated": false,
@@ -158,6 +178,24 @@ opaque trace identities, never local filesystem paths. Only local root Codex
 sessions that pass bounded preflight for the exact workspace and one authorized
 runtime-injected `chatId` may be scanned.
 
+`collector_diagnostics` counts command-shape decisions, not effects. Every
+in-window call whose payload can be tied to bound-Tree Markdown is classified
+exactly once:
+
+- `accepted_exact` — one statically closed content read with exact output
+  forwarding;
+- `accepted_read_only_composite` — a statically closed read-only wrapper,
+  multi-file read, sequence, loop, or pipeline;
+- `unresolved_opaque` — dynamic interpolation, unknown program, incomplete
+  path closure, or output attribution that cannot be proved;
+- `rejected_unsafe` — mutation, file output, network access, or a proven
+  Tree-external read.
+
+The four status counts must sum to `in_window_tree_read_attempts`. Reason
+counts conserve the unresolved and rejected calls. The acquisition window is
+applied before diagnostics, so an older call cannot contaminate the current
+run's gaps.
+
 `visible_messages` supports Task reconstruction. `visible_choice_candidates`
 contains only later visible messages authored by the audited Agent; human or
 other-Agent messages cannot establish that Agent's effect.
@@ -169,16 +207,44 @@ exposure unresolved.
 
 ## Read evidence
 
-The collector retains the existing conservative trace rules:
+The collector retains conservative trace rules while recognizing real
+read-only command shapes:
 
 - bounded metadata/current-context preflight happens before full trace scan;
 - one trace must map unambiguously to one authorized Chat and exact workspace;
-- only documented built-in read identities are accepted;
+- documented direct readers and statically extractable
+  `functions.exec`/`exec_command` content reads are accepted;
 - a call is paired with its exact output and continuations;
-- one successful, isolated Markdown read is required;
-- compound, mixed, mutating, stdin, lookalike, cross-tree, failed, or pending
-  output is rejected or recorded as a coverage gap;
+- explicit multi-file reads, multiple read statements, static `for` loops,
+  read-only pipelines, filesystem predicates, hierarchy selectors, labels,
+  line counts, and bounded read-only git diagnostics may coexist at the
+  command-classification layer;
+- null-sink diagnostic output is allowed, while file output is rejected;
+- nested shell calls are kept as separate read slices when provider output
+  preserves that boundary; otherwise the read is marked
+  `output_attribution: aggregate` and receives an attribution gap;
+- deterministic static labels are removed only when exactly attributable;
+  an accepted command that mixes unseparated dynamic diagnostic output with
+  Tree output receives an attribution gap and produces no read ID;
+- `auxiliary_output_possible` records that a composite contained safe
+  auxiliary operations, but persisted passage bytes have already passed the
+  attribution gate;
+- dynamic, unknown, stdin, lookalike, cross-tree, failed, pending, mutating, or
+  network shapes are unresolved or rejected and produce no read ID;
 - historical output is never replaced with the current Tree file.
+
+`read_components` conserves `node_paths`. `read_mode: isolated` implies
+`output_attribution: exact`; `read_only_composite` uses aggregate attribution
+unless provider-native output blocks permit safe nested-call slicing. An
+accepted command shape is still only candidate evidence: the Task auditor
+must verify that the recorded passage actually contains decision-bearing Tree
+content before confirming exposure or an effect.
+
+When one outer orchestration call forwards multiple provider-native output
+blocks, the collector emits one read row per attributable nested shell call
+and sets `nested_call_index`. The outer call still contributes exactly one
+four-state attempt classification; read-row count is therefore not required to
+equal attempt count.
 
 `content_class_hint` is path-based triage, not a semantic verdict. A qualifying
 effect still requires the Agent to judge a current decision, constraint,

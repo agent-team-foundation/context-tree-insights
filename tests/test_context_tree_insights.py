@@ -145,12 +145,15 @@ class RepositoryContractTests(unittest.TestCase):
         task_reference = (
             SKILL_ROOT / "references" / "task-analysis-schema.md"
         ).read_text(encoding="utf-8")
+        version = (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
         self.assertIn("name: context-tree-insights", skill)
         self.assertIn("$context-tree-insights", skill)
         self.assertIn("manual and read-only", skill)
         self.assertIn("Do not trigger from an ordinary task", skill)
         self.assertIn("all authorized Chats are not an eligible", skill)
+        self.assertIn("accepted_read_only_composite", skill)
+        self.assertIn("N/A / pending", skill)
         self.assertIn("allow_implicit_invocation: false", openai)
         self.assertIn("explicit_agent", reference)
         self.assertIn("explicit_chat", reference)
@@ -164,6 +167,10 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertIn(rubric_key, task_reference)
         self.assertIn("all five checks are `true`", task_reference)
         self.assertIn("first four checks are `true`", task_reference)
+        self.assertIn("in_window_tree_read_attempts", reference)
+        self.assertIn("unresolved_opaque", reference)
+        self.assertIn("collector failure never reverses", task_reference)
+        self.assertEqual("0.2.2", version)
         self.assertNotIn(
             "/Users/", "\n".join((skill, openai, reference, task_reference))
         )
@@ -181,6 +188,12 @@ class DeterministicPipelineTests(unittest.TestCase):
         self.tree_file.parent.mkdir(parents=True)
         self.tree_file.write_text(
             "# Architecture\n\n## Decision\n\nChat history is the authoritative state.\n",
+            encoding="utf-8",
+        )
+        self.second_tree_file = self.tree_root / "team-practice" / "dogfooding.md"
+        self.second_tree_file.parent.mkdir(parents=True)
+        self.second_tree_file.write_text(
+            "# Dogfooding\n\n## Decision\n\nUse First Tree in daily work.\n",
             encoding="utf-8",
         )
         write_workspace_identity(self.workspace, self.tree_root)
@@ -797,6 +810,100 @@ print(json.dumps({{"ok": True, "data": data}}))
             ],
         )
 
+        write_jsonl(
+            self.trace_root / "read-only-composite.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:03:10Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-read-only-composite",
+                        "arguments": json.dumps(
+                            {
+                                "cmd": (
+                                    f"cd {self.tree_root} && "
+                                    "test -f system/architecture.md && "
+                                    "printf '%s\\n' tree-node-content && "
+                                    "sed -n '1,80p' system/architecture.md && "
+                                    "sed -n '1,80p' team-practice/dogfooding.md"
+                                ),
+                                "workdir": str(self.workspace),
+                            }
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:03:11Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-read-only-composite",
+                        "output": (
+                            "Process exited with code 0\n"
+                            "tree-node-content\n"
+                            "# Architecture\n\n## Decision\n\n"
+                            "Chat history is the authoritative state.\n"
+                            "# Dogfooding\n\n## Decision\n\n"
+                            "Use First Tree in daily work."
+                        ),
+                    },
+                },
+            ],
+        )
+
+        orchestration_source = (
+            "var nested = await tools.exec_command({"
+            f"cmd: `sed -n '1,80p' {self.tree_file}; "
+            f"sed -n '1,80p' {self.second_tree_file}`, "
+            f'workdir: "{self.workspace}", '
+            "yield_time_ms: 10000, max_output_tokens: 1000});\n"
+            "text(nested.output);"
+        )
+        write_jsonl(
+            self.trace_root / "exec-orchestration.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:03:20Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "call_id": "call-exec-orchestration",
+                        "input": orchestration_source,
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:03:21Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call-exec-orchestration",
+                        "output": [
+                            {
+                                "type": "input_text",
+                                "text": "Script completed successfully\nOutput:\n",
+                            },
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "# Architecture\n\n## Decision\n\n"
+                                    "Chat history is the authoritative state.\n"
+                                    "# Dogfooding\n\n## Decision\n\n"
+                                    "Use First Tree in daily work."
+                                ),
+                            },
+                        ],
+                    },
+                },
+            ],
+        )
+
         other_tree = self.root / "other-tree"
         other_file = other_tree / "system" / "architecture.md"
         other_file.parent.mkdir(parents=True)
@@ -931,10 +1038,11 @@ print(json.dumps({{"ok": True, "data": data}}))
         candidates_name: str = "candidates.jsonl",
         evidence_name: str = "evidence.jsonl",
         report_name: str = "REPORT.md",
+        reviewed_baseline_name: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         task_path = self.artifacts / "task-judgments.jsonl"
         write_jsonl(task_path, tasks)
-        return run_cli(
+        arguments = [
             "report",
             "--artifact-root",
             str(self.artifacts),
@@ -950,9 +1058,17 @@ print(json.dumps({{"ok": True, "data": data}}))
             str(self.artifacts / report_name),
             "--generated-at",
             NOW,
-        )
+        ]
+        if reviewed_baseline_name is not None:
+            arguments.extend(
+                [
+                    "--reviewed-baseline",
+                    str(self.artifacts / reviewed_baseline_name),
+                ]
+            )
+        return run_cli(*arguments)
 
-    def test_collect_prefilters_trace_and_isolates_single_tree_reads(self) -> None:
+    def test_collect_prefilters_trace_and_recovers_read_only_composites(self) -> None:
         self.write_chat_export()
         self.write_trace_fixtures()
 
@@ -970,13 +1086,55 @@ print(json.dumps({{"ok": True, "data": data}}))
         candidate = rows[0]
         self.assertEqual("candidate", candidate["candidate_status"])
         self.assertTrue(candidate["tree_identity"].startswith("tree-"))
-        self.assertEqual(1, len(candidate["reads"]))
-        read = candidate["reads"][0]
-        self.assertEqual(["system/architecture.md"], read["node_paths"])
-        self.assertEqual(candidate["tree_identity"], read["tree_identity"])
-        self.assertIn("authoritative state", read["passage"])
+        self.assertEqual(4, len(candidate["reads"]))
+        isolated_read, compound_read, composite_read, orchestration_read = candidate[
+            "reads"
+        ]
+        self.assertEqual(["system/architecture.md"], isolated_read["node_paths"])
+        self.assertEqual("isolated", isolated_read["read_mode"])
+        self.assertEqual(candidate["tree_identity"], isolated_read["tree_identity"])
+        self.assertIn("authoritative state", isolated_read["passage"])
+        self.assertEqual(
+            [
+                "system/architecture.md",
+                "team-practice/dogfooding.md",
+            ],
+            composite_read["node_paths"],
+        )
+        self.assertEqual("read_only_composite", composite_read["read_mode"])
+        self.assertEqual(
+            [
+                {
+                    "reader": "sed",
+                    "node_paths": ["system/architecture.md"],
+                },
+                {
+                    "reader": "sed",
+                    "node_paths": ["team-practice/dogfooding.md"],
+                },
+            ],
+            composite_read["read_components"],
+        )
+        self.assertIn("authoritative state", composite_read["passage"])
+        self.assertIn("daily work", composite_read["passage"])
+        self.assertEqual("read_only_composite", compound_read["read_mode"])
+        self.assertEqual("read_only_composite", orchestration_read["read_mode"])
+        self.assertEqual("exec", orchestration_read["tool_name"])
+        self.assertEqual(
+            {
+                "accepted_exact": 1,
+                "accepted_read_only_composite": 3,
+                "unresolved_opaque": 0,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            4,
+            candidate["collector_diagnostics"]["in_window_tree_read_attempts"],
+        )
         self.assertTrue(all(item.startswith("trace-") for item in candidate["mapped_trace_files"]))
-        self.assertIn("composite_shell_tree_read_rejected", candidate["coverage_gaps"])
+        self.assertEqual([], candidate["coverage_gaps"])
         self.assertEqual([MESSAGE_ID], [
             message["message_id"] for message in candidate["visible_choice_candidates"]
         ])
@@ -984,6 +1142,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         serialized = json.dumps(candidate, sort_keys=True)
         self.assertNotIn("private-unauthorized-sentinel", serialized)
         self.assertNotIn("mixed-output-sentinel", serialized)
+        self.assertNotIn("tree-node-content", serialized)
         self.assertNotIn("outside-bound-tree-sentinel", serialized)
         self.assertNotIn(str(self.root), serialized)
         self.assertEqual(
@@ -1059,6 +1218,637 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertNotIn(
             "codex_trace_preflight_malformed_or_ambiguous",
             candidate["coverage_gaps"],
+        )
+
+    def test_exec_command_continuations_complete_one_read_attempt(self) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "continued-read.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-started-read",
+                        "arguments": json.dumps(
+                            {
+                                "cmd": f"cat {self.tree_file}",
+                                "workdir": str(self.workspace),
+                            }
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-started-read",
+                        "output": "Script running with session ID 731",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "write_stdin",
+                        "call_id": "call-continued-read",
+                        "arguments": json.dumps(
+                            {"session_id": 731, "chars": ""}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:03Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-continued-read",
+                        "output": (
+                            "Process exited with code 0\n"
+                            "# Architecture\n\n## Decision\n\n"
+                            "Chat history is the authoritative state."
+                        ),
+                    },
+                },
+            ],
+        )
+
+        result = self.collect("continued-candidate.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(self.artifacts / "continued-candidate.jsonl")[0]
+        self.assertEqual(1, len(candidate["reads"]))
+        self.assertIn("authoritative state", candidate["reads"][0]["passage"])
+        self.assertNotIn("tree_read_output_pending", candidate["coverage_gaps"])
+        self.assertEqual(
+            1,
+            candidate["collector_diagnostics"]["attempt_status_counts"][
+                "accepted_exact"
+            ],
+        )
+
+    def test_continuation_after_acquisition_end_stays_pending(self) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "late-continuation.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-23T23:59:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-late-start",
+                        "arguments": json.dumps(
+                            {
+                                "cmd": f"cat {self.tree_file}",
+                                "workdir": str(self.workspace),
+                            }
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-23T23:59:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-late-start",
+                        "output": "Script running with session ID 732",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-24T00:01:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "write_stdin",
+                        "call_id": "call-late-finish",
+                        "arguments": json.dumps(
+                            {"session_id": 732, "chars": ""}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-24T00:01:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-late-finish",
+                        "output": (
+                            "Process exited with code 0\n"
+                            "# Architecture\n\nlate-private-passage"
+                        ),
+                    },
+                },
+            ],
+        )
+
+        result = self.collect("late-continuation-candidate.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "late-continuation-candidate.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertIn("tree_read_output_pending", candidate["coverage_gaps"])
+        self.assertNotIn("late-private-passage", json.dumps(candidate))
+
+    def test_exec_orchestration_classifies_exact_and_promise_all(self) -> None:
+        self.write_chat_export()
+        exact_source = (
+            "const result = await tools.exec_command({"
+            f"cmd: `cat {self.tree_file}`, workdir: `{self.workspace}`"
+            "});\ntext(result.output);"
+        )
+        promise_source = (
+            "const results = await Promise.all(["
+            "tools.exec_command({"
+            f"cmd: `cat {self.tree_file}`, workdir: `{self.workspace}`"
+            "}),"
+            "tools.exec_command({"
+            f"cmd: `cat {self.second_tree_file}`, workdir: `{self.workspace}`"
+            "})]);\nresults.forEach((result) => text(result.output));"
+        )
+        loop_source = (
+            "const result = await tools.exec_command({"
+            "cmd: `for node in "
+            f"{self.tree_file} {self.second_tree_file}; "
+            "do sed -n '1,80p' \"$node\"; done`, "
+            f"workdir: `{self.workspace}`"
+            "});\ntext(result.output);"
+        )
+        null_sink_source = (
+            "const result = await tools.exec_command({"
+            f"cmd: `test -f {self.tree_file} >/dev/null 2>&1 && "
+            f"sed -n '1,80p' {self.tree_file}`, "
+            f"workdir: `{self.workspace}`"
+            "});\ntext(result.output);"
+        )
+        diagnostic_source = (
+            "const results = await Promise.all(["
+            "tools.exec_command({"
+            f"cmd: `pwd`, workdir: `{self.workspace}`"
+            "}),"
+            "tools.exec_command({"
+            f"cmd: `cat {self.tree_file}`, workdir: `{self.workspace}`"
+            "})]);\nresults.forEach((result) => text(result.output));"
+        )
+        for filename, call_id, timestamp, source, output in (
+            (
+                "exec-exact.jsonl",
+                "call-exec-exact",
+                "2026-07-22T10:02:00Z",
+                exact_source,
+                "# Architecture\n\nChat history is authoritative.",
+            ),
+            (
+                "exec-promise.jsonl",
+                "call-exec-promise",
+                "2026-07-22T10:03:00Z",
+                promise_source,
+                [
+                    "# Architecture\n\nChat history is authoritative.\n"
+                    ,
+                    "# Dogfooding\n\nUse First Tree daily.",
+                ],
+            ),
+            (
+                "exec-loop.jsonl",
+                "call-exec-loop",
+                "2026-07-22T10:04:00Z",
+                loop_source,
+                (
+                    "# Architecture\n\nChat history is authoritative.\n"
+                    "# Dogfooding\n\nUse First Tree daily."
+                ),
+            ),
+            (
+                "exec-null-sink.jsonl",
+                "call-exec-null-sink",
+                "2026-07-22T10:05:00Z",
+                null_sink_source,
+                "# Architecture\n\nChat history is authoritative.",
+            ),
+            (
+                "exec-diagnostic.jsonl",
+                "call-exec-diagnostic",
+                "2026-07-22T10:06:00Z",
+                diagnostic_source,
+                [
+                    str(self.workspace),
+                    "# Architecture\n\nChat history is authoritative.",
+                ],
+            ),
+        ):
+            write_jsonl(
+                self.trace_root / filename,
+                [
+                    session_meta(self.workspace),
+                    context_row(CHAT_ID),
+                    {
+                        "timestamp": timestamp,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "name": "functions.exec",
+                            "call_id": call_id,
+                            "input": source,
+                        },
+                    },
+                    {
+                        "timestamp": timestamp,
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": call_id,
+                            "output": [
+                                {
+                                    "type": "input_text",
+                                    "text": (
+                                        "Script completed successfully\nOutput:\n"
+                                    ),
+                                },
+                                *[
+                                    {"type": "input_text", "text": item}
+                                    for item in (
+                                        output
+                                        if isinstance(output, list)
+                                        else [output]
+                                    )
+                                ],
+                            ],
+                        },
+                    },
+                ],
+            )
+
+        result = self.collect("exec-orchestration-candidate.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "exec-orchestration-candidate.jsonl"
+        )[0]
+        self.assertEqual(6, len(candidate["reads"]))
+        self.assertEqual(
+            [
+                "isolated",
+                "isolated",
+                "isolated",
+                "read_only_composite",
+                "read_only_composite",
+                "isolated",
+            ],
+            [read["read_mode"] for read in candidate["reads"]],
+        )
+        self.assertEqual(
+            ["exact", "exact", "exact", "aggregate", "aggregate", "exact"],
+            [read["output_attribution"] for read in candidate["reads"]],
+        )
+        self.assertNotIn(
+            "Script completed successfully",
+            "\n".join(read["passage"] for read in candidate["reads"]),
+        )
+        self.assertEqual(
+            {
+                "accepted_exact": 1,
+                "accepted_read_only_composite": 4,
+                "unresolved_opaque": 0,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertIn(
+            "tree_read_auxiliary_output_unresolved",
+            candidate["coverage_gaps"],
+        )
+
+    def test_exec_orchestration_fail_closes_dynamic_and_unsafe_shapes(self) -> None:
+        self.write_chat_export()
+        shapes = (
+            (
+                "dynamic",
+                (
+                    f"const target = `{self.tree_file}`;\n"
+                    "const result = await tools.exec_command({"
+                    "cmd: `sed -n '1,80p' ${target}`});\n"
+                    "text(result.output);"
+                ),
+            ),
+            (
+                "unknown-program",
+                (
+                    "const result = await tools.exec_command({"
+                    f"cmd: `awk '{{print}}' {self.tree_file}`"
+                    "});\ntext(result.output);"
+                ),
+            ),
+            (
+                "file-redirection",
+                (
+                    "const result = await tools.exec_command({"
+                    f"cmd: `cat {self.tree_file} > captured.txt`, "
+                    f"workdir: `{self.workspace}`"
+                    "});\ntext(result.output);"
+                ),
+            ),
+            (
+                "git-pull",
+                (
+                    "const result = await tools.exec_command({"
+                    f"cmd: `git -C {self.tree_root} pull && "
+                    f"cat {self.tree_file}`"
+                    "});\ntext(result.output);"
+                ),
+            ),
+            (
+                "outside-tree",
+                (
+                    "const result = await tools.exec_command({"
+                    f"cmd: `cat {self.tree_file} /private/outside/example.md`"
+                    "});\ntext(result.output);"
+                ),
+            ),
+        )
+        for index, (label, source) in enumerate(shapes, start=1):
+            call_id = f"call-{label}"
+            write_jsonl(
+                self.trace_root / f"{label}.jsonl",
+                [
+                    session_meta(self.workspace),
+                    context_row(CHAT_ID),
+                    {
+                        "timestamp": f"2026-07-22T10:0{index}:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "name": "exec",
+                            "call_id": call_id,
+                            "input": source,
+                        },
+                    },
+                    {
+                        "timestamp": f"2026-07-22T10:0{index}:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": call_id,
+                            "output": f"unsafe-private-{label}",
+                        },
+                    },
+                ],
+            )
+
+        result = self.collect("exec-fail-closed.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(self.artifacts / "exec-fail-closed.jsonl")[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 2,
+                "rejected_unsafe": 3,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {
+                "unresolved_exec_wrapper_shape": 1,
+                "unresolved_unknown_program": 1,
+                "unsafe_shell_redirection": 1,
+                "unsafe_git_mutation": 1,
+                "unsafe_literal_non_tree_path": 1,
+            },
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+        self.assertNotIn("unsafe-private-", json.dumps(candidate, sort_keys=True))
+
+    def test_exec_orchestration_rejects_wrapper_side_effects_and_reordering(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        call = (
+            "tools.exec_command({"
+            f"cmd: `cat {self.tree_file}`, workdir: `{self.workspace}`"
+            "})"
+        )
+        second_call = (
+            "tools.exec_command({"
+            f"cmd: `cat {self.second_tree_file}`, workdir: `{self.workspace}`"
+            "})"
+        )
+        sources = {
+            "mutated-output": (
+                f"let result = await {call}; "
+                'result.output = "forged"; text(result.output);'
+            ),
+            "aliased-text": (
+                f"const emit = text; const result = await {call}; "
+                'emit("forged"); text(result.output);'
+            ),
+            "promise-side-effect": (
+                "const results = await Promise.all(["
+                f"{call}, {second_call}"
+                "]); results.forEach((result) => {"
+                'result.output = "forged"; text(result.output); });'
+            ),
+            "reversed-forwarding": (
+                f"const first = await {call}; "
+                f"const second = await {second_call}; "
+                "text(second.output); text(first.output);"
+            ),
+            "dead-branch": (
+                f"const result = await {call}; "
+                'if (false) { text("forged"); } text(result.output);'
+            ),
+            "property-expression": (
+                "const result = await tools.exec_command({"
+                f"cmd: `cat {self.tree_file}`, "
+                'max_output_tokens: text("forged")'
+                "}); text(result.output);"
+            ),
+            "duplicate-command": (
+                "const result = await tools.exec_command({"
+                f"cmd: `cat {self.tree_file}`, "
+                f"cmd: `cat {self.second_tree_file}`"
+                "}); text(result.output);"
+            ),
+            "unknown-nested-command": (
+                "const results = await Promise.all(["
+                'tools.exec_command({cmd: "date"}), '
+                f"{call}"
+                "]); results.forEach((result) => text(result.output));"
+            ),
+            "unsafe-nested-command": (
+                "const results = await Promise.all(["
+                'tools.exec_command({cmd: "curl https://example.invalid"}), '
+                f"{call}"
+                "]); results.forEach((result) => text(result.output));"
+            ),
+        }
+        for index, (label, source) in enumerate(sources.items(), start=1):
+            call_id = f"call-wrapper-{label}"
+            write_jsonl(
+                self.trace_root / f"wrapper-{label}.jsonl",
+                [
+                    session_meta(self.workspace),
+                    context_row(CHAT_ID),
+                    {
+                        "timestamp": f"2026-07-22T11:0{index}:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call",
+                            "name": "functions.exec",
+                            "call_id": call_id,
+                            "input": source,
+                        },
+                    },
+                    {
+                        "timestamp": f"2026-07-22T11:0{index}:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "custom_tool_call_output",
+                            "call_id": call_id,
+                            "output": f"forged-wrapper-output-{label}",
+                        },
+                    },
+                ],
+            )
+
+        result = self.collect("exec-wrapper-adversarial.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "exec-wrapper-adversarial.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 8,
+                "rejected_unsafe": 1,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertNotIn(
+            "forged-wrapper-output",
+            json.dumps(candidate, sort_keys=True),
+        )
+
+    def test_git_rg_and_stderr_shapes_fail_closed(self) -> None:
+        self.write_chat_export()
+        root_node = self.tree_root / "NODE.md"
+        root_node.write_text("# Root\n", encoding="utf-8")
+        outside = self.root / "outside-secret.md"
+        outside.write_text("outside", encoding="utf-8")
+        shapes = (
+            (
+                "git-output",
+                (
+                    f"git -C {self.tree_root} diff "
+                    f"--output={self.root / 'captured.diff'} && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-no-index",
+                (
+                    f"cd {self.tree_root} && "
+                    f"git diff --no-index NODE.md {outside} && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "rg-pattern-only",
+                f"cd {self.tree_root} && rg {self.tree_file}",
+                "opaque",
+            ),
+            (
+                "rg-file-read",
+                f"cd {self.tree_root} && rg Decision system/architecture.md",
+                "read",
+            ),
+            (
+                "git-remote",
+                (
+                    f"git -C {self.tree_root} remote get-url origin && "
+                    f"cat {self.tree_file}"
+                ),
+                "accepted-no-passage",
+            ),
+            (
+                "stderr-null",
+                f"sed -n '1,80p' {self.tree_file} 2>/dev/null",
+                "read",
+            ),
+        )
+        for index, (label, command, expected) in enumerate(shapes, start=1):
+            call_id = f"call-{label}"
+            output = (
+                "# Architecture\n\n## Decision\n\n"
+                "Chat history is the authoritative state."
+                if expected == "read"
+                else "diagnostic-or-private-output"
+            )
+            write_jsonl(
+                self.trace_root / f"{label}.jsonl",
+                [
+                    session_meta(self.workspace),
+                    context_row(CHAT_ID),
+                    {
+                        "timestamp": f"2026-07-22T11:1{index}:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "call_id": call_id,
+                            "arguments": json.dumps(
+                                {
+                                    "cmd": command,
+                                    "workdir": str(self.workspace),
+                                }
+                            ),
+                        },
+                    },
+                    {
+                        "timestamp": f"2026-07-22T11:1{index}:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": f"Process exited with code 0\n{output}",
+                        },
+                    },
+                ],
+            )
+
+        result = self.collect("git-rg-stderr.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(self.artifacts / "git-rg-stderr.jsonl")[0]
+        self.assertEqual(2, len(candidate["reads"]))
+        self.assertEqual(
+            {
+                "accepted_exact": 1,
+                "accepted_read_only_composite": 2,
+                "unresolved_opaque": 1,
+                "rejected_unsafe": 2,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertIn(
+            "tree_read_auxiliary_output_unresolved",
+            candidate["coverage_gaps"],
+        )
+        self.assertNotIn(
+            "diagnostic-or-private-output",
+            json.dumps(candidate, sort_keys=True),
         )
 
     def test_preflight_rejects_conflicting_mirror_and_mirror_only_trace(
@@ -1174,9 +1964,32 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertIn("| constrained | 1 |", markdown)
         self.assertIn("definite **1**", markdown)
         self.assertIn("not a global effectiveness rate", markdown)
+        self.assertIn("Tree-read grammar conservation", markdown)
+        self.assertIn("| accepted_exact | 1 |", markdown)
+        self.assertIn("| accepted_read_only_composite | 3 |", markdown)
         evidence = read_jsonl(self.artifacts / "evidence-one.jsonl")
         self.assertEqual(
             "definite", evidence[0]["effects"][0]["derived_support"]
+        )
+
+        nonconserving_candidate = json.loads(json.dumps(candidate))
+        nonconserving_candidate["collector_diagnostics"][
+            "in_window_tree_read_attempts"
+        ] += 1
+        write_jsonl(
+            self.artifacts / "nonconserving-candidates.jsonl",
+            [nonconserving_candidate],
+        )
+        nonconserving = self.report(
+            [task],
+            candidates_name="nonconserving-candidates.jsonl",
+            evidence_name="nonconserving-evidence.jsonl",
+            report_name="nonconserving-REPORT.md",
+        )
+        self.assertEqual(2, nonconserving.returncode)
+        self.assertIn(
+            "collector diagnostics do not conserve",
+            nonconserving.stderr,
         )
 
         duplicate_task = json.loads(json.dumps(task))
@@ -1300,7 +2113,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         )
         self.assertEqual(0, result.returncode, result.stderr)
         report = (self.artifacts / "outside-REPORT.md").read_text(encoding="utf-8")
-        self.assertIn("No representative effect Task was selected.", report)
+        self.assertIn("Status: **N/A / pending**", report)
         self.assertIn("| Excluded Tasks | 1 |", report)
 
     def test_one_chat_splits_into_two_tasks_and_duplicate_read_is_rejected(
@@ -1452,7 +2265,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         )
         self.assertEqual(0, linked.returncode, linked.stderr)
 
-    def test_sampling_saturates_reproducibly_at_100_plus_20_plus_20(self) -> None:
+    def test_sampling_requires_evidence_before_saturation(self) -> None:
         self.write_chat_export()
         self.write_trace_fixtures()
         collected = self.collect("candidates.jsonl")
@@ -1497,18 +2310,56 @@ print(json.dumps({{"ok": True, "data": data}}))
         ]
         for index, task in enumerate(tasks):
             task["task_type"] = task_types[index % len(task_types)]
+        write_jsonl(
+            self.artifacts / "reviewed-baseline.jsonl",
+            [
+                {
+                    "schema_version": 1,
+                    "basis": "separately_reviewed_task_cases",
+                    "reviewed_at": "2026-07-22T12:00:00Z",
+                    "evidence_anchor": {
+                        "artifact_id": "reviewed-task-cases-v1",
+                        "sha256": "a" * 64,
+                    },
+                    "clear_tasks": 162,
+                    "effect_tasks": 37,
+                    "independent_effects": 37,
+                    "effect_counts": {
+                        "confirmed": 5,
+                        "constrained": 17,
+                        "redirected": 13,
+                        "conflicted": 2,
+                    },
+                    "support_counts": {
+                        "definite": 24,
+                        "limited": 13,
+                    },
+                }
+            ],
+        )
         result = self.report(
             tasks,
             evidence_name="saturation-evidence.jsonl",
             report_name="saturation-REPORT.md",
+            reviewed_baseline_name="reviewed-baseline.jsonl",
         )
         self.assertEqual(0, result.returncode, result.stderr)
         report = (self.artifacts / "saturation-REPORT.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Status: `saturated`; clear Tasks: **140**", report)
-        self.assertIn("| 101–120 | none |", report)
-        self.assertIn("| 121–140 | none |", report)
+        self.assertIn(
+            "Status: `effect_analysis_pending`; clear Tasks: **140**",
+            report,
+        )
+        self.assertIn("| Effect Tasks | N/A |", report)
+        self.assertIn("Effect saturation: **N/A / pending**", report)
+        self.assertNotIn("## Effect Distribution", report)
+        self.assertNotIn("| 101–120 | none |", report)
+        self.assertIn("## Separately Reviewed Historical Baseline", report)
+        self.assertIn("| Reviewed clear Tasks | 162 |", report)
+        self.assertIn("| Reviewed effect Tasks | 37 |", report)
+        self.assertIn("| constrained | 17 |", report)
+        self.assertIn("definite **24**, limited **13**", report)
 
         spurious_signal_tasks = json.loads(json.dumps(tasks))
         spurious_signal_tasks[100]["saturation_signals"] = ["new_effect_type"]
@@ -1520,26 +2371,59 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(2, spurious_signal.returncode)
         self.assertIn("must not declare new_effect_type", spurious_signal.stderr)
 
-        effect_candidate = json.loads(json.dumps(candidate))
-        effect_candidate["candidate_status"] = "candidate"
-        effect_candidate["mapped_trace_files"] = source_candidate[
+        ready_candidate = json.loads(json.dumps(candidate))
+        ready_candidate["candidate_status"] = "candidate"
+        ready_candidate["mapped_trace_files"] = source_candidate[
             "mapped_trace_files"
         ]
-        effect_candidate["reads"] = source_candidate["reads"]
-        effect_candidate["visible_messages"][120] = source_candidate[
-            "visible_choice_candidates"
-        ][0]
-        effect_candidate["visible_choice_candidates"] = source_candidate[
-            "visible_choice_candidates"
-        ]
-        write_jsonl(self.artifacts / "candidates.jsonl", [effect_candidate])
+        read_template = source_candidate["reads"][0]
+        ready_candidate["reads"] = []
+        for index in range(1, 141):
+            current_read = json.loads(json.dumps(read_template))
+            current_read["read_id"] = f"sample-read-{index:03d}"
+            current_read["call_id"] = f"sample-call-{index:03d}"
+            ready_candidate["reads"].append(current_read)
+        ready_candidate["visible_choice_candidates"] = json.loads(
+            json.dumps(ready_candidate["visible_messages"])
+        )
+        write_jsonl(self.artifacts / "candidates.jsonl", [ready_candidate])
 
-        novel_tasks = json.loads(json.dumps(tasks))
+        ready_tasks = [
+            self.task_judgment(
+                ready_candidate,
+                task_id=f"sample-task-{index:03d}",
+                message_id=f"sample-message-{index:03d}",
+                sampling_order=index,
+                exposure_status="confirmed",
+                read_ids=[f"sample-read-{index:03d}"],
+                effects=[],
+            )
+            for index in range(1, 141)
+        ]
+        for index, task in enumerate(ready_tasks):
+            task["task_type"] = task_types[index % len(task_types)]
+        ready = self.report(
+            ready_tasks,
+            evidence_name="ready-saturation-evidence.jsonl",
+            report_name="ready-saturation-REPORT.md",
+        )
+        self.assertEqual(0, ready.returncode, ready.stderr)
+        ready_report = (
+            self.artifacts / "ready-saturation-REPORT.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Status: `saturated`; clear Tasks: **140**", ready_report)
+        self.assertIn("| 101–120 | none |", ready_report)
+        self.assertIn("| 121–140 | none |", ready_report)
+        self.assertIn("| Independent effects | 0 |", ready_report)
+
+        novel_tasks = json.loads(json.dumps(ready_tasks))
         novel_tasks[120] = self.task_judgment(
-            effect_candidate,
+            ready_candidate,
             task_id="sample-task-121",
-            message_id=MESSAGE_ID,
+            message_id="sample-message-121",
             sampling_order=121,
+            exposure_status="confirmed",
+            read_ids=["sample-read-121"],
         )
         missing_signal = self.report(
             novel_tasks,
@@ -1629,7 +2513,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertIn("traverse a symbolic link", linked_result.stderr)
         self.assertFalse((real_parent / "audit").exists())
 
-    def test_read_grammar_rejects_stdin_and_suffix_lookalikes(self) -> None:
+    def test_read_grammar_conserves_safe_unresolved_and_unsafe_attempts(self) -> None:
         self.write_chat_export()
         for filename, tool_name, arguments, sentinel in (
             (
@@ -1643,6 +2527,51 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "mcp__untrusted__read_file",
                 {"path": str(self.tree_file)},
                 "lookalike-mixed-sentinel",
+            ),
+            (
+                "semicolon.jsonl",
+                "exec_command",
+                {
+                    "cmd": (
+                        f"cat {self.tree_file}; "
+                        "printf semicolon-mixed-sentinel"
+                    ),
+                    "workdir": str(self.workspace),
+                },
+                "semicolon-mixed-sentinel",
+            ),
+            (
+                "pipe.jsonl",
+                "exec_command",
+                {
+                    "cmd": f"cat {self.tree_file} | head",
+                    "workdir": str(self.workspace),
+                },
+                "pipe-mixed-sentinel",
+            ),
+            (
+                "mutating-find.jsonl",
+                "exec_command",
+                {
+                    "cmd": (
+                        f"cat {self.tree_file} && "
+                        f"find {self.tree_root} -delete"
+                    ),
+                    "workdir": str(self.workspace),
+                },
+                "mutating-find-sentinel",
+            ),
+            (
+                "mutating-git.jsonl",
+                "exec_command",
+                {
+                    "cmd": (
+                        f"cat {self.tree_file} && "
+                        f"git -C {self.tree_root} branch -D temporary"
+                    ),
+                    "workdir": str(self.workspace),
+                },
+                "mutating-git-sentinel",
             ),
         ):
             call_id = f"call-{filename}"
@@ -1667,21 +2596,89 @@ print(json.dumps({{"ok": True, "data": data}}))
                         "payload": {
                             "type": "function_call_output",
                             "call_id": call_id,
-                            "output": f"Process exited with code 0\n{sentinel}",
+                            "output": (
+                                "Process exited with code 0\n"
+                                "# Architecture\n\n"
+                                "Chat history is the authoritative state.\n"
+                                + (
+                                    sentinel
+                                    if filename == "semicolon.jsonl"
+                                    else ""
+                                )
+                            ),
                         },
                     },
                 ],
             )
 
+        write_jsonl(
+            self.trace_root / "outside-window-unsafe.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-16T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-outside-window-unsafe",
+                        "arguments": json.dumps(
+                            {
+                                "cmd": f"rm {self.tree_file}",
+                                "workdir": str(self.workspace),
+                            }
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-16T10:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-outside-window-unsafe",
+                        "output": "Process exited with code 0\noutside-window-sentinel",
+                    },
+                },
+            ],
+        )
+
         result = self.collect("rejected-reads.jsonl")
         self.assertEqual(0, result.returncode, result.stderr)
         candidate = read_jsonl(self.artifacts / "rejected-reads.jsonl")[0]
-        self.assertEqual([], candidate["reads"])
-        self.assertIn("stdin_tree_read_rejected", candidate["coverage_gaps"])
-        self.assertIn("unsupported_tree_read_tool", candidate["coverage_gaps"])
+        self.assertEqual(2, len(candidate["reads"]))
+        self.assertTrue(
+            all(read["read_mode"] == "read_only_composite" for read in candidate["reads"])
+        )
+        self.assertIn("unresolved_stdin_tree_read", candidate["coverage_gaps"])
+        self.assertIn("unresolved_tree_read_tool", candidate["coverage_gaps"])
+        self.assertIn("unsafe_find_action", candidate["coverage_gaps"])
+        self.assertIn("unsafe_git_mutation", candidate["coverage_gaps"])
+        self.assertNotIn("unsafe_program_rm", candidate["coverage_gaps"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 2,
+                "unresolved_opaque": 2,
+                "rejected_unsafe": 2,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            6,
+            candidate["collector_diagnostics"]["in_window_tree_read_attempts"],
+        )
         serialized = json.dumps(candidate, sort_keys=True)
-        self.assertNotIn("stdin-mixed-sentinel", serialized)
-        self.assertNotIn("lookalike-mixed-sentinel", serialized)
+        for sentinel in ("semicolon-mixed-sentinel", "pipe-mixed-sentinel"):
+            self.assertNotIn(sentinel, serialized)
+        for sentinel in (
+            "stdin-mixed-sentinel",
+            "lookalike-mixed-sentinel",
+            "mutating-find-sentinel",
+            "mutating-git-sentinel",
+            "outside-window-sentinel",
+        ):
+            self.assertNotIn(sentinel, serialized)
 
 
 if __name__ == "__main__":

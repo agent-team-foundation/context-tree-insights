@@ -52,16 +52,36 @@ Use sanitized traces covering:
 - canonical current-context plus matching mirror;
 - conflicting mirror, mirror-only, missing Chat ID, and two canonical Chat IDs;
 - successful direct file read;
-- compound/mixed command, stdin, suffix lookalike, failed output, and pending
-  continuation;
+- `functions.exec` with one literal nested read, `Promise.all`, multiple
+  literal reads, static `for`, multi-path operands, safe pipelines,
+  predicates, labels, hierarchy selectors, line counts, and read-only git;
+- dynamic interpolation, unknown programs, stdin, suffix lookalikes, failed
+  output, and pending/completed continuations;
+- null-sink output, file output, git mutation, network programs, and literal
+  non-Tree paths;
 - another Tree path and an unauthorized trace with a unique sentinel.
 
 Pass when:
 
 - authorization preflight happens before full content scanning;
 - only the exact authorized root Codex trace is mapped;
-- only successful isolated reads of the bound Tree are retained;
-- unauthorized or mixed sentinels never appear in output;
+- exact and statically closed read-only composite reads of the bound Tree are
+  retained, with nested output sliced when provider blocks preserve it;
+- each in-window Tree-read attempt lands in exactly one of
+  `accepted_exact`, `accepted_read_only_composite`, `unresolved_opaque`, or
+  `rejected_unsafe`, and the four counts conserve the total;
+- calls outside the acquisition window do not contaminate attempt counts or
+  coverage gaps;
+- dynamic/unknown calls remain unresolved; mutation, file output, network
+  access, and Tree-external reads are rejected;
+- unauthorized, unresolved, and unsafe sentinels never appear in output;
+- deterministic labels are removed from passages; unseparated dynamic
+  diagnostics produce no read ID, even when the command grammar itself is
+  accepted;
+- wrapper aliases, output mutation, reversed forwarding, callback side
+  effects, duplicate properties, unsafe git options, and `rg` patterns that
+  merely look like Markdown paths all fail closed;
+- initial calls and exact `write_stdin`/`wait` continuations form one attempt;
 - gaps remain diagnostic rather than being turned into negative exposure;
 - artifacts keep `0700`/`0600` permissions and opaque local identities.
 
@@ -155,6 +175,8 @@ Pass when:
 - the report records 100 + 20 + 20 and saturation at 140;
 - a new effect type, key counterexample, or conclusion change resets the
   consecutive-empty counter;
+- unresolved exposure never counts as an empty effect batch or establishes
+  saturation;
 - missing or spurious `new_effect_type` annotations are rejected against the
   actual cumulative effect-type set;
 - rows beyond an already established saturation point are rejected;
@@ -174,6 +196,7 @@ Pass when the report includes:
 - effect distribution and task type × effect;
 - derived support and sampling status;
 - authorized Chat/message/trace coverage and gaps.
+- the four-class in-window Tree-read attempt conservation table.
 
 Verify:
 
@@ -183,6 +206,21 @@ Verify:
 - the report does not output a global effectiveness rate;
 - read counts, receipts, and unresolved gaps are not represented as causal
   value or non-value.
+- zero evidence-ready Tasks render effect totals, distribution, support,
+  representatives, and saturation as `N/A / pending`, never numeric zero.
+- an optional reviewed baseline is hash-anchored, internally conserving, and
+  rendered separately; it does not alter current exposure, effects, or
+  saturation.
+
+For the 0.2.1 historical pilot rerun, the 210 in-window calls must all remain
+accounted for. Compare the new result with the grammar-only overlay
+(`19 exact + 145 read-only composite + 42 opaque + 4 unsafe`). Any deliberate
+delta must name the command-shape class and the stricter attribution or safety
+reason. Do not tune the parser merely to reproduce the target counts.
+
+After collection, redo Task-level exposure and effect judgment. Never reuse
+the old blanket `unresolved` / empty-effects rows as negative cases, and never
+let the current rerun erase the separately reviewed 37 positive effect Tasks.
 
 ## 10. No product or source mutation
 

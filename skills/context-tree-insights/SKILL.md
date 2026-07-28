@@ -131,9 +131,14 @@ directory.
 
 Before fully scanning a trace, require bounded metadata/current-context
 preflight to establish one authorized `chatId` for the exact workspace. Never
-search arbitrary full traces to discover an authorized Chat. Keep the existing
-single-file read isolation, exact output pairing, completion, cross-tree, and
-coverage-gap rules.
+search arbitrary full traces to discover an authorized Chat. Classify every
+in-window call that references bound-Tree Markdown exactly once as
+`accepted_exact`, `accepted_read_only_composite`, `unresolved_opaque`, or
+`rejected_unsafe`; the four counts must conserve the attempt total. Allow only
+statically closed read-only wrappers, paths, programs, and forwarded outputs.
+Keep exact output/continuation pairing and reject writes, mutation, network
+access, and literal Tree-external reads. Unknown or dynamic shapes remain
+unresolved rather than becoming negative exposure.
 
 For message metadata:
 
@@ -200,9 +205,16 @@ python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" report \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
   --candidates "$CTI_ARTIFACT_DIR/candidates.jsonl" \
   --task-judgments "$CTI_ARTIFACT_DIR/task-judgments.jsonl" \
+  --reviewed-baseline "$CTI_ARTIFACT_DIR/reviewed-baseline.jsonl" \
   --evidence-output "$CTI_ARTIFACT_DIR/evidence.jsonl" \
   --report-output "$CTI_ARTIFACT_DIR/REPORT.md"
 ```
+
+Omit `--reviewed-baseline` when no independently reviewed earlier case set
+exists. When supplied, it must be a one-row, hash-anchored aggregate that
+conserves its reviewed Task, effect, and support counts. The reporter renders
+it in a separate historical-baseline section; it never imports those effects
+into unresolved current Tasks or into current saturation.
 
 The deterministic reporter rejects unauthorized source messages, Task-window
 violations, unlinked cross-Chat merges, duplicated reads/choices, invalid
@@ -219,7 +231,12 @@ The report must include:
 - derived definite/limited support;
 - quota and saturation status;
 - authorized Chat, message, trace, and coverage-gap counts;
+- the four-class in-window Tree-read attempt conservation table;
 - explicit language that unresolved and receipt absence are unknown;
+- `N/A / pending`, without effect totals or saturation, when no clear Task has
+  evidence-ready exposure;
+- a separately labeled, evidence-anchored historical baseline when supplied,
+  without merging it into the current rerun;
 - no global effectiveness rate.
 
 Because all authorized Chats are not an eligible value denominator, return local links

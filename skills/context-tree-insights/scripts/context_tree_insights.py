@@ -8,6 +8,7 @@ judged at Task level after authorized Chat evidence has been collected.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import ipaddress
 import json
@@ -59,6 +60,7 @@ TRACE_PREFLIGHT_MAX_BYTES = 512 * 1024
 TRACE_PREFLIGHT_MAX_LINES = 512
 PURE_READ_COMMANDS = {"bat", "cat", "head", "nl", "sed", "tail"}
 EXEC_COMMAND_TOOLS = {"exec_command", "functions.exec_command"}
+EXEC_ORCHESTRATION_TOOLS = {"exec", "functions.exec"}
 DIRECT_READ_TOOLS = {
     "read_file",
     "view_file",
@@ -67,11 +69,105 @@ DIRECT_READ_TOOLS = {
 }
 SHELL_CONTINUATION_TOOLS = {"write_stdin", "functions.write_stdin"}
 CELL_CONTINUATION_TOOLS = {"wait", "functions.wait"}
-MIXED_OR_MUTATING_TOOLS = {
-    "exec",
-    "functions.exec",
+MUTATING_TOOLS = {
     "apply_patch",
     "functions.apply_patch",
+}
+READ_ATTEMPT_STATUSES = (
+    "accepted_exact",
+    "accepted_read_only_composite",
+    "unresolved_opaque",
+    "rejected_unsafe",
+)
+KNOWN_UNSAFE_PROGRAMS = {
+    "bash",
+    "chmod",
+    "chown",
+    "cp",
+    "curl",
+    "dd",
+    "eval",
+    "install",
+    "ln",
+    "mv",
+    "nc",
+    "perl",
+    "python",
+    "python3",
+    "rm",
+    "rsync",
+    "scp",
+    "sh",
+    "source",
+    "ssh",
+    "tee",
+    "truncate",
+    "wget",
+    "xargs",
+    "zsh",
+}
+SAFE_GIT_DIAGNOSTICS = {
+    "diff",
+    "log",
+    "merge-base",
+    "remote",
+    "rev-parse",
+    "show",
+    "status",
+}
+MUTATING_GIT_COMMANDS = {
+    "add",
+    "am",
+    "apply",
+    "bisect",
+    "branch",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "clone",
+    "commit",
+    "fetch",
+    "gc",
+    "init",
+    "merge",
+    "mv",
+    "pull",
+    "push",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "stash",
+    "submodule",
+    "switch",
+    "tag",
+    "worktree",
+}
+UNSAFE_GIT_OPTIONS = {
+    "--exec-path",
+    "--ext-diff",
+    "--no-index",
+    "--output",
+    "--textconv",
+}
+UNSAFE_FIND_ACTIONS = {
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-fls",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-ok",
+    "-okdir",
+}
+UNSAFE_RG_OPTIONS = {
+    "--generate",
+    "--pre",
+    "--pre-glob",
+    "--replace",
+    "-r",
 }
 _ARTIFACT_LEXICAL_ROOTS: dict[Path, Path] = {}
 UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -91,8 +187,14 @@ TREE_MENTION_PATTERN = re.compile(
     r"(?:^|[\s\"'`(])(?:[^\s/\"'`()]+/)+[^\s\"'`()]+\.md(?=$|[\s\"'`,;:)])",
     re.IGNORECASE | re.UNICODE,
 )
-SHELL_SESSION_PATTERN = re.compile(r"(?:session ID|session_id[\"']?\s*[:=])\s*([0-9]+)", re.IGNORECASE)
-CELL_SESSION_PATTERN = re.compile(r"(?:cell ID|cell_id[\"']?\s*[:=])\s*([A-Za-z0-9_.:-]+)", re.IGNORECASE)
+SHELL_SESSION_PATTERN = re.compile(
+    r"\A\s*Script running with session ID\s+([0-9]+)\s*\Z",
+    re.IGNORECASE,
+)
+CELL_SESSION_PATTERN = re.compile(
+    r"\A\s*Script running with cell ID\s+([A-Za-z0-9_.:-]+)\s*\Z",
+    re.IGNORECASE,
+)
 
 
 class AuditError(RuntimeError):
@@ -143,6 +245,38 @@ class TracePreflight:
     audit_id: str
     agent_id: str
     workspace: Path
+
+
+@dataclass(frozen=True)
+class ReadComponent:
+    reader: str
+    node_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReadPlan:
+    node_paths: tuple[str, ...]
+    components: tuple[ReadComponent, ...]
+    command: str
+    mode: str
+    auxiliary_output_possible: bool = False
+    auxiliary_literals: tuple[str, ...] = ()
+    output_requires_separation: bool = False
+
+
+@dataclass(frozen=True)
+class ReadAssessment:
+    plan: ReadPlan | None
+    status: str | None
+    reason: str | None
+    subplans: tuple[ReadPlan, ...] = ()
+
+
+@dataclass(frozen=True)
+class ShellSegment:
+    tokens: tuple[str, ...]
+    input_mode: str
+    output_discarded: bool = False
 
 
 def parse_datetime(value: str, *, field: str = "timestamp") -> datetime:
@@ -1034,9 +1168,17 @@ def extract_node_paths(
     for match in re.finditer(r"""workdir\s*:\s*["'`]([^"'`]+)["'`]""", raw, re.UNICODE):
         workdirs.add(Path(match.group(1)).expanduser())
 
-    for value in arguments.values():
-        if not isinstance(value, str):
-            continue
+    def string_values(value: Any) -> Iterator[str]:
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, Mapping):
+            for child in value.values():
+                yield from string_values(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                yield from string_values(child)
+
+    for value in string_values(arguments):
         try:
             tokens = shlex.split(value)
         except ValueError:
@@ -1065,94 +1207,1659 @@ def extract_node_paths(
     return sorted(paths)
 
 
-def shell_tokens(command: str) -> list[str] | None:
-    if "\n" in command or "\r" in command or "`" in command or "$(" in command:
+def has_literal_non_tree_markdown(
+    payload: Mapping[str, Any],
+    tree_root: Path,
+) -> bool:
+    raw = tool_raw(payload).replace("\\/", "/")
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9_.@-])(/[^\s\"'`,;|&<>]+\.md)"
+        r"(?=$|[\s\"'`,;:)|&<>])",
+        raw,
+        re.UNICODE,
+    ):
+        candidate = Path(match.group(1)).expanduser().resolve(strict=False)
+        if not path_is_within(candidate, tree_root):
+            return True
+    return False
+
+
+def path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.expanduser().resolve(strict=False).relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def normalize_shell_newlines(command: str) -> str | None:
+    """Turn unquoted newlines into shell separators without changing quotes."""
+    output: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for character in command:
+        if escaped:
+            output.append(character)
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            output.append(character)
+            escaped = True
+            continue
+        if quote is None and character in {"'", '"'}:
+            quote = character
+            output.append(character)
+            continue
+        if quote == character:
+            quote = None
+            output.append(character)
+            continue
+        if quote is None and character in {"\n", "\r"}:
+            output.append(";")
+            continue
+        output.append(character)
+    if quote is not None or escaped:
         return None
+    return "".join(output)
+
+
+def shell_segments(
+    command: str,
+) -> tuple[list[ShellSegment] | None, str | None]:
+    normalized = normalize_shell_newlines(command)
+    if normalized is None:
+        return None, "unresolved_shell_syntax"
     try:
         lexer = shlex.shlex(
-            command,
+            normalized,
             posix=True,
-            punctuation_chars=";&|<>()",
+            punctuation_chars=";&|<>()`",
         )
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
     except ValueError:
-        return None
-    if any(token and set(token) <= set(";&|<>()") for token in tokens):
-        return None
-    return tokens
+        return None, "unresolved_shell_syntax"
+    if not tokens:
+        return None, "unresolved_empty_command"
+
+    segments: list[ShellSegment] = []
+    current: list[str] = []
+    input_mode = "none"
+    output_discarded = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {";", "&&", "||", "|"}:
+            if not current:
+                return None, "unresolved_shell_syntax"
+            segments.append(
+                ShellSegment(
+                    tokens=tuple(current),
+                    input_mode=input_mode,
+                    output_discarded=output_discarded,
+                )
+            )
+            current = []
+            input_mode = "pipe" if token == "|" else "none"
+            output_discarded = False
+            index += 1
+            continue
+        if (
+            token in {">", ">>", "&>"}
+            and index + 1 < len(tokens)
+            and tokens[index + 1] == "/dev/null"
+        ):
+            descriptor = "1"
+            if current and current[-1] in {"0", "1", "2"}:
+                descriptor = current.pop()
+            if descriptor in {"1", "&"}:
+                output_discarded = True
+            index += 2
+            continue
+        if (
+            token in {"0", "1", "2"}
+            and index + 2 < len(tokens)
+            and tokens[index + 1] == ">&"
+            and tokens[index + 2] in {"0", "1", "2"}
+        ):
+            index += 3
+            continue
+        if token and any(character in token for character in "<>"):
+            return None, "unsafe_shell_redirection"
+        if token == "&":
+            return None, "unsafe_background_shell"
+        if token in {"(", ")"}:
+            return None, "unresolved_shell_grouping"
+        if token == "`" or "$(" in token:
+            return None, "unresolved_command_substitution"
+        current.append(token)
+        index += 1
+    if not current:
+        return None, "unresolved_shell_syntax"
+    segments.append(
+        ShellSegment(
+            tokens=tuple(current),
+            input_mode=input_mode,
+            output_discarded=output_discarded,
+        )
+    )
+    return segments, None
 
 
-def pure_markdown_read_gap(
+def expand_static_for_loop(
+    segments: Sequence[ShellSegment],
+) -> tuple[list[ShellSegment] | None, str | None]:
+    control_indexes = [
+        index
+        for index, segment in enumerate(segments)
+        if segment.tokens
+        and segment.tokens[0] in {"for", "do", "done"}
+    ]
+    if not control_indexes:
+        return list(segments), None
+    for_indexes = [
+        index
+        for index in control_indexes
+        if segments[index].tokens[0] == "for"
+    ]
+    done_indexes = [
+        index
+        for index in control_indexes
+        if segments[index].tokens[0] == "done"
+    ]
+    if len(for_indexes) != 1 or len(done_indexes) != 1:
+        return None, "unresolved_shell_loop"
+    for_index = for_indexes[0]
+    done_index = done_indexes[0]
+    if done_index <= for_index:
+        return None, "unresolved_shell_loop"
+    header = segments[for_index]
+    if (
+        header.input_mode != "none"
+        or len(header.tokens) < 4
+        or header.tokens[2] != "in"
+    ):
+        return None, "unresolved_shell_loop"
+    variable = header.tokens[1]
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) is None:
+        return None, "unresolved_shell_loop"
+    values = list(header.tokens[3:])
+    if (
+        not values
+        or tokens_have_dynamic_expansion(values)
+        or any(not value.lower().endswith(".md") for value in values)
+    ):
+        return None, "unresolved_shell_loop"
+
+    body = list(segments[for_index + 1 : done_index])
+    if body and body[0].tokens and body[0].tokens[0] == "do":
+        first = body.pop(0)
+        if len(first.tokens) > 1:
+            body.insert(
+                0,
+                ShellSegment(
+                    tokens=first.tokens[1:],
+                    input_mode=first.input_mode,
+                    output_discarded=first.output_discarded,
+                ),
+            )
+    if not body or any(
+        segment.tokens
+        and segment.tokens[0] in {"for", "do", "done"}
+        for segment in body
+    ):
+        return None, "unresolved_shell_loop"
+
+    expanded: list[ShellSegment] = list(segments[:for_index])
+    variable_forms = {f"${variable}", f"${{{variable}}}"}
+    for value in values:
+        for segment in body:
+            if any(token in variable_forms for token in segment.tokens):
+                expanded.append(
+                    ShellSegment(
+                        tokens=tuple(
+                            value if token in variable_forms else token
+                            for token in segment.tokens
+                        ),
+                        input_mode=segment.input_mode,
+                        output_discarded=segment.output_discarded,
+                    )
+                )
+            else:
+                expanded.append(segment)
+    suffix = list(segments[done_index + 1 :])
+    if any(
+        segment.tokens
+        and segment.tokens[0] in {"for", "do", "done"}
+        for segment in suffix
+    ):
+        return None, "unresolved_shell_loop"
+    expanded.extend(suffix)
+    return expanded, None
+
+
+def markdown_token_path(
+    token: str,
+    workdir: Path,
+    tree_roots: Sequence[Path],
+) -> str | None:
+    cleaned = token.strip(" \t\r\n\"'`,;:()[]{}")
+    if (
+        not cleaned.lower().endswith(".md")
+        or any(character.isspace() for character in cleaned)
+        or any(character in cleaned for character in "*?[]{}")
+    ):
+        return None
+    candidate = Path(cleaned).expanduser()
+    return relative_tree_path(
+        candidate if candidate.is_absolute() else workdir / candidate,
+        tree_roots,
+    )
+
+
+def markdown_read_component(
+    tokens: Sequence[str],
+    workdir: Path,
+    tree_roots: Sequence[Path],
+) -> ReadComponent | None:
+    if not tokens:
+        return None
+    executable = Path(tokens[0]).name
+    if executable not in PURE_READ_COMMANDS:
+        return None
+    arguments = list(tokens[1:])
+    if not arguments or "-" in arguments:
+        return None
+
+    paths: list[str] = []
+    if executable == "sed":
+        expressions: list[str] = []
+        index = 0
+        while index < len(arguments):
+            token = arguments[index]
+            if token in {"-n", "--quiet", "--silent"}:
+                index += 1
+                continue
+            if token in {"-e", "--expression"}:
+                if index + 1 >= len(arguments):
+                    return None
+                expressions.append(arguments[index + 1])
+                index += 2
+                continue
+            if token.startswith("--expression="):
+                expressions.append(token.split("=", 1)[1])
+                index += 1
+                continue
+            if token.startswith("-"):
+                return None
+            node_path = markdown_token_path(token, workdir, tree_roots)
+            if node_path is not None:
+                paths.append(node_path)
+            elif not expressions:
+                expressions.append(token)
+            else:
+                return None
+            index += 1
+        if not expressions or any(
+            re.fullmatch(r"(?:\d+|\$)(?:,(?:\d+|\$))?p", expression) is None
+            for expression in expressions
+        ):
+            return None
+    else:
+        option_arguments = {
+            "head": {"-c", "--bytes", "-n", "--lines"},
+            "tail": {"-c", "--bytes", "-n", "--lines"},
+            "nl": {"-b", "--body-numbering", "-d", "--section-delimiter", "-f",
+                   "--footer-numbering", "-h", "--header-numbering", "-i",
+                   "--line-increment", "-l", "--join-blank-lines", "-n",
+                   "--number-format", "-s", "--number-separator", "-v",
+                   "--starting-line-number", "-w", "--number-width"},
+        }
+        needs_value = option_arguments.get(executable, set())
+        no_value_options = {
+            "cat": {
+                "-A", "--show-all", "-b", "--number-nonblank", "-e", "-E",
+                "--show-ends", "-n", "--number", "-s", "--squeeze-blank",
+                "-t", "-T", "--show-tabs", "-u", "-v", "--show-nonprinting",
+            },
+            "head": {"-q", "--quiet", "--silent", "-v", "--verbose", "-z", "--zero-terminated"},
+            "tail": {"-q", "--quiet", "--silent", "-v", "--verbose", "-z", "--zero-terminated"},
+            "nl": {"-p", "--no-renumber"},
+            "bat": {"-p", "--plain", "-n", "--number", "--no-paging"},
+        }.get(executable, set())
+        index = 0
+        after_options = False
+        while index < len(arguments):
+            token = arguments[index]
+            if not after_options and token == "--":
+                after_options = True
+                index += 1
+                continue
+            if not after_options and token in needs_value:
+                if index + 1 >= len(arguments):
+                    return None
+                index += 2
+                continue
+            if not after_options and any(
+                token.startswith(f"{option}=")
+                for option in needs_value
+                if option.startswith("--")
+            ):
+                index += 1
+                continue
+            if (
+                not after_options
+                and executable in {"head", "tail"}
+                and (
+                    re.fullmatch(r"-[cn]\+?\d+", token)
+                    or re.fullmatch(r"-\d+", token)
+                )
+            ):
+                index += 1
+                continue
+            if not after_options and token in no_value_options:
+                index += 1
+                continue
+            if (
+                not after_options
+                and executable == "nl"
+                and token.startswith("-")
+                and len(token) > 1
+            ):
+                # All `nl` switches are output-format controls. Compact forms
+                # such as `-ba` are common on the left side of `nl | sed`.
+                index += 1
+                continue
+            if (
+                not after_options
+                and executable == "cat"
+                and re.fullmatch(r"-[AbeEnstTuv]+", token)
+            ):
+                index += 1
+                continue
+            if (
+                not after_options
+                and executable == "bat"
+                and any(
+                    token.startswith(prefix)
+                    for prefix in (
+                        "--color=",
+                        "--decorations=",
+                        "--language=",
+                        "--line-range=",
+                        "--paging=",
+                        "--style=",
+                        "--tabs=",
+                        "--terminal-width=",
+                        "--wrap=",
+                    )
+                )
+            ):
+                index += 1
+                continue
+            if not after_options and token.startswith("-"):
+                return None
+            if executable in {"head", "tail"} and re.fullmatch(r"\+?\d+", token):
+                index += 1
+                continue
+            node_path = markdown_token_path(token, workdir, tree_roots)
+            if node_path is None:
+                return None
+            paths.append(node_path)
+            index += 1
+
+    if not paths:
+        return None
+    return ReadComponent(reader=executable, node_paths=tuple(sorted(set(paths))))
+
+
+def diagnostic_path(token: str, workdir: Path) -> Path | None:
+    if token in {".", ".."} or token.startswith(("./", "../", "/")):
+        candidate = Path(token).expanduser()
+        return (candidate if candidate.is_absolute() else workdir / candidate).resolve(
+            strict=False
+        )
+    return None
+
+
+def tokens_have_dynamic_expansion(tokens: Sequence[str]) -> bool:
+    return any("$" in token or "`" in token for token in tokens)
+
+
+def safe_pipeline_filter(tokens: Sequence[str]) -> bool:
+    """Accept filters that consume only a preceding, already-safe pipe."""
+    if not tokens or tokens_have_dynamic_expansion(tokens):
+        return False
+    executable = Path(tokens[0]).name
+    arguments = list(tokens[1:])
+    if executable == "sed":
+        expressions: list[str] = []
+        index = 0
+        while index < len(arguments):
+            token = arguments[index]
+            if token in {"-n", "--quiet", "--silent"}:
+                index += 1
+                continue
+            if token in {"-e", "--expression"}:
+                if index + 1 >= len(arguments):
+                    return False
+                expressions.append(arguments[index + 1])
+                index += 2
+                continue
+            if token.startswith("--expression="):
+                expressions.append(token.split("=", 1)[1])
+                index += 1
+                continue
+            if token.startswith("-"):
+                return False
+            if expressions:
+                return False
+            expressions.append(token)
+            index += 1
+        return bool(expressions) and all(
+            re.fullmatch(r"(?:\d+|\$)(?:,(?:\d+|\$))?p", expression)
+            is not None
+            for expression in expressions
+        )
+    if executable in {"head", "tail"}:
+        return all(
+            argument.startswith("-")
+            or re.fullmatch(r"\+?\d+", argument) is not None
+            for argument in arguments
+        )
+    if executable == "nl":
+        return all(argument.startswith("-") for argument in arguments)
+    if executable == "wc":
+        return all(
+            argument in {
+                "-c",
+                "--bytes",
+                "-l",
+                "--lines",
+                "-m",
+                "--chars",
+                "-w",
+                "--words",
+                "-L",
+                "--max-line-length",
+            }
+            for argument in arguments
+        )
+    return False
+
+
+def safe_test_command(
+    tokens: Sequence[str],
+    workdir: Path,
+    workspace: Path,
+    tree_root: Path,
+) -> bool:
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name
+    arguments = list(tokens[1:])
+    if executable == "[":
+        if not arguments or arguments[-1] != "]":
+            return False
+        arguments = arguments[:-1]
+    elif executable != "test":
+        return False
+    if tokens_have_dynamic_expansion(arguments):
+        return False
+    allowed_operators = {
+        "!",
+        "-a",
+        "-d",
+        "-e",
+        "-f",
+        "-h",
+        "-L",
+        "-n",
+        "-o",
+        "-r",
+        "-s",
+        "-w",
+        "-x",
+        "-z",
+    }
+    saw_predicate = False
+    for argument in arguments:
+        if argument in allowed_operators:
+            if argument.startswith("-") and argument not in {"-a", "-o"}:
+                saw_predicate = True
+            continue
+        candidate_path = Path(argument).expanduser()
+        candidate = (
+            candidate_path
+            if candidate_path.is_absolute()
+            else workdir / candidate_path
+        ).resolve(strict=False)
+        if not (
+            path_is_within(candidate, tree_root)
+        ):
+            return False
+    return saw_predicate
+
+
+def safe_static_output(tokens: Sequence[str]) -> bool:
+    return static_output_literal(tokens) is not None
+
+
+def shell_backslash_expansion(value: str) -> str | None:
+    output: list[str] = []
+    index = 0
+    replacements = {
+        "\\": "\\",
+        "a": "\a",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+    }
+    while index < len(value):
+        if value[index] != "\\":
+            output.append(value[index])
+            index += 1
+            continue
+        if index + 1 >= len(value):
+            return None
+        escaped = value[index + 1]
+        replacement = replacements.get(escaped)
+        if replacement is None:
+            return None
+        output.append(replacement)
+        index += 2
+    return "".join(output)
+
+
+def static_output_literal(tokens: Sequence[str]) -> str | None:
+    """Render the small, deterministic label subset accepted in composites."""
+    if not tokens or tokens_have_dynamic_expansion(tokens[1:]):
+        return None
+    executable = Path(tokens[0]).name
+    arguments = list(tokens[1:])
+    if executable == "echo":
+        newline = True
+        if arguments and arguments[0] == "-n":
+            newline = False
+            arguments.pop(0)
+        if any(argument.startswith("-") for argument in arguments):
+            return None
+        return " ".join(arguments) + ("\n" if newline else "")
+    if executable != "printf" or not arguments:
+        return None
+
+    format_value = shell_backslash_expansion(arguments.pop(0))
+    if format_value is None:
+        return None
+    marker = "\0PERCENT\0"
+    protected = format_value.replace("%%", marker)
+    if re.search(r"%(?!s)", protected):
+        return None
+    placeholders = protected.count("%s")
+    if placeholders != len(arguments):
+        return None
+    rendered = protected
+    for argument in arguments:
+        rendered = rendered.replace("%s", argument, 1)
+    return rendered.replace(marker, "%")
+
+
+def safe_wc_command(
+    tokens: Sequence[str],
+    workdir: Path,
+    tree_root: Path,
+    *,
+    pipe_input: bool,
+) -> bool:
+    if not tokens or Path(tokens[0]).name != "wc":
+        return False
+    paths = 0
+    for argument in tokens[1:]:
+        if argument == "-l":
+            continue
+        if argument.startswith("-"):
+            return False
+        candidate = Path(argument).expanduser()
+        resolved = (
+            candidate if candidate.is_absolute() else workdir / candidate
+        ).resolve(strict=False)
+        if not path_is_within(resolved, tree_root):
+            return False
+        paths += 1
+    return pipe_input or paths > 0
+
+
+def safe_tree_cli(tokens: Sequence[str]) -> bool:
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name
+    if executable not in {"first-tree", "first-tree-staging"}:
+        return False
+    if tokens_have_dynamic_expansion(tokens[1:]):
+        return False
+    return any(
+        tuple(tokens[index : index + 2]) == ("tree", "tree")
+        for index in range(1, len(tokens) - 1)
+    )
+
+
+def git_command_parts(
+    tokens: Sequence[str],
+    workdir: Path,
+) -> tuple[Path, str, list[str]] | None:
+    if not tokens or Path(tokens[0]).name != "git":
+        return None
+    arguments = list(tokens[1:])
+    git_workdir = workdir
+    index = 0
+    if len(arguments) >= 2 and arguments[0] == "-C":
+        candidate = Path(arguments[1]).expanduser()
+        git_workdir = (
+            candidate if candidate.is_absolute() else workdir / candidate
+        ).resolve(strict=False)
+        index = 2
+    if index >= len(arguments) or arguments[index].startswith("-"):
+        return None
+    return git_workdir, arguments[index], arguments[index + 1 :]
+
+
+def git_has_unsafe_option(arguments: Sequence[str]) -> bool:
+    return any(
+        argument in UNSAFE_GIT_OPTIONS
+        or any(
+            argument.startswith(f"{option}=")
+            for option in UNSAFE_GIT_OPTIONS
+        )
+        for argument in arguments
+    )
+
+
+def safe_git_diagnostic(
+    tokens: Sequence[str],
+    workdir: Path,
+    tree_root: Path,
+) -> bool:
+    parts = git_command_parts(tokens, workdir)
+    if parts is None:
+        return False
+    git_workdir, subcommand, arguments = parts
+    if (
+        not path_is_within(git_workdir, tree_root)
+        or subcommand not in SAFE_GIT_DIAGNOSTICS
+        or git_has_unsafe_option(arguments)
+        or tokens_have_dynamic_expansion(arguments)
+    ):
+        return False
+    if subcommand == "remote":
+        if not arguments:
+            return True
+        if all(argument in {"-v", "--verbose"} for argument in arguments):
+            return True
+        if arguments[0] == "get-url":
+            remainder = list(arguments[1:])
+            while remainder and remainder[0] in {"--all", "--push"}:
+                remainder.pop(0)
+            return len(remainder) == 1 and not remainder[0].startswith("-")
+        return False
+    for argument in arguments:
+        if argument.startswith(("../", "./", "/")):
+            candidate = Path(argument).expanduser()
+            resolved = (
+                candidate
+                if candidate.is_absolute()
+                else git_workdir / candidate
+            ).resolve(strict=False)
+            if not path_is_within(resolved, tree_root):
+                return False
+    return True
+
+
+def rg_read_component(
+    tokens: Sequence[str],
+    workdir: Path,
+    tree_roots: Sequence[Path],
+) -> ReadComponent | None:
+    if not tokens or Path(tokens[0]).name != "rg":
+        return None
+    arguments = list(tokens[1:])
+    if "--files" in arguments:
+        return None
+
+    value_options = {
+        "-A",
+        "--after-context",
+        "-B",
+        "--before-context",
+        "-C",
+        "--context",
+        "-g",
+        "--glob",
+        "-m",
+        "--max-count",
+        "-t",
+        "--type",
+        "-T",
+        "--type-not",
+        "--sort",
+        "--sortr",
+    }
+    pattern_options = {"-e", "--regexp"}
+    explicit_pattern = False
+    positionals: list[str] = []
+    index = 0
+    after_options = False
+    while index < len(arguments):
+        argument = arguments[index]
+        if not after_options and argument == "--":
+            after_options = True
+            index += 1
+            continue
+        if not after_options and argument in pattern_options:
+            if index + 1 >= len(arguments):
+                return None
+            explicit_pattern = True
+            index += 2
+            continue
+        if not after_options and any(
+            argument.startswith(f"{option}=")
+            for option in pattern_options
+            if option.startswith("--")
+        ):
+            explicit_pattern = True
+            index += 1
+            continue
+        if not after_options and argument in value_options:
+            if index + 1 >= len(arguments):
+                return None
+            index += 2
+            continue
+        if not after_options and any(
+            argument.startswith(f"{option}=")
+            for option in value_options
+            if option.startswith("--")
+        ):
+            index += 1
+            continue
+        if not after_options and argument.startswith("-"):
+            index += 1
+            continue
+        positionals.append(argument)
+        index += 1
+
+    path_operands = positionals if explicit_pattern else positionals[1:]
+    paths = {
+        path
+        for argument in path_operands
+        if (path := markdown_token_path(argument, workdir, tree_roots))
+        is not None
+    }
+    if not paths:
+        return None
+    return ReadComponent(reader="rg", node_paths=tuple(sorted(paths)))
+
+
+def diagnostic_markdown_paths(
+    tokens: Sequence[str],
+    workdir: Path,
+    tree_root: Path,
+) -> set[str]:
+    if not tokens:
+        return set()
+    executable = Path(tokens[0]).name
+    if executable not in {"[", "find", "git", "ls", "test", "wc"}:
+        return set()
+    return {
+        path
+        for argument in tokens[1:]
+        if (path := markdown_token_path(argument, workdir, (tree_root,)))
+        is not None
+    }
+
+
+def safe_read_only_diagnostic(
+    tokens: Sequence[str],
+    workdir: Path,
+    workspace: Path,
+    tree_root: Path,
+) -> bool:
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name
+    arguments = list(tokens[1:])
+    if executable == "pwd":
+        return all(argument in {"-L", "-P"} for argument in arguments) and (
+            path_is_within(workdir, workspace)
+            or path_is_within(workdir, tree_root)
+        )
+    if executable == "true":
+        return not arguments
+    if executable in {"test", "["}:
+        return safe_test_command(
+            tokens,
+            workdir,
+            workspace,
+            tree_root,
+        )
+    if executable in {"echo", "printf"}:
+        return safe_static_output(tokens)
+    if executable == "wc":
+        return safe_wc_command(
+            tokens,
+            workdir,
+            tree_root,
+            pipe_input=False,
+        )
+    if executable in {"first-tree", "first-tree-staging"}:
+        return safe_tree_cli(tokens)
+    if executable == "git":
+        return safe_git_diagnostic(tokens, workdir, tree_root)
+    if executable == "rg":
+        if not path_is_within(workdir, tree_root) or any(
+            argument in UNSAFE_RG_OPTIONS
+            or any(argument.startswith(f"{option}=") for option in UNSAFE_RG_OPTIONS)
+            for argument in arguments
+        ):
+            return False
+        for argument in arguments:
+            candidate = diagnostic_path(argument, workdir)
+            if candidate is not None and not path_is_within(candidate, tree_root):
+                return False
+        return True
+    if executable == "find":
+        if not path_is_within(workdir, tree_root) or any(
+            argument in UNSAFE_FIND_ACTIONS for argument in arguments
+        ):
+            return False
+        for argument in arguments:
+            candidate = diagnostic_path(argument, workdir)
+            if candidate is not None and not path_is_within(candidate, tree_root):
+                return False
+        return True
+    if executable == "ls":
+        if not path_is_within(workdir, tree_root):
+            return False
+        for argument in arguments:
+            if argument.startswith("-"):
+                continue
+            candidate = diagnostic_path(argument, workdir)
+            if candidate is None or not path_is_within(candidate, tree_root):
+                return False
+        return True
+    return False
+
+
+def command_workdir(payload: Mapping[str, Any], default_workdir: Path) -> Path:
+    value = parse_tool_arguments(payload).get("workdir")
+    if not isinstance(value, str) or not value.strip():
+        return default_workdir
+    candidate = Path(value).expanduser()
+    return (candidate if candidate.is_absolute() else default_workdir / candidate).resolve(
+        strict=False
+    )
+
+
+def rejected_assessment(reason: str) -> ReadAssessment:
+    status = (
+        "rejected_unsafe"
+        if reason.startswith("unsafe_")
+        else "unresolved_opaque"
+    )
+    return ReadAssessment(plan=None, status=status, reason=reason)
+
+
+def accepted_assessment(
+    plan: ReadPlan,
+    *,
+    subplans: Sequence[ReadPlan] | None = None,
+) -> ReadAssessment:
+    return ReadAssessment(
+        plan=plan,
+        status=(
+            "accepted_exact"
+            if plan.mode == "isolated"
+            else "accepted_read_only_composite"
+        ),
+        reason=None,
+        subplans=tuple(subplans or (plan,)),
+    )
+
+
+def unsafe_shell_reason(tokens: Sequence[str]) -> str | None:
+    if not tokens:
+        return None
+    executable = Path(tokens[0]).name
+    arguments = list(tokens[1:])
+    if executable in KNOWN_UNSAFE_PROGRAMS:
+        return f"unsafe_program_{executable}"
+    if executable == "sed" and any(
+        argument == "-i"
+        or argument.startswith("-i")
+        or argument.startswith("--in-place")
+        for argument in arguments
+    ):
+        return "unsafe_sed_in_place"
+    if executable == "find" and any(
+        argument in UNSAFE_FIND_ACTIONS for argument in arguments
+    ):
+        return "unsafe_find_action"
+    if executable == "rg" and any(
+        argument in UNSAFE_RG_OPTIONS
+        or any(argument.startswith(f"{option}=") for option in UNSAFE_RG_OPTIONS)
+        for argument in arguments
+    ):
+        return "unsafe_rg_option"
+    if executable == "git":
+        index = 2 if len(arguments) >= 2 and arguments[0] == "-C" else 0
+        if git_has_unsafe_option(arguments[index + 1 :]):
+            return "unsafe_git_option"
+        if index < len(arguments) and arguments[index] in MUTATING_GIT_COMMANDS:
+            return "unsafe_git_mutation"
+    return None
+
+
+def shell_command_assessment(
     tool_name: str,
     payload: Mapping[str, Any],
-    node_paths: Sequence[str],
-) -> str | None:
-    """Return a coverage gap unless this is one provable, single-file read.
-
-    The collector deliberately recognizes a very small command grammar. A false
-    negative becomes a coverage gap; a false positive could combine unrelated
-    output with a Tree passage and is therefore unacceptable.
-    """
-    if not node_paths:
-        return "not_a_tree_markdown_read"
-    if len(node_paths) != 1:
-        return "composite_or_multi_file_tree_read_rejected"
-
-    if tool_name in MIXED_OR_MUTATING_TOOLS:
-        return "mixed_or_mutating_tool_output_rejected"
-    if tool_name in DIRECT_READ_TOOLS:
-        return None
-    if tool_name not in EXEC_COMMAND_TOOLS:
-        return "unsupported_tree_read_tool"
-
+    tree_root: Path,
+    default_workdir: Path,
+    *,
+    allow_diagnostic_plan: bool = False,
+) -> ReadAssessment:
+    node_paths = extract_node_paths(payload, (tree_root,), default_workdir)
     arguments = parse_tool_arguments(payload)
     command = arguments.get("cmd")
     if not isinstance(command, str) or not command.strip():
-        return "unprovable_tree_read_command"
-    tokens = shell_tokens(command)
-    if not tokens:
-        return "composite_shell_tree_read_rejected"
-    if "-" in tokens[1:]:
-        return "stdin_tree_read_rejected"
-    executable = Path(tokens[0]).name
-    if executable not in PURE_READ_COMMANDS:
-        return "unprovable_tree_read_command"
-    if executable == "sed":
-        non_path_tokens = [
-            token
-            for token in tokens[1:]
-            if not token.strip(" \t\"'").lower().endswith(".md")
-        ]
-        allowed_flags = {"-n", "--quiet", "--silent"}
-        expressions = [token for token in non_path_tokens if token not in allowed_flags]
-        if (
-            len(expressions) != 1
-            or re.fullmatch(r"(?:\d+|\$)(?:,(?:\d+|\$))?p", expressions[0]) is None
-        ):
-            return "unprovable_tree_read_command"
-    markdown_tokens = [
-        token
-        for token in tokens[1:]
-        if token.strip(" \t\"'").lower().endswith(".md")
-    ]
-    if len(markdown_tokens) != 1:
-        return "composite_or_multi_file_tree_read_rejected"
-    if executable != "sed":
-        extra_positionals = [
-            token
-            for token in tokens[1:]
-            if token != markdown_tokens[0]
-            and not token.startswith("-")
-            and not (
-                executable in {"head", "tail"}
-                and re.fullmatch(r"\+?\d+", token) is not None
+        return (
+            rejected_assessment("unresolved_missing_literal_command")
+            if node_paths or allow_diagnostic_plan
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+    segments, reason = shell_segments(command)
+    if segments is None:
+        return (
+            rejected_assessment(reason or "unresolved_shell_syntax")
+            if node_paths or allow_diagnostic_plan
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+    segments, reason = expand_static_for_loop(segments)
+    if segments is None:
+        return (
+            rejected_assessment(reason or "unresolved_shell_loop")
+            if node_paths or allow_diagnostic_plan
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+
+    workdir = command_workdir(payload, default_workdir)
+    current_workdir = workdir
+    components: list[ReadComponent] = []
+    diagnostic_paths: set[str] = set()
+    diagnostic_count = 0
+    auxiliary_literals: list[str] = []
+    output_requires_separation = False
+    deferred_unsafe_reason: str | None = None
+    for shell_segment in segments:
+        segment = list(shell_segment.tokens)
+        if not segment:
+            return rejected_assessment("unresolved_shell_syntax")
+        executable = Path(segment[0]).name
+        unsafe_reason = unsafe_shell_reason(segment)
+        if unsafe_reason is not None:
+            if node_paths or components or allow_diagnostic_plan:
+                return rejected_assessment(unsafe_reason)
+            deferred_unsafe_reason = unsafe_reason
+            continue
+        literal_non_tree_path = False
+        for argument in segment[1:]:
+            if not argument.startswith(("/", "./", "../")):
+                continue
+            candidate_path = Path(argument).expanduser()
+            candidate = (
+                candidate_path
+                if candidate_path.is_absolute()
+                else current_workdir / candidate_path
+            ).resolve(strict=False)
+            if not (
+                argument.lower().endswith(".md")
+                or candidate.exists()
+            ):
+                # A leading slash can be a search/sed expression. If it is not
+                # a Markdown operand or an existing path, later program-specific
+                # validation decides whether the shape is merely opaque.
+                continue
+            if not path_is_within(candidate, tree_root):
+                literal_non_tree_path = True
+                break
+        if literal_non_tree_path:
+            if node_paths or components or allow_diagnostic_plan:
+                return rejected_assessment("unsafe_literal_non_tree_path")
+            deferred_unsafe_reason = "unsafe_literal_non_tree_path"
+            continue
+        if executable in PURE_READ_COMMANDS and "-" in segment[1:]:
+            if shell_segment.input_mode == "pipe" and safe_pipeline_filter(segment):
+                diagnostic_count += 1
+                continue
+            return rejected_assessment("unresolved_stdin_tree_read")
+        if executable == "cd":
+            if shell_segment.input_mode == "pipe" or len(segment) != 2:
+                return rejected_assessment("unresolved_shell_cd")
+            candidate = Path(segment[1]).expanduser()
+            current_workdir = (
+                candidate if candidate.is_absolute() else current_workdir / candidate
+            ).resolve(strict=False)
+            if not path_is_within(current_workdir, tree_root):
+                return rejected_assessment("unsafe_cross_tree_workdir")
+            diagnostic_count += 1
+            continue
+
+        component = markdown_read_component(
+            segment,
+            current_workdir,
+            (tree_root,),
+        )
+        if component is not None:
+            if deferred_unsafe_reason is not None:
+                return rejected_assessment(deferred_unsafe_reason)
+            if shell_segment.output_discarded:
+                diagnostic_count += 1
+                diagnostic_paths.update(component.node_paths)
+            else:
+                components.append(component)
+            continue
+
+        if executable == "rg":
+            if not safe_read_only_diagnostic(
+                segment,
+                current_workdir,
+                default_workdir,
+                tree_root,
+            ):
+                return rejected_assessment("unsafe_or_unresolved_rg")
+            component = rg_read_component(
+                segment,
+                current_workdir,
+                (tree_root,),
             )
-        ]
-        if extra_positionals:
-            return "composite_or_multi_file_tree_read_rejected"
+            if component is not None:
+                if shell_segment.output_discarded:
+                    diagnostic_count += 1
+                    diagnostic_paths.update(component.node_paths)
+                else:
+                    components.append(component)
+            else:
+                diagnostic_count += 1
+                if not shell_segment.output_discarded:
+                    output_requires_separation = True
+            continue
+
+        if shell_segment.input_mode == "pipe" and (
+            safe_pipeline_filter(segment)
+            or safe_wc_command(
+                segment,
+                current_workdir,
+                tree_root,
+                pipe_input=True,
+            )
+        ):
+            diagnostic_count += 1
+            diagnostic_paths.update(
+                diagnostic_markdown_paths(
+                    segment,
+                    current_workdir,
+                    tree_root,
+                )
+            )
+            if executable == "wc" and not shell_segment.output_discarded:
+                output_requires_separation = True
+            continue
+
+        if safe_read_only_diagnostic(
+            segment,
+            current_workdir,
+            default_workdir,
+            tree_root,
+        ):
+            diagnostic_count += 1
+            diagnostic_paths.update(
+                diagnostic_markdown_paths(
+                    segment,
+                    current_workdir,
+                    tree_root,
+                )
+            )
+            if not shell_segment.output_discarded:
+                if executable in {"echo", "printf"}:
+                    literal = static_output_literal(segment)
+                    if literal is None:
+                        return rejected_assessment("unresolved_static_output")
+                    auxiliary_literals.append(literal)
+                elif executable not in {"test", "[", "true"}:
+                    output_requires_separation = True
+            continue
+        if executable in {"for", "do", "done"}:
+            return rejected_assessment("unresolved_shell_loop")
+        if not node_paths and not components and not allow_diagnostic_plan:
+            return ReadAssessment(None, None, "not_a_tree_markdown_read")
+        return rejected_assessment("unresolved_unknown_program")
+
+    if not components:
+        if deferred_unsafe_reason is not None and allow_diagnostic_plan:
+            return rejected_assessment(deferred_unsafe_reason)
+        if allow_diagnostic_plan and diagnostic_count > 0:
+            return accepted_assessment(
+                ReadPlan(
+                    node_paths=(),
+                    components=(),
+                    command=(
+                        f"{tool_name.rsplit('.', 1)[-1]} "
+                        "read_only_diagnostic"
+                    ),
+                    mode="read_only_composite",
+                    auxiliary_output_possible=True,
+                    auxiliary_literals=tuple(auxiliary_literals),
+                    output_requires_separation=output_requires_separation,
+                )
+            )
+        return (
+            rejected_assessment("unresolved_tree_path_without_content_reader")
+            if node_paths
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+    recovered_paths = tuple(
+        sorted({path for component in components for path in component.node_paths})
+    )
+    if (
+        node_paths
+        and set(recovered_paths) | diagnostic_paths != set(node_paths)
+    ):
+        return rejected_assessment("unresolved_node_path_attribution")
+    mode = (
+        "isolated"
+        if len(segments) == 1
+        and len(components) == 1
+        and len(recovered_paths) == 1
+        and diagnostic_count == 0
+        else "read_only_composite"
+    )
+    descriptor = (
+        f"{tool_name.rsplit('.', 1)[-1]} {mode} "
+        + " ".join(recovered_paths)
+    )
+    return accepted_assessment(
+        ReadPlan(
+            node_paths=recovered_paths,
+            components=tuple(components),
+            command=descriptor,
+            mode=mode,
+            auxiliary_output_possible=diagnostic_count > 0,
+            auxiliary_literals=tuple(auxiliary_literals),
+            output_requires_separation=output_requires_separation,
+        )
+    )
+
+
+def raw_orchestration_source(payload: Mapping[str, Any]) -> str | None:
+    for key in ("input", "arguments"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+            if isinstance(parsed, str):
+                return parsed
+            if isinstance(parsed, Mapping):
+                for field in ("code", "js", "source"):
+                    candidate = parsed.get(field)
+                    if isinstance(candidate, str):
+                        return candidate
     return None
+
+
+def matching_js_delimiter(
+    source: str,
+    start: int,
+    opening: str,
+    closing: str,
+) -> tuple[str, int] | None:
+    if start >= len(source) or source[start] != opening:
+        return None
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(source)):
+        character = source[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            continue
+        if character == opening:
+            depth += 1
+        elif character == closing:
+            depth -= 1
+            if depth == 0:
+                return source[start + 1 : index], index + 1
+    return None
+
+
+def parse_js_string_literal(source: str, start: int) -> tuple[str, int] | None:
+    if start >= len(source) or source[start] not in {"'", '"', "`"}:
+        return None
+    quote = source[start]
+    escaped = False
+    for index in range(start + 1, len(source)):
+        character = source[index]
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character != quote:
+            continue
+        literal = source[start : index + 1]
+        if quote == "`":
+            body = literal[1:-1]
+            if "${" in body:
+                return None
+            return body, index + 1
+        try:
+            value = ast.literal_eval(literal)
+        except (SyntaxError, ValueError):
+            return None
+        return (value, index + 1) if isinstance(value, str) else None
+    return None
+
+
+def split_js_top_level(source: str, delimiter: str) -> list[str] | None:
+    parts: list[str] = []
+    start = 0
+    depths = {"(": 0, "[": 0, "{": 0}
+    closing = {")": "(", "]": "[", "}": "{"}
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(source):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            continue
+        if character in depths:
+            depths[character] += 1
+            continue
+        if character in closing:
+            opening = closing[character]
+            if depths[opening] == 0:
+                return None
+            depths[opening] -= 1
+            continue
+        if character == delimiter and all(depth == 0 for depth in depths.values()):
+            parts.append(source[start:index])
+            start = index + 1
+    if quote is not None or any(depth != 0 for depth in depths.values()):
+        return None
+    parts.append(source[start:])
+    return parts
+
+
+def js_top_level_colon(source: str) -> int | None:
+    parts = split_js_top_level(source, ":")
+    if parts is None or len(parts) != 2:
+        return None
+    return len(parts[0])
+
+
+def parse_js_object_properties(
+    source: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    entries = split_js_top_level(source, ",")
+    if entries is None:
+        return None, "unresolved_exec_dynamic_arguments"
+    properties: dict[str, str] = {}
+    for index, raw_entry in enumerate(entries):
+        entry = raw_entry.strip()
+        if not entry:
+            if index == len(entries) - 1:
+                continue
+            return None, "unresolved_exec_dynamic_arguments"
+        if entry.startswith("..."):
+            return None, "unresolved_exec_dynamic_arguments"
+        colon = js_top_level_colon(entry)
+        if colon is None:
+            return None, "unresolved_exec_dynamic_arguments"
+        raw_key = entry[:colon].strip()
+        raw_value = entry[colon + 1 :].strip()
+        if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", raw_key):
+            key = raw_key
+        else:
+            parsed_key = parse_js_string_literal(raw_key, 0)
+            if parsed_key is None or parsed_key[1] != len(raw_key):
+                return None, "unresolved_exec_dynamic_arguments"
+            key = parsed_key[0]
+        if key in properties or key in {"__proto__", "constructor", "prototype"}:
+            return None, "unresolved_exec_dynamic_arguments"
+        properties[key] = raw_value
+    return properties, None
+
+
+def exact_js_string(source: str) -> str | None:
+    parsed = parse_js_string_literal(source, 0)
+    if parsed is None or source[parsed[1] :].strip():
+        return None
+    return parsed[0]
+
+
+def exact_safe_js_value(source: str) -> bool:
+    value = source.strip()
+    if exact_js_string(value) is not None:
+        return True
+    if value in {"true", "false", "null"}:
+        return True
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)", value):
+        return True
+    if value.startswith("[") and value.endswith("]"):
+        entries = split_js_top_level(value[1:-1], ",")
+        if entries is None:
+            return False
+        return all(
+            not entry.strip() or exact_js_string(entry.strip()) is not None
+            for entry in entries
+        )
+    return False
+
+
+def orchestration_source_skeleton(
+    source: str,
+) -> tuple[str | None, list[str] | None]:
+    """Replace literal exec calls while retaining every surrounding JS byte."""
+    call_bodies: list[str] = []
+    output: list[str] = []
+    cursor = 0
+    pattern = re.compile(r"\btools\.exec_command\s*\(")
+    while (match := pattern.search(source, cursor)) is not None:
+        opening_index = match.end() - 1
+        balanced = matching_js_delimiter(source, opening_index, "(", ")")
+        if balanced is None:
+            return None, None
+        call_body, end = balanced
+        output.append(source[cursor : match.start()])
+        output.append("__EXEC_CALL__")
+        call_bodies.append(call_body)
+        cursor = end
+    output.append(source[cursor:])
+    if not call_bodies:
+        return None, None
+    return "".join(output), call_bodies
+
+
+def orchestration_wrapper_shape(
+    skeleton: str,
+    nested_count: int,
+) -> str | None:
+    identifier = r"[A-Za-z_][A-Za-z0-9_]*"
+    call = r"__EXEC_CALL__"
+
+    sequential = re.fullmatch(
+        rf"\s*(?P<decls>(?:(?:const|let|var)\s+{identifier}\s*=\s*"
+        rf"await\s+{call}\s*;\s*)+)"
+        rf"(?P<forwards>(?:text\s*\(\s*{identifier}\.output\s*\)\s*;\s*)+)",
+        skeleton,
+    )
+    if sequential is not None:
+        assignments = re.findall(
+            rf"(?:const|let|var)\s+({identifier})\s*=\s*"
+            rf"await\s+{call}",
+            sequential.group("decls"),
+        )
+        forwarded = re.findall(
+            rf"text\s*\(\s*({identifier})\.output\s*\)",
+            sequential.group("forwards"),
+        )
+        if (
+            len(assignments) == nested_count
+            and len(set(assignments)) == len(assignments)
+            and assignments == forwarded
+        ):
+            return "sequential"
+
+    promise_prefix = (
+        rf"\s*(?:const|let|var)\s+(?P<results>{identifier})\s*=\s*"
+        rf"await\s+Promise\.all\s*\(\s*\[\s*"
+        rf"(?P<calls>{call}(?:\s*,\s*{call})*\s*,?)"
+        rf"\s*\]\s*\)\s*;\s*"
+    )
+    callback = re.fullmatch(
+        promise_prefix
+        + rf"(?P=results)\.(?:forEach|map)\s*\(\s*"
+        rf"(?:\(\s*)?(?P<item>{identifier})(?:\s*\))?\s*=>\s*"
+        rf"text\s*\(\s*(?P=item)\.output\s*\)\s*\)\s*;?\s*",
+        skeleton,
+    )
+    if callback is not None and callback.group("calls").count(call) == nested_count:
+        return "promise"
+
+    for_of = re.fullmatch(
+        promise_prefix
+        + rf"for\s*\(\s*(?:const|let|var)\s+(?P<item>{identifier})\s+"
+        rf"of\s+(?P=results)\s*\)\s*\{{\s*"
+        rf"text\s*\(\s*(?P=item)\.output\s*\)\s*;\s*\}}\s*",
+        skeleton,
+    )
+    if for_of is not None and for_of.group("calls").count(call) == nested_count:
+        return "promise"
+    return None
+
+
+def orchestration_command_payloads(
+    payload: Mapping[str, Any],
+    default_workdir: Path,
+) -> tuple[list[dict[str, Any]] | None, str | None, str | None]:
+    source = raw_orchestration_source(payload)
+    if source is None:
+        return None, "unresolved_exec_payload", None
+    skeleton, call_bodies = orchestration_source_skeleton(source)
+    if skeleton is None or call_bodies is None:
+        return None, "unresolved_exec_without_nested_tool", None
+    shape = orchestration_wrapper_shape(skeleton, len(call_bodies))
+    if shape is None:
+        return None, "unresolved_exec_wrapper_shape", None
+
+    payloads: list[dict[str, Any]] = []
+    allowed_properties = {
+        "cmd",
+        "justification",
+        "login",
+        "max_output_tokens",
+        "prefix_rule",
+        "sandbox_permissions",
+        "shell",
+        "tty",
+        "workdir",
+        "yield_time_ms",
+    }
+    for call_body in call_bodies:
+        object_start = call_body.find("{")
+        if object_start < 0:
+            return None, "unresolved_exec_dynamic_arguments", None
+        object_value = matching_js_delimiter(call_body, object_start, "{", "}")
+        if object_value is None:
+            return None, "unresolved_exec_dynamic_arguments", None
+        object_body, object_end = object_value
+        if call_body[object_end:].strip().rstrip(","):
+            return None, "unresolved_exec_dynamic_arguments", None
+        properties, property_reason = parse_js_object_properties(object_body)
+        if properties is None:
+            return None, property_reason, None
+        if (
+            not set(properties).issubset(allowed_properties)
+            or any(
+                not exact_safe_js_value(value)
+                for value in properties.values()
+            )
+        ):
+            return None, "unresolved_exec_dynamic_arguments", None
+        command = exact_js_string(properties.get("cmd", ""))
+        if command is None:
+            return None, "unresolved_exec_dynamic_command", None
+        raw_workdir = properties.get("workdir")
+        workdir = (
+            exact_js_string(raw_workdir)
+            if raw_workdir is not None
+            else None
+        )
+        if raw_workdir is not None and workdir is None:
+            return None, "unresolved_exec_dynamic_workdir", None
+        payloads.append(
+            {
+                "arguments": {
+                    "cmd": command,
+                    "workdir": workdir or str(default_workdir),
+                }
+            }
+        )
+    return payloads, None, shape
+
+
+def orchestration_read_assessment(
+    tool_name: str,
+    payload: Mapping[str, Any],
+    tree_root: Path,
+    default_workdir: Path,
+) -> ReadAssessment:
+    node_paths = extract_node_paths(payload, (tree_root,), default_workdir)
+    nested_payloads, reason, wrapper_shape = orchestration_command_payloads(
+        payload,
+        default_workdir,
+    )
+    if nested_payloads is None:
+        return (
+            rejected_assessment(reason or "unresolved_exec_payload")
+            if node_paths
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+    components: list[ReadComponent] = []
+    recovered_paths: set[str] = set()
+    nested_plans: list[ReadPlan] = []
+    for nested_payload in nested_payloads:
+        assessment = shell_command_assessment(
+            "exec_command",
+            nested_payload,
+            tree_root,
+            default_workdir,
+            allow_diagnostic_plan=True,
+        )
+        if assessment.status in {"rejected_unsafe", "unresolved_opaque"}:
+            return assessment
+        if assessment.plan is None:
+            return rejected_assessment(
+                "unresolved_exec_nested_output_attribution"
+            )
+        nested_plans.append(assessment.plan)
+        components.extend(assessment.plan.components)
+        recovered_paths.update(assessment.plan.node_paths)
+    if not components:
+        return (
+            rejected_assessment("unresolved_exec_without_content_reader")
+            if node_paths
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+    ordered_paths = tuple(sorted(recovered_paths))
+    mode = (
+        "isolated"
+        if len(nested_plans) == 1
+        and nested_plans[0].mode == "isolated"
+        and wrapper_shape == "sequential"
+        else "read_only_composite"
+    )
+    return accepted_assessment(
+        ReadPlan(
+            node_paths=ordered_paths,
+            components=tuple(components),
+            command=f"{tool_name.rsplit('.', 1)[-1]} {mode} "
+            + " ".join(ordered_paths),
+            mode=mode,
+            auxiliary_output_possible=any(
+                plan.auxiliary_output_possible for plan in nested_plans
+            ),
+            auxiliary_literals=tuple(
+                literal
+                for plan in nested_plans
+                for literal in plan.auxiliary_literals
+            ),
+            output_requires_separation=any(
+                plan.output_requires_separation for plan in nested_plans
+            ),
+        ),
+        subplans=nested_plans,
+    )
+
+
+def markdown_read_plan(
+    tool_name: str,
+    payload: Mapping[str, Any],
+    tree_root: Path,
+    default_workdir: Path,
+) -> ReadAssessment:
+    """Recognize isolated and provably read-only composite Markdown reads."""
+    node_paths = extract_node_paths(payload, (tree_root,), default_workdir)
+    if node_paths and has_literal_non_tree_markdown(payload, tree_root):
+        return rejected_assessment("unsafe_literal_non_tree_path")
+    if tool_name in MUTATING_TOOLS:
+        return (
+            rejected_assessment("unsafe_mutating_tool")
+            if node_paths
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+    if tool_name in EXEC_ORCHESTRATION_TOOLS:
+        return orchestration_read_assessment(
+            tool_name,
+            payload,
+            tree_root,
+            default_workdir,
+        )
+    if tool_name in DIRECT_READ_TOOLS:
+        if not node_paths:
+            return ReadAssessment(None, None, "not_a_tree_markdown_read")
+        component = ReadComponent(
+            reader=tool_name.rsplit(".", 1)[-1],
+            node_paths=tuple(node_paths),
+        )
+        return accepted_assessment(
+            ReadPlan(
+                node_paths=tuple(node_paths),
+                components=(component,),
+                command=f"{component.reader} {' '.join(node_paths)}",
+                mode="isolated" if len(node_paths) == 1 else "read_only_composite",
+            )
+        )
+    if tool_name not in EXEC_COMMAND_TOOLS:
+        return (
+            rejected_assessment("unresolved_tree_read_tool")
+            if node_paths
+            else ReadAssessment(None, None, "not_a_tree_markdown_read")
+        )
+    return shell_command_assessment(
+        tool_name,
+        payload,
+        tree_root,
+        default_workdir,
+    )
 
 
 def content_class_hint(paths: Sequence[str]) -> str:
@@ -1172,6 +2879,45 @@ def output_success(output: str) -> bool | None:
     if re.search(r"(?:process exited with code|exit[_ ]code[\"']?\s*[:=])\s*0", lowered):
         return True
     return None
+
+
+def content_output(output: str, tool_name: str) -> str:
+    if tool_name in EXEC_ORCHESTRATION_TOOLS:
+        return re.sub(
+            r"\A\s*Script completed successfully\s*(?:\r?\n)+"
+            r"Output:\s*(?:\r?\n)?",
+            "",
+            output,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    if tool_name in EXEC_COMMAND_TOOLS:
+        return re.sub(
+            r"\A\s*Process exited with code 0\s*(?:\r?\n)+",
+            "",
+            output,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return output
+
+
+def attributable_passage(
+    output: str,
+    plan: ReadPlan,
+) -> tuple[str | None, str | None]:
+    if plan.output_requires_separation:
+        return None, "tree_read_auxiliary_output_unresolved"
+    passage = output
+    for literal in plan.auxiliary_literals:
+        if not literal:
+            continue
+        if passage.count(literal) != 1:
+            return None, "tree_read_static_output_attribution_unresolved"
+        passage = passage.replace(literal, "", 1)
+    if not passage.strip():
+        return None, "tree_read_output_missing"
+    return passage.strip(), None
 
 
 def is_root_managed_session(meta: Mapping[str, Any], workspace_roots: set[str]) -> bool:
@@ -1429,11 +3175,23 @@ def redact_local_roots(
     tree_root: Path,
 ) -> str:
     result = text
-    replacements = (
-        (tree_root.as_posix(), "<tree-root>"),
-        (workspace.as_posix(), "<agent-workspace>"),
-    )
-    for raw, replacement in replacements:
+    replacements: list[tuple[str, str]] = []
+    for path, replacement in (
+        (tree_root, "<tree-root>"),
+        (workspace, "<agent-workspace>"),
+    ):
+        raw = path.as_posix()
+        variants = {raw}
+        # macOS resolves `/var` and `/tmp` through `/private`, while recorded
+        # shell output can preserve either lexical form.
+        if raw.startswith("/private/"):
+            variants.add(raw[len("/private") :])
+        replacements.extend((variant, replacement) for variant in variants)
+    for raw, replacement in sorted(
+        replacements,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
         result = result.replace(raw, replacement)
         result = result.replace(raw.replace("/", "\\/"), replacement)
     return result
@@ -1445,16 +3203,20 @@ def trace_reads(
     tree_id: str,
     window: Window,
     max_passage_chars: int,
-) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+) -> tuple[list[dict[str, Any]], set[str], set[str], Counter[str]]:
     """Read one trace only after its exact Chat-Agent preflight was accepted."""
     reads: list[dict[str, Any]] = []
     sessions = {preflight.trace_id}
     gaps: set[str] = set()
+    attempt_counts: Counter[str] = Counter()
     expected_chat_id = preflight.audit_id.split("@", 1)[0]
     default_workdir = preflight.workspace
 
     calls: dict[str, dict[str, Any]] = {}
-    outputs: dict[str, tuple[str, str | None, bool]] = {}
+    outputs: dict[
+        str,
+        tuple[str, str | None, bool, tuple[str, ...]],
+    ] = {}
     try:
         with preflight.path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -1487,54 +3249,94 @@ def trace_reads(
                     is_continuation = (
                         tool_name in SHELL_CONTINUATION_TOOLS | CELL_CONTINUATION_TOOLS
                     )
-                    node_paths = extract_node_paths(payload, (tree_root,), default_workdir)
+                    read_plan: ReadPlan | None = None
+                    assessment: ReadAssessment | None = None
                     if not is_continuation:
-                        read_gap = pure_markdown_read_gap(tool_name, payload, node_paths)
-                        if read_gap == "not_a_tree_markdown_read":
+                        assessment = markdown_read_plan(
+                            tool_name,
+                            payload,
+                            tree_root,
+                            default_workdir,
+                        )
+                        if assessment.status is None:
                             continue
-                        if read_gap is not None:
-                            gaps.add(read_gap)
-                            continue
+                        read_plan = assessment.plan
                     calls[call_id] = {
                         "timestamp": row.get("timestamp"),
                         "payload": payload,
                         "arguments": parse_tool_arguments(payload),
-                        "node_paths": node_paths,
+                        "read_plan": read_plan,
+                        "assessment": assessment,
                     }
                     continue
                 if payload_type in {"custom_tool_call_output", "function_call_output"}:
                     call_id = payload.get("call_id")
                     if not isinstance(call_id, str) or call_id not in calls:
                         continue
-                    output, output_truncated = clipped(
-                        redact_local_roots(
-                            payload_text(payload.get("output")),
-                            preflight.workspace,
-                            tree_root,
-                        ),
+                    raw_output_value = payload.get("output")
+                    raw_parts = (
+                        [
+                            payload_text(item)
+                            for item in raw_output_value
+                            if payload_text(item)
+                        ]
+                        if isinstance(raw_output_value, list)
+                        else [payload_text(raw_output_value)]
+                    )
+                    output_parts: list[str] = []
+                    output_truncated = False
+                    for raw_part in raw_parts:
+                        part, part_truncated = clipped(
+                            redact_local_roots(
+                                raw_part,
+                                preflight.workspace,
+                                tree_root,
+                            ),
+                            max_passage_chars,
+                        )
+                        output_parts.append(part)
+                        output_truncated = output_truncated or part_truncated
+                    output, aggregate_truncated = clipped(
+                        "\n".join(output_parts),
                         max_passage_chars,
                     )
+                    output_truncated = output_truncated or aggregate_truncated
                     outputs[call_id] = (
                         output,
                         row.get("timestamp"),
                         output_truncated,
+                        tuple(output_parts),
                     )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         gaps.add("codex_trace_malformed_or_partially_cleaned")
-        return reads, sessions, gaps
+        return reads, sessions, gaps, attempt_counts
 
     shell_sessions: dict[str, str] = {}
     cell_sessions: dict[str, str] = {}
-    continuation_outputs: dict[str, list[tuple[str, str | None, str | None, bool]]] = {}
+    continuation_outputs: dict[
+        str,
+        list[
+            tuple[
+                str,
+                str | None,
+                str | None,
+                bool,
+                tuple[str, ...],
+            ]
+        ],
+    ] = {}
     for call_id, call in calls.items():
         payload = call["payload"]
         tool_name = str(payload.get("name") or "")
-        output, output_completed_at, output_truncated = outputs.get(call_id, ("", None, False))
+        output, output_completed_at, output_truncated, output_parts = outputs.get(
+            call_id,
+            ("", None, False, ()),
+        )
         if tool_name in EXEC_COMMAND_TOOLS:
             match = SHELL_SESSION_PATTERN.search(output)
             if match:
                 shell_sessions[match.group(1)] = call_id
-        elif tool_name == "functions.exec":
+        elif tool_name in EXEC_ORCHESTRATION_TOOLS:
             match = CELL_SESSION_PATTERN.search(output)
             if match:
                 cell_sessions[match.group(1)] = call_id
@@ -1543,14 +3345,26 @@ def trace_reads(
             original_call_id = shell_sessions.get(str(session_id))
             if original_call_id is not None:
                 continuation_outputs.setdefault(original_call_id, []).append(
-                    (output, output_completed_at, call.get("timestamp"), output_truncated)
+                    (
+                        output,
+                        output_completed_at,
+                        call.get("timestamp"),
+                        output_truncated,
+                        output_parts,
+                    )
                 )
         elif tool_name in CELL_CONTINUATION_TOOLS:
             cell_id = call["arguments"].get("cell_id")
             original_call_id = cell_sessions.get(str(cell_id))
             if original_call_id is not None:
                 continuation_outputs.setdefault(original_call_id, []).append(
-                    (output, output_completed_at, call.get("timestamp"), output_truncated)
+                    (
+                        output,
+                        output_completed_at,
+                        call.get("timestamp"),
+                        output_truncated,
+                        output_parts,
+                    )
                 )
 
     for items in continuation_outputs.values():
@@ -1564,20 +3378,59 @@ def trace_reads(
         tool_name = str(payload.get("name") or "")
         if tool_name in SHELL_CONTINUATION_TOOLS | CELL_CONTINUATION_TOOLS:
             continue
-        node_paths = call["node_paths"]
-        initial_output, completed_at, initial_truncated = outputs.get(call_id, ("", None, False))
-        continuations = continuation_outputs.get(call_id, [])
+        assessment = call.get("assessment")
+        if not isinstance(assessment, ReadAssessment) or assessment.status is None:
+            continue
+        attempt_counts[assessment.status] += 1
+        if assessment.reason is not None:
+            attempt_counts[f"reason:{assessment.reason}"] += 1
+        if assessment.status in {"unresolved_opaque", "rejected_unsafe"}:
+            gaps.add(assessment.reason or assessment.status)
+            continue
+        read_plan = call.get("read_plan")
+        if not isinstance(read_plan, ReadPlan):
+            continue
+        (
+            initial_output,
+            completed_at,
+            initial_truncated,
+            initial_parts,
+        ) = outputs.get(call_id, ("", None, False, ()))
+        if (
+            not isinstance(completed_at, str)
+            or not in_window(completed_at, window)
+        ):
+            initial_output, completed_at, initial_truncated, initial_parts = (
+                "",
+                None,
+                False,
+                (),
+            )
+        continuations = [
+            item
+            for item in continuation_outputs.get(call_id, [])
+            if isinstance(item[1], str)
+            and in_window(item[1], window)
+            and isinstance(item[2], str)
+            and in_window(item[2], window)
+        ]
         output = initial_output
+        output_parts = list(initial_parts)
         output_was_truncated = initial_truncated
         if continuations:
             output = "\n".join([output, *(item[0] for item in continuations)])
+            output_parts.extend(
+                part
+                for item in continuations
+                for part in item[4]
+            )
             completed_at = continuations[-1][1]
             output_was_truncated = output_was_truncated or any(item[3] for item in continuations)
         initial_handle = (
             SHELL_SESSION_PATTERN.search(initial_output)
             if tool_name in EXEC_COMMAND_TOOLS
             else CELL_SESSION_PATTERN.search(initial_output)
-            if tool_name == "functions.exec"
+            if tool_name in EXEC_ORCHESTRATION_TOOLS
             else None
         )
         if initial_handle is not None:
@@ -1599,36 +3452,83 @@ def trace_reads(
             continue
         if success is None:
             success = True
-        passage, passage_truncated = clipped(output, max_passage_chars)
-        passage_truncated = passage_truncated or output_was_truncated
-        if passage_truncated:
-            gaps.add("tree_read_passage_truncated")
-        normalized_name = tool_name.rsplit(".", 1)[-1]
-        command = f"{normalized_name} {node_paths[0]}"
-        command_truncated = False
-        read_id = hashlib.sha256(
-            f"{preflight.trace_id}:{call_id}".encode()
-        ).hexdigest()[:20]
-        reads.append(
-            {
-                "read_id": read_id,
-                "timestamp": timestamp,
-                "completed_at": completed_at,
-                "session_file": preflight.trace_id,
-                "call_id": call_id,
-                "tool_name": tool_name,
-                "reader_agent_id": preflight.agent_id,
-                "tree_identity": tree_id,
-                "node_paths": node_paths,
-                "content_class_hint": content_class_hint(node_paths),
-                "command": command,
-                "command_truncated": command_truncated,
-                "passage": passage,
-                "passage_truncated": passage_truncated,
-                "success": success,
-            }
-        )
-    return reads, sessions, gaps
+        content_parts = [
+            cleaned
+            for part in output_parts or [output]
+            if (cleaned := content_output(part, tool_name)).strip()
+        ]
+        if not content_parts:
+            gaps.add("tree_read_output_missing")
+            continue
+        subplans = assessment.subplans or (read_plan,)
+        sliced = len(subplans) > 1 and len(content_parts) == len(subplans)
+        if sliced:
+            plan_outputs = list(zip(subplans, content_parts, strict=True))
+        else:
+            if len(subplans) > 1:
+                gaps.add("tree_read_output_attribution_aggregate")
+            plan_outputs = [(read_plan, "\n".join(content_parts))]
+        for read_index, (current_plan, passage_source) in enumerate(plan_outputs):
+            node_paths = list(current_plan.node_paths)
+            passage_source, attribution_gap = attributable_passage(
+                passage_source,
+                current_plan,
+            )
+            if passage_source is None:
+                gaps.add(
+                    attribution_gap
+                    or "tree_read_output_attribution_unresolved"
+                )
+                continue
+            passage, passage_truncated = clipped(
+                passage_source,
+                max_passage_chars,
+            )
+            passage_truncated = passage_truncated or output_was_truncated
+            if passage_truncated:
+                gaps.add("tree_read_passage_truncated")
+            read_id = hashlib.sha256(
+                f"{preflight.trace_id}:{call_id}:{read_index}".encode()
+            ).hexdigest()[:20]
+            reads.append(
+                {
+                    "read_id": read_id,
+                    "timestamp": timestamp,
+                    "completed_at": completed_at,
+                    "session_file": preflight.trace_id,
+                    "call_id": call_id,
+                    "nested_call_index": (
+                        read_index if sliced else None
+                    ),
+                    "tool_name": tool_name,
+                    "reader_agent_id": preflight.agent_id,
+                    "tree_identity": tree_id,
+                    "node_paths": node_paths,
+                    "read_components": [
+                        {
+                            "reader": component.reader,
+                            "node_paths": list(component.node_paths),
+                        }
+                        for component in current_plan.components
+                    ],
+                    "read_mode": current_plan.mode,
+                    "output_attribution": (
+                        "exact"
+                        if current_plan.mode == "isolated"
+                        else "aggregate"
+                    ),
+                    "auxiliary_output_possible": (
+                        current_plan.auxiliary_output_possible
+                    ),
+                    "content_class_hint": content_class_hint(node_paths),
+                    "command": current_plan.command,
+                    "command_truncated": False,
+                    "passage": passage,
+                    "passage_truncated": passage_truncated,
+                    "success": success,
+                }
+            )
+    return reads, sessions, gaps, attempt_counts
 
 
 def collect_evidence(args: argparse.Namespace) -> None:
@@ -1697,6 +3597,9 @@ def collect_evidence(args: argparse.Namespace) -> None:
     per_audit_reads: dict[str, list[dict[str, Any]]] = {item: [] for item in chats}
     per_audit_sessions: dict[str, set[str]] = {item: set() for item in chats}
     per_audit_gaps: dict[str, set[str]] = {item: set() for item in chats}
+    per_audit_attempt_counts: dict[str, Counter[str]] = {
+        item: Counter() for item in chats
+    }
 
     for trace_file in trace_files:
         preflight, preflight_gaps = preflight_trace(
@@ -1709,7 +3612,7 @@ def collect_evidence(args: argparse.Namespace) -> None:
             per_audit_gaps[item].update(preflight_gaps[item])
         if preflight is None:
             continue
-        reads, sessions, gaps = trace_reads(
+        reads, sessions, gaps, attempt_counts = trace_reads(
             preflight,
             tree_root,
             current_tree_id,
@@ -1719,6 +3622,7 @@ def collect_evidence(args: argparse.Namespace) -> None:
         per_audit_reads[preflight.audit_id].extend(reads)
         per_audit_sessions[preflight.audit_id].update(sessions)
         per_audit_gaps[preflight.audit_id].update(gaps)
+        per_audit_attempt_counts[preflight.audit_id].update(attempt_counts)
 
     output_rows: list[dict[str, Any]] = []
     for current_audit_id, chat in sorted(chats.items()):
@@ -1778,6 +3682,15 @@ def collect_evidence(args: argparse.Namespace) -> None:
             else "outside_candidate_set"
         )
         gaps = set(chat["coverage_gaps"]) | per_audit_gaps[current_audit_id]
+        attempt_counts = per_audit_attempt_counts[current_audit_id]
+        status_counts = {
+            status: attempt_counts[status] for status in READ_ATTEMPT_STATUSES
+        }
+        reason_counts = {
+            key.removeprefix("reason:"): count
+            for key, count in sorted(attempt_counts.items())
+            if key.startswith("reason:")
+        }
         if not per_audit_sessions[current_audit_id]:
             gaps.add("no_mapped_codex_trace")
         elif (
@@ -1802,6 +3715,11 @@ def collect_evidence(args: argparse.Namespace) -> None:
                 "tree_identity": current_tree_id,
                 "candidate_status": candidate_status,
                 "mapped_trace_files": sorted(per_audit_sessions[current_audit_id]),
+                "collector_diagnostics": {
+                    "in_window_tree_read_attempts": sum(status_counts.values()),
+                    "attempt_status_counts": status_counts,
+                    "attempt_reason_counts": reason_counts,
+                },
                 "reads": reads,
                 "visible_messages": messages,
                 "visible_choice_candidates": choice_messages,
@@ -1827,6 +3745,118 @@ def optional_text(value: Any, *, field: str) -> str | None:
     if not isinstance(value, str):
         raise AuditError(f"{field} must be a string or null.")
     return value.strip() or None
+
+
+def positive_int(value: Any, *, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise AuditError(f"{field} must be a positive integer.")
+    return value
+
+
+def load_reviewed_baseline(path: Path) -> dict[str, Any]:
+    rows = list(iter_jsonl(path))
+    if len(rows) != 1:
+        raise AuditError("--reviewed-baseline must contain exactly one JSONL row.")
+    row = rows[0]
+    if row.get("schema_version") != SCHEMA_VERSION:
+        raise AuditError(
+            f"Reviewed baseline must use schema_version {SCHEMA_VERSION}."
+        )
+    if row.get("basis") != "separately_reviewed_task_cases":
+        raise AuditError(
+            "Reviewed baseline basis must be separately_reviewed_task_cases."
+        )
+    anchor = row.get("evidence_anchor")
+    if not isinstance(anchor, dict):
+        raise AuditError("Reviewed baseline requires evidence_anchor.")
+    artifact_id = require_string(
+        anchor.get("artifact_id"),
+        "reviewed_baseline.evidence_anchor.artifact_id",
+    )
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", artifact_id) is None:
+        raise AuditError(
+            "reviewed_baseline.evidence_anchor.artifact_id must be an opaque safe identifier."
+        )
+    artifact_sha256 = require_string(
+        anchor.get("sha256"),
+        "reviewed_baseline.evidence_anchor.sha256",
+    ).lower()
+    if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None:
+        raise AuditError(
+            "reviewed_baseline.evidence_anchor.sha256 must be 64 lowercase hex characters."
+        )
+    reviewed_at = isoformat(
+        parse_datetime(
+            require_string(row.get("reviewed_at"), "reviewed_baseline.reviewed_at"),
+            field="reviewed_baseline.reviewed_at",
+        )
+    )
+    clear_tasks = positive_int(
+        row.get("clear_tasks"), field="reviewed_baseline.clear_tasks"
+    )
+    effect_tasks = positive_int(
+        row.get("effect_tasks"), field="reviewed_baseline.effect_tasks"
+    )
+    independent_effects = positive_int(
+        row.get("independent_effects"),
+        field="reviewed_baseline.independent_effects",
+    )
+    if effect_tasks > clear_tasks or effect_tasks > independent_effects:
+        raise AuditError(
+            "Reviewed baseline effect_tasks must not exceed clear_tasks or independent_effects."
+        )
+
+    effect_counts = row.get("effect_counts")
+    if not isinstance(effect_counts, dict) or set(effect_counts) != EFFECT_VALUES:
+        raise AuditError(
+            "Reviewed baseline effect_counts must contain exactly the four effect keys."
+        )
+    normalized_effect_counts: dict[str, int] = {}
+    for effect in sorted(EFFECT_VALUES):
+        value = effect_counts[effect]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise AuditError(
+                f"reviewed_baseline.effect_counts.{effect} must be a non-negative integer."
+            )
+        normalized_effect_counts[effect] = value
+    if sum(normalized_effect_counts.values()) != independent_effects:
+        raise AuditError(
+            "Reviewed baseline effect_counts must conserve independent_effects."
+        )
+
+    support_counts = row.get("support_counts")
+    if not isinstance(support_counts, dict) or set(support_counts) != {
+        "definite",
+        "limited",
+    }:
+        raise AuditError(
+            "Reviewed baseline support_counts must contain definite and limited."
+        )
+    normalized_support_counts: dict[str, int] = {}
+    for support in ("definite", "limited"):
+        value = support_counts[support]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise AuditError(
+                f"reviewed_baseline.support_counts.{support} must be a non-negative integer."
+            )
+        normalized_support_counts[support] = value
+    if sum(normalized_support_counts.values()) != independent_effects:
+        raise AuditError(
+            "Reviewed baseline support_counts must conserve independent_effects."
+        )
+    return {
+        "basis": "separately_reviewed_task_cases",
+        "reviewed_at": reviewed_at,
+        "evidence_anchor": {
+            "artifact_id": artifact_id,
+            "sha256": artifact_sha256,
+        },
+        "clear_tasks": clear_tasks,
+        "effect_tasks": effect_tasks,
+        "independent_effects": independent_effects,
+        "effect_counts": normalized_effect_counts,
+        "support_counts": normalized_support_counts,
+    }
 
 
 def validate_effect_rubric(
@@ -2314,6 +4344,20 @@ def sampling_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         (task for task in tasks if task["status"] == "clear"),
         key=lambda task: task["sampling_order"],
     )
+    confirmed_exposure = sum(
+        1 for task in clear if task["exposure"]["status"] == "confirmed"
+    )
+    unresolved_exposure = sum(
+        1 for task in clear if task["exposure"]["status"] == "unresolved"
+    )
+    if not clear:
+        effect_analysis_status = "not_applicable"
+    elif confirmed_exposure == 0:
+        effect_analysis_status = "pending"
+    elif unresolved_exposure:
+        effect_analysis_status = "partial"
+    else:
+        effect_analysis_status = "ready"
     expansions: list[dict[str, Any]] = []
     initial_task_types = {task["task_type"] for task in clear[:100]}
     missing_task_types = sorted(TASK_TYPE_VALUES - initial_task_types)
@@ -2365,10 +4409,18 @@ def sampling_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 "new_effect_types": new_effect_types,
             }
         )
-        if consecutive_empty == 2 and type_coverage_complete:
+        if (
+            consecutive_empty == 2
+            and type_coverage_complete
+            and effect_analysis_status == "ready"
+        ):
             saturated_at = offset + 20
             break
-    if len(clear) < 100:
+    if effect_analysis_status == "pending":
+        status = "effect_analysis_pending"
+    elif effect_analysis_status == "partial":
+        status = "effect_analysis_partial"
+    elif len(clear) < 100:
         status = "minimum_not_met"
     elif not type_coverage_complete:
         status = "task_type_coverage_not_met"
@@ -2386,6 +4438,9 @@ def sampling_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "saturated_at": saturated_at,
         "expansions": expansions,
         "missing_task_types": missing_task_types,
+        "effect_analysis_status": effect_analysis_status,
+        "confirmed_exposure_tasks": confirmed_exposure,
+        "unresolved_exposure_tasks": unresolved_exposure,
     }
 
 
@@ -2393,6 +4448,7 @@ def render_report(
     candidates: Sequence[Mapping[str, Any]],
     tasks: Sequence[Mapping[str, Any]],
     generated_at: datetime,
+    reviewed_baseline: Mapping[str, Any] | None = None,
 ) -> str:
     clear_tasks = [task for task in tasks if task["status"] == "clear"]
     excluded_tasks = [task for task in tasks if task["status"] == "excluded"]
@@ -2440,6 +4496,28 @@ def render_report(
             mapped_chat_ids.add(chat_id)
     message_count = sum(chat_message_counts.values())
     gap_counts = Counter(gap for row in candidates for gap in row["coverage_gaps"])
+    attempt_status_counts = Counter(
+        {
+            status: sum(
+                row["collector_diagnostics"]["attempt_status_counts"][status]
+                for row in candidates
+            )
+            for status in READ_ATTEMPT_STATUSES
+        }
+    )
+    attempt_total = sum(
+        row["collector_diagnostics"]["in_window_tree_read_attempts"]
+        for row in candidates
+    )
+    attempt_reason_counts: Counter[str] = Counter()
+    for row in candidates:
+        attempt_reason_counts.update(
+            row["collector_diagnostics"]["attempt_reason_counts"]
+        )
+    if sum(attempt_status_counts.values()) != attempt_total:
+        raise AuditError(
+            "Collector read-attempt status counts do not conserve the in-window total."
+        )
     bounded_starts = {
         row["window"]["start"]
         for row in candidates
@@ -2448,6 +4526,10 @@ def render_report(
     window_start = min(bounded_starts) if bounded_starts else "unbounded"
     window_end = max(row["window"]["end"] for row in candidates)
     sampling = sampling_summary(tasks)
+    effect_metrics_available = sampling["effect_analysis_status"] in {
+        "partial",
+        "ready",
+    }
 
     lines = [
         "# Context Tree Insights: Task-First Value Audit",
@@ -2463,12 +4545,25 @@ def render_report(
         table_row(["Excluded Tasks", len(excluded_tasks)]),
         table_row(["Confirmed exposure Tasks", len(confirmed_exposure_tasks)]),
         table_row(["Unresolved exposure Tasks", len(unresolved_exposure_tasks)]),
-        table_row(["Effect Tasks", len(effect_tasks)]),
-        table_row(["Independent effects", len(independent_effects)]),
+        table_row(["Effect Tasks", len(effect_tasks) if effect_metrics_available else "N/A"]),
+        table_row(
+            [
+                "Independent effects",
+                len(independent_effects) if effect_metrics_available else "N/A",
+            ]
+        ),
         "",
         "Unresolved exposure is unknown coverage, not an unused/no-value denominator. Receipt absence is also unknown.",
         "",
-        "These counts are auditable lower bounds, not a global effectiveness rate. A read, selector call, or decision receipt is evidence, not causal proof by itself.",
+        (
+            "Effect analysis is `pending`: no clear Task has evidence-ready exposure, "
+            "so effect count, distribution, support, and saturation are N/A rather "
+            "than zero."
+            if sampling["effect_analysis_status"] == "pending"
+            else "Observed effect counts are auditable evidence, not a global "
+            "effectiveness rate. A read, selector call, or decision receipt is "
+            "evidence, not causal proof by itself."
+        ),
         "",
         "## Sampling",
         "",
@@ -2482,6 +4577,25 @@ def render_report(
         "The default judgment quota is 100 clear Tasks, followed by 20-Task expansions until two consecutive complete batches add no new effect type, key counterexample, or conclusion change.",
         "",
     ]
+    if sampling["effect_analysis_status"] == "pending":
+        lines.extend(
+            [
+                "Effect saturation: **N/A / pending** until at least one clear "
+                "Task has evidence-ready exposure. Empty unresolved batches do "
+                "not establish saturation.",
+                "",
+            ]
+        )
+    elif sampling["effect_analysis_status"] == "partial":
+        lines.extend(
+            [
+                "Effect saturation: **N/A / pending** while some clear Tasks "
+                "still have unresolved exposure. Observed positive effects may "
+                "be reported, but empty unresolved Tasks cannot support a "
+                "saturation conclusion.",
+                "",
+            ]
+        )
     if sampling["missing_task_types"]:
         lines.extend(
             [
@@ -2491,7 +4605,10 @@ def render_report(
                 "",
             ]
         )
-    if sampling["expansions"]:
+    if (
+        sampling["effect_analysis_status"] == "ready"
+        and sampling["expansions"]
+    ):
         lines.extend(
             [
                 table_row(["Expansion", "Saturation signals"]),
@@ -2509,56 +4626,116 @@ def render_report(
             )
         lines.append("")
 
-    lines.extend(
-        [
-        "## Effect Distribution",
-        "",
-        table_row(["Effect", "Independent effects"]),
-        table_row(["---", "---:"]),
-        ]
-    )
-    for effect in ("confirmed", "constrained", "redirected", "conflicted"):
-        lines.append(table_row([effect, effect_counts[effect]]))
-    lines.extend(
-        [
-            "",
-            f"Derived support: definite **{support_counts['definite']}**, limited **{support_counts['limited']}**. Support is derived during reporting and is never accepted from task-judgments input.",
-            "",
-            "## Task Type × Effect",
-            "",
-            table_row(["Task type", "confirmed", "constrained", "redirected", "conflicted", "Total"]),
-            table_row(["---", "---:", "---:", "---:", "---:", "---:"]),
-        ]
-    )
-    for task_type in sorted(TASK_TYPE_VALUES):
-        counts = [task_type_effect[(task_type, effect)] for effect in (
-            "confirmed", "constrained", "redirected", "conflicted"
-        )]
-        lines.append(table_row([task_type, *counts, sum(counts)]))
-
-    lines.extend(
-        [
-            "",
-            "## Representative Cases",
-            "",
-        ]
-    )
-    representatives = effect_tasks[:5]
-    if not representatives:
-        lines.append("No representative effect Task was selected.")
-        lines.append("")
-    for task in representatives:
-        effects = task["effects"]
-        effect_labels = ", ".join(f"`{effect['effect']}`" for effect in effects)
+    if effect_metrics_available:
         lines.extend(
             [
-                f"### {task['objective']} (`{task['task_id']}`)",
+                "## Effect Distribution",
                 "",
-                f"- Task type: `{task['task_type']}`",
-                f"- Exposure: `{task['exposure']['status']}`",
-                f"- Effects: {effect_labels}",
-                f"- Outcome: {task['outcome']}",
-                f"- Influence: {'; '.join(effect['summary'] for effect in effects)}",
+                table_row(["Effect", "Independent effects"]),
+                table_row(["---", "---:"]),
+            ]
+        )
+        for effect in ("confirmed", "constrained", "redirected", "conflicted"):
+            lines.append(table_row([effect, effect_counts[effect]]))
+        lines.extend(
+            [
+                "",
+                f"Derived support: definite **{support_counts['definite']}**, limited **{support_counts['limited']}**. Support is derived during reporting and is never accepted from task-judgments input.",
+                "",
+                "## Task Type × Effect",
+                "",
+                table_row(["Task type", "confirmed", "constrained", "redirected", "conflicted", "Total"]),
+                table_row(["---", "---:", "---:", "---:", "---:", "---:"]),
+            ]
+        )
+        for task_type in sorted(TASK_TYPE_VALUES):
+            counts = [task_type_effect[(task_type, effect)] for effect in (
+                "confirmed", "constrained", "redirected", "conflicted"
+            )]
+            lines.append(table_row([task_type, *counts, sum(counts)]))
+
+        lines.extend(
+            [
+                "",
+                "## Representative Cases",
+                "",
+            ]
+        )
+        representatives = effect_tasks[:5]
+        if not representatives:
+            lines.append("No representative effect Task was selected.")
+            lines.append("")
+        for task in representatives:
+            effects = task["effects"]
+            effect_labels = ", ".join(f"`{effect['effect']}`" for effect in effects)
+            lines.extend(
+                [
+                    f"### {task['objective']} (`{task['task_id']}`)",
+                    "",
+                    f"- Task type: `{task['task_type']}`",
+                    f"- Exposure: `{task['exposure']['status']}`",
+                    f"- Effects: {effect_labels}",
+                    f"- Outcome: {task['outcome']}",
+                    f"- Influence: {'; '.join(effect['summary'] for effect in effects)}",
+                    "",
+                ]
+            )
+    else:
+        lines.extend(
+            [
+                "## Effect Analysis",
+                "",
+                "Status: **N/A / pending**. The collector did not recover "
+                "evidence-ready Task exposure, so this report intentionally "
+                "does not render effect totals, distributions, support, "
+                "representative effects, or effect saturation.",
+                "",
+            ]
+        )
+
+    if reviewed_baseline is not None:
+        baseline_effects = reviewed_baseline["effect_counts"]
+        baseline_support = reviewed_baseline["support_counts"]
+        anchor = reviewed_baseline["evidence_anchor"]
+        lines.extend(
+            [
+                "## Separately Reviewed Historical Baseline",
+                "",
+                "This baseline was reviewed before the current rerun and is "
+                "reported separately. Current collector gaps cannot turn these "
+                "positive cases into zero, and these counts are not merged into "
+                "the current sample or its saturation result.",
+                "",
+                table_row(["Measure", "Count"]),
+                table_row(["---", "---:"]),
+                table_row(["Reviewed clear Tasks", reviewed_baseline["clear_tasks"]]),
+                table_row(["Reviewed effect Tasks", reviewed_baseline["effect_tasks"]]),
+                table_row(
+                    [
+                        "Reviewed independent effects",
+                        reviewed_baseline["independent_effects"],
+                    ]
+                ),
+                "",
+                table_row(["Effect", "Reviewed effects"]),
+                table_row(["---", "---:"]),
+                *[
+                    table_row([effect, baseline_effects[effect]])
+                    for effect in (
+                        "confirmed",
+                        "constrained",
+                        "redirected",
+                        "conflicted",
+                    )
+                ],
+                "",
+                "Reviewed support: definite "
+                f"**{baseline_support['definite']}**, limited "
+                f"**{baseline_support['limited']}**.",
+                "",
+                f"Evidence anchor: `{anchor['artifact_id']}` / "
+                f"`sha256:{anchor['sha256']}`; reviewed at "
+                f"`{reviewed_baseline['reviewed_at']}`.",
                 "",
             ]
         )
@@ -2574,8 +4751,21 @@ def render_report(
             table_row(["Visible messages", message_count]),
             table_row(["Chats mapped to local Codex traces", len(mapped_chat_ids)]),
             table_row(["Audit units mapped to local Codex traces", mapped_audits]),
+            table_row(["In-window Tree-read attempts", attempt_total]),
             table_row(["Chat-Agent evidence rows", len(candidates)]),
             table_row(["Task judgments", len(tasks)]),
+            "",
+            "### Tree-read grammar conservation",
+            "",
+            table_row(["Attempt classification", "Count"]),
+            table_row(["---", "---:"]),
+            *[
+                table_row([status, attempt_status_counts[status]])
+                for status in READ_ATTEMPT_STATUSES
+            ],
+            table_row(["Total", attempt_total]),
+            "",
+            "The four attempt classes conserve every in-window call whose payload referenced the bound Tree. Accepted classes describe command-shape recovery; unresolved and rejected attempts remain coverage gaps and never become negative exposure.",
             "",
             "Historical collection is best-effort. Missing reads, absent receipts, and unresolved exposure do not establish that a Task did not use Context Tree.",
             "",
@@ -2583,6 +4773,18 @@ def render_report(
             "",
         ]
     )
+    if attempt_reason_counts:
+        lines.extend(
+            [
+                "### Unresolved/rejected attempt reasons",
+                "",
+                table_row(["Reason", "Calls"]),
+                table_row(["---", "---:"]),
+            ]
+        )
+        for reason, count in sorted(attempt_reason_counts.items()):
+            lines.append(table_row([reason, count]))
+        lines.append("")
     if not gap_counts:
         lines.append("- None recorded.")
     else:
@@ -2673,6 +4875,7 @@ def validate_report_candidate(
     if parsed_window_start is not None and parsed_window_start > parsed_window_end:
         raise AuditError(f"Candidate {expected_audit_id} window starts after it ends.")
     mapped_traces = value.get("mapped_trace_files")
+    collector_diagnostics = value.get("collector_diagnostics")
     reads = value.get("reads")
     visible_messages = value.get("visible_messages")
     choices = value.get("visible_choice_candidates")
@@ -2691,6 +4894,41 @@ def validate_report_candidate(
     ):
         raise AuditError(
             f"Candidate {expected_audit_id} evidence and coverage fields must be arrays."
+        )
+    if not isinstance(collector_diagnostics, dict):
+        raise AuditError(
+            f"Candidate {expected_audit_id} must contain collector_diagnostics."
+        )
+    attempt_total = collector_diagnostics.get("in_window_tree_read_attempts")
+    attempt_status_counts = collector_diagnostics.get("attempt_status_counts")
+    attempt_reason_counts = collector_diagnostics.get("attempt_reason_counts")
+    if (
+        not isinstance(attempt_total, int)
+        or attempt_total < 0
+        or not isinstance(attempt_status_counts, dict)
+        or set(attempt_status_counts) != set(READ_ATTEMPT_STATUSES)
+        or any(
+            not isinstance(attempt_status_counts[status], int)
+            or attempt_status_counts[status] < 0
+            for status in READ_ATTEMPT_STATUSES
+        )
+        or sum(attempt_status_counts.values()) != attempt_total
+        or not isinstance(attempt_reason_counts, dict)
+        or any(
+            not isinstance(reason, str)
+            or not reason
+            or not isinstance(count, int)
+            or count <= 0
+            for reason, count in attempt_reason_counts.items()
+        )
+        or sum(attempt_reason_counts.values())
+        != (
+            attempt_status_counts["unresolved_opaque"]
+            + attempt_status_counts["rejected_unsafe"]
+        )
+    ):
+        raise AuditError(
+            f"Candidate {expected_audit_id} collector diagnostics do not conserve read attempts."
         )
     if chat["message_count"] != len(visible_messages):
         raise AuditError(
@@ -2719,6 +4957,59 @@ def validate_report_candidate(
             raise AuditError(
                 f"Candidate {expected_audit_id} contains a read outside its Agent/Tree scope."
             )
+        read_mode = read.get("read_mode")
+        components = read.get("read_components")
+        if read_mode is not None and read_mode not in {
+            "isolated",
+            "read_only_composite",
+        }:
+            raise AuditError(
+                f"Candidate {expected_audit_id} contains an invalid read_mode."
+            )
+        expected_attribution = (
+            "exact" if read_mode in {None, "isolated"} else "aggregate"
+        )
+        if read.get("output_attribution", expected_attribution) != expected_attribution:
+            raise AuditError(
+                f"Candidate {expected_audit_id} contains invalid output_attribution."
+            )
+        if not isinstance(read.get("auxiliary_output_possible", False), bool):
+            raise AuditError(
+                f"Candidate {expected_audit_id} contains invalid auxiliary output metadata."
+            )
+        nested_call_index = read.get("nested_call_index")
+        if nested_call_index is not None and (
+            not isinstance(nested_call_index, int)
+            or nested_call_index < 0
+        ):
+            raise AuditError(
+                f"Candidate {expected_audit_id} contains invalid nested_call_index."
+            )
+        if components is not None:
+            if not isinstance(components, list) or not components:
+                raise AuditError(
+                    f"Candidate {expected_audit_id} contains invalid read_components."
+                )
+            component_paths: set[str] = set()
+            for component in components:
+                if (
+                    not isinstance(component, dict)
+                    or not isinstance(component.get("reader"), str)
+                    or not isinstance(component.get("node_paths"), list)
+                    or not component["node_paths"]
+                    or any(
+                        not isinstance(path, str)
+                        for path in component["node_paths"]
+                    )
+                ):
+                    raise AuditError(
+                        f"Candidate {expected_audit_id} contains a malformed read component."
+                    )
+                component_paths.update(component["node_paths"])
+            if component_paths != set(read["node_paths"]):
+                raise AuditError(
+                    f"Candidate {expected_audit_id} read_components do not conserve node_paths."
+                )
     visible_messages_by_id: dict[str, Mapping[str, Any]] = {}
     for message in visible_messages:
         if (
@@ -2785,14 +5076,25 @@ def finalize_report(args: argparse.Namespace) -> None:
     report_path = artifact_path(
         artifact_root, args.report_output, field="--report-output", must_exist=False
     )
-    require_distinct_paths(
-        {
-            "--candidates": candidates_path,
-            "--task-judgments": task_judgments_path,
-            "--evidence-output": evidence_path,
-            "--report-output": report_path,
-        }
+    reviewed_baseline_path = (
+        artifact_path(
+            artifact_root,
+            args.reviewed_baseline,
+            field="--reviewed-baseline",
+            must_exist=True,
+        )
+        if args.reviewed_baseline
+        else None
     )
+    paths = {
+        "--candidates": candidates_path,
+        "--task-judgments": task_judgments_path,
+        "--evidence-output": evidence_path,
+        "--report-output": report_path,
+    }
+    if reviewed_baseline_path is not None:
+        paths["--reviewed-baseline"] = reviewed_baseline_path
+    require_distinct_paths(paths)
     candidates = [
         validate_report_candidate(candidate, workspace_identity)
         for candidate in iter_jsonl(candidates_path)
@@ -2806,10 +5108,18 @@ def finalize_report(args: argparse.Namespace) -> None:
         raise AuditError("No Task judgments were provided.")
     validate_task_refs(candidates, tasks)
     evidence = build_task_evidence(tasks)
+    reviewed_baseline = (
+        load_reviewed_baseline(reviewed_baseline_path)
+        if reviewed_baseline_path is not None
+        else None
+    )
 
     generated_at = parse_datetime(args.generated_at, field="--generated-at") if args.generated_at else datetime.now(timezone.utc)
     write_jsonl(evidence_path, evidence)
-    write_text(report_path, f"{render_report(candidates, evidence, generated_at)}\n")
+    write_text(
+        report_path,
+        f"{render_report(candidates, evidence, generated_at, reviewed_baseline)}\n",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2908,6 +5218,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--task-judgments",
         required=True,
         help="Task-level Agent judgment JSONL.",
+    )
+    report_parser.add_argument(
+        "--reviewed-baseline",
+        help=(
+            "Optional one-row JSONL aggregate for separately reviewed historical "
+            "positive Task cases; it is rendered separately from the current rerun."
+        ),
     )
     report_parser.add_argument("--evidence-output", required=True, help="Destination final evidence JSONL.")
     report_parser.add_argument("--report-output", required=True, help="Destination Markdown report.")

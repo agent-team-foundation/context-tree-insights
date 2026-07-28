@@ -1,6 +1,6 @@
 # Context Tree Insights
 
-`context-tree-insights` 0.2.1 is an explicit-only Codex Skill for task-first,
+`context-tree-insights` 0.2.2 is an explicit-only Codex Skill for task-first,
 evidence-first analysis of Context Tree decision value. It reconstructs Tasks
 from authorized Chats, separates confirmed from unresolved exposure, judges
 four visible effect types, and stops sampling through a Task quota plus
@@ -27,7 +27,10 @@ First Tree Codex Agent, one managed workspace, and one bound Tree at a time.
   identities must be remote and credential-free.
 - A Tree read is evidence of explicit activity, not semantic use or causal
   value by itself.
+- Single-file reads and statically closed read-only composites are recovered;
+  dynamic or unknown shapes stay unresolved, and unsafe shapes are rejected.
 - Unresolved exposure is never counted as unused.
+- Missing evidence produces `N/A / pending`, never a numeric zero effect.
 - The report does not produce a global effectiveness rate.
 
 The audit writes only private local artifacts in the invoking Agent workspace.
@@ -76,14 +79,17 @@ tasks. Pin a reviewed commit or release when installing for another Agent.
 The Skill orchestrates four stages:
 
 1. `export-chats` resolves explicit authorization and exports visible records.
-2. `collect` maps authorized Chats to local Codex traces and reconstructs
-   isolated Tree reads plus visible choice candidates.
+2. `collect` maps authorized Chats to local Codex traces, classifies every
+   in-window Tree-read attempt into a conserving four-state grammar, and
+   reconstructs exact or read-only-composite evidence plus visible choices.
 3. The Agent reconstructs Tasks, Task-window exposure, effects, and sampling
    signals in `task-judgments.jsonl`, including the reproducible five-check
    rubric behind each `verified` or `probable` effect.
 4. `report` validates source ownership, windows, cross-Chat linkage,
    deduplication, sampling, and aggregate conservation, then creates
-   `evidence.jsonl` and `REPORT.md`.
+   `evidence.jsonl` and `REPORT.md`. An optional hash-anchored reviewed
+   baseline is shown separately, so a current collector gap cannot erase
+   previously reviewed positive cases or silently import them into the rerun.
 
 There is no default time window. `--days` is an optional data-acquisition
 bound. Sample size is controlled by at least 100 clear Tasks with all five task
