@@ -3037,14 +3037,18 @@ print(json.dumps({{"ok": True, "data": data}}))
             ),
             (
                 "rg-pattern-only",
-                f"cd {self.tree_root} && rg --no-config {self.tree_file}",
+                (
+                    f"cd {self.tree_root} && "
+                    f"rg --no-config --no-ignore {self.tree_file}"
+                ),
                 "opaque",
             ),
             (
                 "rg-file-read",
                 (
                     f"cd {self.tree_root} && "
-                    "rg --no-config Decision system/architecture.md"
+                    "rg --no-config --no-ignore "
+                    "Decision system/architecture.md"
                 ),
                 "read",
             ),
@@ -3183,16 +3187,51 @@ print(json.dumps({{"ok": True, "data": data}}))
             "rg-relative-executable": (
                 f"./rg Decision {self.tree_file}"
             ),
+            "bat-bare": (
+                f"bat {self.tree_file}"
+            ),
+            "bat-forced-paging": (
+                f"bat --paging=always {self.tree_file}"
+            ),
+            "bat-closed-looking": (
+                f"bat --no-config --paging=never {self.tree_file}"
+            ),
+            "find-bare": (
+                f"find {self.tree_root} -type f && cat {self.tree_file}"
+            ),
+            "find-file-valued": (
+                f"find -files0-from=/etc/passwd && cat {self.tree_file}"
+            ),
+            "ls-bare": (
+                f"ls {self.tree_root} && cat {self.tree_file}"
+            ),
+            "ls-recursive-dereference": (
+                f"ls -RL {self.tree_root} && cat {self.tree_file}"
+            ),
+            "head-open-pipeline-option": (
+                f"cat {self.tree_file} | head --help"
+            ),
+            "tail-open-pipeline-option": (
+                f"cat {self.tree_file} | tail --follow=name"
+            ),
+            "nl-open-pipeline-option": (
+                f"cat {self.tree_file} | nl --help"
+            ),
             "rg-implicit-config": (
                 f"cd {self.tree_root} && "
                 f"rg Decision {self.tree_file}"
+            ),
+            "rg-implicit-ignore": (
+                f"cd {self.tree_root} && "
+                f"rg --no-config Decision {self.tree_file}"
             ),
             "cat-path-qualified": (
                 f"/usr/bin/cat {self.tree_file}"
             ),
             "rg-closed-options": (
                 f"cd {self.tree_root} && "
-                f"rg --no-config -n -g '*.md' Decision {self.tree_file}"
+                "rg --no-config --no-ignore -n -g '*.md' "
+                f"Decision {self.tree_file}"
             ),
         }
         for index, (label, command) in enumerate(shapes.items(), start=1):
@@ -3243,22 +3282,26 @@ print(json.dumps({{"ok": True, "data": data}}))
             {
                 "accepted_exact": 0,
                 "accepted_read_only_composite": 3,
-                "unresolved_opaque": 0,
-                "rejected_unsafe": 11,
+                "unresolved_opaque": 3,
+                "rejected_unsafe": 19,
             },
             candidate["collector_diagnostics"]["attempt_status_counts"],
         )
         self.assertEqual(
             {
                 "unsafe_first_tree_command": 2,
-                "unsafe_or_unresolved_rg": 3,
+                "unsafe_or_unresolved_rg": 4,
                 "unsafe_path_qualified_program": 4,
+                "unsafe_find_unbound_grammar": 2,
+                "unsafe_ls_unbound_grammar": 2,
+                "unsafe_program_bat": 3,
                 "unsafe_rg_option": 2,
+                "unresolved_unknown_program": 3,
             },
             candidate["collector_diagnostics"]["attempt_reason_counts"],
         )
         self.assertEqual(
-            14,
+            25,
             candidate["collector_diagnostics"]["in_window_tree_read_attempts"],
         )
         serialized = json.dumps(candidate, sort_keys=True)
@@ -3270,8 +3313,19 @@ print(json.dumps({{"ok": True, "data": data}}))
             "rg-unknown-option",
             "rg-stdin",
             "rg-implicit-config",
+            "rg-implicit-ignore",
             "rg-absolute-executable",
             "rg-relative-executable",
+            "bat-bare",
+            "bat-forced-paging",
+            "bat-closed-looking",
+            "find-bare",
+            "find-file-valued",
+            "ls-bare",
+            "ls-recursive-dereference",
+            "head-open-pipeline-option",
+            "tail-open-pipeline-option",
+            "nl-open-pipeline-option",
             "cat-path-qualified",
             "tree-path-qualified",
         ):

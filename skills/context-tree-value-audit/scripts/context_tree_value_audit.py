@@ -66,7 +66,7 @@ RUNTIME_PROVIDER_VALUES = {
     "kimi-code",
 }
 SUPPORTED_EVIDENCE_PROVIDERS = {"codex", "claude-code"}
-PURE_READ_COMMANDS = {"bat", "cat", "head", "nl", "sed", "tail"}
+PURE_READ_COMMANDS = {"cat", "head", "nl", "sed", "tail"}
 EXEC_COMMAND_TOOLS = {"exec_command", "functions.exec_command"}
 EXEC_ORCHESTRATION_TOOLS = {"exec", "functions.exec"}
 DIRECT_READ_TOOLS = {
@@ -89,6 +89,7 @@ READ_ATTEMPT_STATUSES = (
 )
 KNOWN_UNSAFE_PROGRAMS = {
     "bash",
+    "bat",
     "chmod",
     "chown",
     "cp",
@@ -1727,7 +1728,6 @@ def markdown_read_component(
             "head": {"-q", "--quiet", "--silent", "-v", "--verbose", "-z", "--zero-terminated"},
             "tail": {"-q", "--quiet", "--silent", "-v", "--verbose", "-z", "--zero-terminated"},
             "nl": {"-p", "--no-renumber"},
-            "bat": {"-p", "--plain", "-n", "--number", "--no-paging"},
         }.get(executable, set())
         index = 0
         after_options = False
@@ -1764,38 +1764,8 @@ def markdown_read_component(
                 continue
             if (
                 not after_options
-                and executable == "nl"
-                and token.startswith("-")
-                and len(token) > 1
-            ):
-                # All `nl` switches are output-format controls. Compact forms
-                # such as `-ba` are common on the left side of `nl | sed`.
-                index += 1
-                continue
-            if (
-                not after_options
                 and executable == "cat"
                 and re.fullmatch(r"-[AbeEnstTuv]+", token)
-            ):
-                index += 1
-                continue
-            if (
-                not after_options
-                and executable == "bat"
-                and any(
-                    token.startswith(prefix)
-                    for prefix in (
-                        "--color=",
-                        "--decorations=",
-                        "--language=",
-                        "--line-range=",
-                        "--paging=",
-                        "--style=",
-                        "--tabs=",
-                        "--terminal-width=",
-                        "--wrap=",
-                    )
-                )
             ):
                 index += 1
                 continue
@@ -1864,13 +1834,92 @@ def safe_pipeline_filter(tokens: Sequence[str]) -> bool:
             for expression in expressions
         )
     if executable in {"head", "tail"}:
-        return all(
-            argument.startswith("-")
-            or re.fullmatch(r"\+?\d+", argument) is not None
-            for argument in arguments
-        )
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument in {"-c", "--bytes", "-n", "--lines"}:
+                if (
+                    index + 1 >= len(arguments)
+                    or re.fullmatch(r"[+-]?\d+", arguments[index + 1])
+                    is None
+                ):
+                    return False
+                index += 2
+                continue
+            if any(
+                argument.startswith(f"{option}=")
+                and re.fullmatch(
+                    r"[+-]?\d+",
+                    argument.split("=", 1)[1],
+                )
+                is not None
+                for option in {"--bytes", "--lines"}
+            ):
+                index += 1
+                continue
+            if (
+                re.fullmatch(r"-[cn][+-]?\d+", argument)
+                or re.fullmatch(r"[+-]\d+", argument)
+            ):
+                index += 1
+                continue
+            if argument in {
+                "-q",
+                "--quiet",
+                "--silent",
+                "-v",
+                "--verbose",
+                "-z",
+                "--zero-terminated",
+            }:
+                index += 1
+                continue
+            return False
+        return True
     if executable == "nl":
-        return all(argument.startswith("-") for argument in arguments)
+        needs_value = {
+            "-b",
+            "--body-numbering",
+            "-d",
+            "--section-delimiter",
+            "-f",
+            "--footer-numbering",
+            "-h",
+            "--header-numbering",
+            "-i",
+            "--line-increment",
+            "-l",
+            "--join-blank-lines",
+            "-n",
+            "--number-format",
+            "-s",
+            "--number-separator",
+            "-v",
+            "--starting-line-number",
+            "-w",
+            "--number-width",
+        }
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument in {"-p", "--no-renumber"}:
+                index += 1
+                continue
+            if argument in needs_value:
+                if index + 1 >= len(arguments):
+                    return False
+                index += 2
+                continue
+            if any(
+                argument.startswith(f"{option}=")
+                and bool(argument.split("=", 1)[1])
+                for option in needs_value
+                if option.startswith("--")
+            ):
+                index += 1
+                continue
+            return False
+        return True
     if executable == "wc":
         return all(
             argument in {
@@ -2195,6 +2244,7 @@ def parse_rg_arguments(
     explicit_pattern = False
     files_mode = False
     no_config = False
+    no_ignore = False
     positionals: list[str] = []
     index = 0
     after_options = False
@@ -2233,6 +2283,7 @@ def parse_rg_arguments(
         if not after_options and argument in RG_FLAG_OPTIONS:
             files_mode = files_mode or argument in {"--files", "--type-list"}
             no_config = no_config or argument == "--no-config"
+            no_ignore = no_ignore or argument == "--no-ignore"
             index += 1
             continue
         if not after_options and argument.startswith("-"):
@@ -2240,7 +2291,7 @@ def parse_rg_arguments(
         positionals.append(argument)
         index += 1
 
-    if not no_config or (files_mode and explicit_pattern):
+    if not no_config or not no_ignore or (files_mode and explicit_pattern):
         return None
     path_operands = (
         positionals
@@ -2282,7 +2333,7 @@ def diagnostic_markdown_paths(
     if not tokens:
         return set()
     executable = Path(tokens[0]).name
-    if executable not in {"[", "find", "git", "ls", "test", "wc"}:
+    if executable not in {"[", "test", "wc"}:
         return set()
     return {
         path
@@ -2350,26 +2401,6 @@ def safe_read_only_diagnostic(
             if not path_is_within(candidate, tree_root):
                 return False
         return True
-    if executable == "find":
-        if not path_is_within(workdir, tree_root) or any(
-            argument in UNSAFE_FIND_ACTIONS for argument in arguments
-        ):
-            return False
-        for argument in arguments:
-            candidate = diagnostic_path(argument, workdir)
-            if candidate is not None and not path_is_within(candidate, tree_root):
-                return False
-        return True
-    if executable == "ls":
-        if not path_is_within(workdir, tree_root):
-            return False
-        for argument in arguments:
-            if argument.startswith("-"):
-                continue
-            candidate = diagnostic_path(argument, workdir)
-            if candidate is None or not path_is_within(candidate, tree_root):
-                return False
-        return True
     return False
 
 
@@ -2429,6 +2460,10 @@ def unsafe_shell_reason(tokens: Sequence[str]) -> str | None:
         argument in UNSAFE_FIND_ACTIONS for argument in arguments
     ):
         return "unsafe_find_action"
+    if executable == "find":
+        return "unsafe_find_unbound_grammar"
+    if executable == "ls":
+        return "unsafe_ls_unbound_grammar"
     if executable == "rg" and any(
         argument in UNSAFE_RG_OPTIONS
         or any(argument.startswith(f"{option}=") for option in UNSAFE_RG_OPTIONS)

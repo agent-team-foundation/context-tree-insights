@@ -237,12 +237,24 @@ read-only command shapes:
 - a hierarchy selector must parse as the exact `first-tree tree tree` command
   path with only its documented read options and explicit `--no-pull` (apart
   from an exact standalone help form), and `rg` accepts only a closed option
-  grammar with explicit `--no-config`; implicit refresh/config, file-valued,
-  external-program, unknown, and Tree-external options never become accepted
-  read-only diagnostics;
+  grammar with explicit `--no-config --no-ignore`; implicit refresh,
+  configuration/ignore sources, file-valued, external-program, unknown, and
+  Tree-external options never become accepted read-only diagnostics;
 - shell readers and diagnostics use exact bare executable tokens; a
   path-qualified executable is not trusted merely because its basename
   matches an allowed reader;
+- `bat` is not an accepted content reader because its unbound configuration
+  and paging environment can launch an external pager; the remaining content
+  readers are limited to closed `cat`, `head`, `nl`, `sed`, and `tail`
+  grammars with no external-helper options;
+- `find` is not an accepted diagnostic because its broad, platform-dependent
+  grammar includes actions and file-valued inputs that cannot be proven
+  Tree-contained from the historical command record;
+- `ls` is not an accepted diagnostic because recursive/dereferencing options
+  can traverse a Tree-contained symlink into an external directory;
+- pipeline `head`, `tail`, and `nl` filters accept only exact formatting/range
+  option names with validated values; help, version, follow, unknown, and
+  output-replacing forms remain unresolved;
 - Git diagnostics are not accepted as statically closed reads: unbound
   system, global, repository, and environment configuration can activate
   external diff, text-conversion, filesystem-monitor, or equivalent helpers,

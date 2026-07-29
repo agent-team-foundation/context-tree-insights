@@ -99,10 +99,17 @@ Use sanitized traces covering:
   contains the same `tree tree` token pair;
 - ordinary whitelisted `rg` options beside `--file`, `--ignore-file`, and an
   unknown option, including both separate-value and `--option=value` forms,
-  with accepted calls requiring `--no-config` and the implicit-config form
-  rejected;
+  with accepted calls requiring `--no-config --no-ignore` and both
+  implicit-config and implicit-ignore forms rejected;
 - bare allowed readers beside `./rg`, `/tmp/rg`, path-qualified
   `first-tree-staging`, and another path-qualified reader basename;
+- bare and forced-paging `bat` forms, plus a no-config/never-page-looking
+  form, all rejected because `bat` is outside the accepted reader grammar;
+- benign-looking and file-valued `find` forms rejected alongside explicit
+  mutating actions because `find` is outside the accepted diagnostic grammar;
+- bare and recursive/dereferencing `ls` forms rejected, plus pipeline
+  `head`/`tail`/`nl` help, follow, and unknown options rejected by a closed
+  filter grammar;
 - Claude Tree-reading `tool_use` rows with a missing result, duplicate result,
   duplicate call ID, a result after the acquisition end, and the same pairing
   failures wholly before the acquisition start;
