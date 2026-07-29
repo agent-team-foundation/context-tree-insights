@@ -93,10 +93,13 @@ Use sanitized traces covering:
   output, and pending/completed continuations;
 - null-sink output, file output, git mutation, network programs, and literal
   non-Tree paths;
-- a valid `first-tree tree tree` selector beside a mutating First Tree
-  namespace that merely contains the same `tree tree` token pair;
+- a valid `first-tree tree tree --no-pull` selector and exact help form beside
+  the default-refresh form and a mutating First Tree namespace that merely
+  contains the same `tree tree` token pair;
 - ordinary whitelisted `rg` options beside `--file`, `--ignore-file`, and an
-  unknown option, including both separate-value and `--option=value` forms;
+  unknown option, including both separate-value and `--option=value` forms,
+  with accepted calls requiring `--no-config` and the implicit-config form
+  rejected;
 - bare allowed readers beside `./rg`, `/tmp/rg`, path-qualified
   `first-tree-staging`, and another path-qualified reader basename;
 - Claude Tree-reading `tool_use` rows with a missing result, duplicate result,

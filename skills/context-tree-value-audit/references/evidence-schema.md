@@ -235,9 +235,11 @@ read-only command shapes:
   predicates, hierarchy selectors, labels, line counts, and bounded read-only
   git diagnostics may coexist at the command-classification layer;
 - a hierarchy selector must parse as the exact `first-tree tree tree` command
-  path with only its documented read options, and `rg` accepts only a closed
-  option grammar; file-valued, external-program, unknown, and Tree-external
-  options never become accepted read-only diagnostics;
+  path with only its documented read options and explicit `--no-pull` (apart
+  from an exact standalone help form), and `rg` accepts only a closed option
+  grammar with explicit `--no-config`; implicit refresh/config, file-valued,
+  external-program, unknown, and Tree-external options never become accepted
+  read-only diagnostics;
 - shell readers and diagnostics use exact bare executable tokens; a
   path-qualified executable is not trusted merely because its basename
   matches an allowed reader;

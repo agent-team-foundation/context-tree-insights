@@ -2051,8 +2051,12 @@ def safe_tree_cli(
     ):
         return False
 
-    path_operand: str | None = None
     arguments = list(tokens[3:])
+    if arguments in (["-h"], ["--help"]):
+        return True
+
+    path_operand: str | None = None
+    no_pull = False
     index = 0
     after_options = False
     while index < len(arguments):
@@ -2061,7 +2065,8 @@ def safe_tree_cli(
             after_options = True
             index += 1
             continue
-        if not after_options and argument in {"-h", "--help", "--no-pull"}:
+        if not after_options and argument == "--no-pull":
+            no_pull = True
             index += 1
             continue
         if not after_options and argument in {"-L", "--level"}:
@@ -2096,6 +2101,8 @@ def safe_tree_cli(
         path_operand = argument
         index += 1
 
+    if not no_pull:
+        return False
     if path_operand is None:
         return path_is_within(workdir, tree_root)
     candidate = Path(path_operand).expanduser()
@@ -2186,6 +2193,7 @@ def parse_rg_arguments(
         return None
     explicit_pattern = False
     files_mode = False
+    no_config = False
     positionals: list[str] = []
     index = 0
     after_options = False
@@ -2223,6 +2231,7 @@ def parse_rg_arguments(
             continue
         if not after_options and argument in RG_FLAG_OPTIONS:
             files_mode = files_mode or argument in {"--files", "--type-list"}
+            no_config = no_config or argument == "--no-config"
             index += 1
             continue
         if not after_options and argument.startswith("-"):
@@ -2230,7 +2239,7 @@ def parse_rg_arguments(
         positionals.append(argument)
         index += 1
 
-    if files_mode and explicit_pattern:
+    if not no_config or (files_mode and explicit_pattern):
         return None
     path_operands = (
         positionals

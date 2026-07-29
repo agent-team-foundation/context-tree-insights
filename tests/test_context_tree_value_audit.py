@@ -2972,12 +2972,15 @@ print(json.dumps({{"ok": True, "data": data}}))
             ),
             (
                 "rg-pattern-only",
-                f"cd {self.tree_root} && rg {self.tree_file}",
+                f"cd {self.tree_root} && rg --no-config {self.tree_file}",
                 "opaque",
             ),
             (
                 "rg-file-read",
-                f"cd {self.tree_root} && rg Decision system/architecture.md",
+                (
+                    f"cd {self.tree_root} && "
+                    "rg --no-config Decision system/architecture.md"
+                ),
                 "read",
             ),
             (
@@ -3066,6 +3069,15 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "first-tree-staging tree tree -P '*.md' -L 2 --no-pull && "
                 f"cat {self.tree_file}"
             ),
+            "tree-default-refresh": (
+                f"cd {self.tree_root} && "
+                "first-tree-staging tree tree -P '*.md' -L 2 && "
+                f"cat {self.tree_file}"
+            ),
+            "tree-help": (
+                "first-tree-staging tree tree --help && "
+                f"cat {self.tree_file}"
+            ),
             "tree-mutating-namespace": (
                 f"cd {self.tree_root} && "
                 "first-tree-staging chat send tree tree && "
@@ -3097,12 +3109,16 @@ print(json.dumps({{"ok": True, "data": data}}))
             "rg-relative-executable": (
                 f"./rg Decision {self.tree_file}"
             ),
+            "rg-implicit-config": (
+                f"cd {self.tree_root} && "
+                f"rg Decision {self.tree_file}"
+            ),
             "cat-path-qualified": (
                 f"/usr/bin/cat {self.tree_file}"
             ),
             "rg-closed-options": (
                 f"cd {self.tree_root} && "
-                f"rg -n -g '*.md' Decision {self.tree_file}"
+                f"rg --no-config -n -g '*.md' Decision {self.tree_file}"
             ),
         }
         for index, (label, command) in enumerate(shapes.items(), start=1):
@@ -3152,32 +3168,34 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(
             {
                 "accepted_exact": 0,
-                "accepted_read_only_composite": 2,
+                "accepted_read_only_composite": 3,
                 "unresolved_opaque": 0,
-                "rejected_unsafe": 9,
+                "rejected_unsafe": 11,
             },
             candidate["collector_diagnostics"]["attempt_status_counts"],
         )
         self.assertEqual(
             {
-                "unsafe_first_tree_command": 1,
-                "unsafe_or_unresolved_rg": 2,
+                "unsafe_first_tree_command": 2,
+                "unsafe_or_unresolved_rg": 3,
                 "unsafe_path_qualified_program": 4,
                 "unsafe_rg_option": 2,
             },
             candidate["collector_diagnostics"]["attempt_reason_counts"],
         )
         self.assertEqual(
-            11,
+            14,
             candidate["collector_diagnostics"]["in_window_tree_read_attempts"],
         )
         serialized = json.dumps(candidate, sort_keys=True)
         for label in (
             "tree-mutating-namespace",
+            "tree-default-refresh",
             "rg-file-equals",
             "rg-ignore-file",
             "rg-unknown-option",
             "rg-stdin",
+            "rg-implicit-config",
             "rg-absolute-executable",
             "rg-relative-executable",
             "cat-path-qualified",
