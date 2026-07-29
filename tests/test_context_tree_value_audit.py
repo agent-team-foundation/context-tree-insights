@@ -26,6 +26,7 @@ SECOND_CHAT_ID = "22222222-2222-4222-8222-222222222222"
 UNAUTHORIZED_CHAT_ID = "88888888-8888-4888-8888-888888888888"
 MESSAGE_ID = "33333333-3333-4333-8333-333333333333"
 SECOND_MESSAGE_ID = "44444444-4444-4444-8444-444444444444"
+ORG_ID = "77777777-7777-4777-8777-777777777777"
 NOW = "2026-07-24T00:00:00Z"
 
 
@@ -64,6 +65,7 @@ def run_cli(
         ("FIRST_TREE_AGENT_ID", runtime_agent_id),
         ("FIRST_TREE_AGENT_SLUG", runtime_agent_slug),
         ("FIRST_TREE_PROVIDER", runtime_provider),
+        ("FIRST_TREE_CHAT_ID", CHAT_ID),
         ("FIRST_TREE_JSON", first_tree_json),
     ):
         if value is None:
@@ -190,8 +192,11 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("first four checks are `true`", task_reference)
         self.assertIn("in_window_tree_read_attempts", reference)
         self.assertIn("unresolved_opaque", reference)
+        self.assertIn("explicit_agent", skill)
+        self.assertIn("default_branch_match", task_reference)
+        self.assertIn("exploratory evidence scan", skill)
         self.assertIn("collector failure never reverses", task_reference)
-        self.assertEqual("0.2.4", version)
+        self.assertEqual("0.2.5", version)
         self.assertIn(".skill-quarantine/", readme)
         self.assertIn("diff -qr", readme)
         self.assertIn("rollback", readme)
@@ -345,6 +350,38 @@ class DeterministicPipelineTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+        self.tree_commit = subprocess.run(
+            ["git", "-C", str(self.tree_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.tree_root),
+                "update-ref",
+                "refs/remotes/origin/main",
+                self.tree_commit,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.tree_root),
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         write_workspace_identity(self.workspace, self.tree_root)
         self.trace_root = self.root / "sessions"
         self.trace_root.mkdir()
@@ -371,6 +408,13 @@ args = sys.argv[1:]
 with Path({str(log)!r}).open("a", encoding="utf-8") as handle:
     handle.write(" ".join(args) + "\\n")
 
+if "agent" in args and "list" in args and "--remote" in args:
+    print("  NAME           TYPE    RUNTIME  ORG                                   CLIENT")
+    print("  fixture-human  human   codex    {ORG_ID}  —")
+    print(
+        "  {resolved_agent_name}  agent   codex    {ORG_ID}  fixture-client"
+    )
+    raise SystemExit(0)
 if "agent" in args and "list" in args:
     if os.environ.get("FIRST_TREE_JSON") == "1":
         raise SystemExit(0)
@@ -387,6 +431,7 @@ if "chat" in args and "list" in args:
         "items": [{{
             "id": {CHAT_ID!r},
             "topic": "Fixture Chat",
+            "organizationId": {ORG_ID!r},
             "lastMessageAt": {chat_last_message_at!r}
         }}],
         "nextCursor": None
@@ -552,7 +597,7 @@ print(json.dumps({{"ok": True, "data": data}}))
             stat.S_IMODE((self.artifacts / "chats.jsonl").stat().st_mode),
         )
 
-    def test_explicit_agent_export_uses_chat_list_without_agent_enumeration(self) -> None:
+    def test_explicit_agent_export_uses_the_simple_explicit_scope(self) -> None:
         scope = {
             "schema_version": 1,
             "agents": [
@@ -568,11 +613,31 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(0, result.returncode, result.stderr)
         rows = read_jsonl(self.artifacts / "chats.jsonl")
         self.assertEqual("explicit_agent", rows[0]["authorization"])
+        self.assertNotIn("authorization_context", rows[0])
         commands = (self.root / "first-tree-commands.log").read_text(encoding="utf-8")
         self.assertIn("agent list", commands)
         self.assertIn("chat list", commands)
         self.assertIn("--agent=fixture-agent", commands)
         self.assertNotIn("Fixture Agent", commands)
+
+    def test_scope_rejects_extra_authorization_context(self) -> None:
+        scope = {
+            "schema_version": 1,
+            "agents": [
+                {
+                    "name": "fixture-agent",
+                    "agent_id": AGENT_ID,
+                    "authorization": "explicit_agent",
+                }
+            ],
+            "chats": [],
+            "authorization_context": {
+                "chat_id": CHAT_ID,
+            },
+        }
+        rejected = self.export_scope(scope)
+        self.assertEqual(2, rejected.returncode)
+        self.assertIn("complete authorization model", rejected.stderr)
 
     def test_runtime_slug_and_uuid_bind_the_cli_selector(self) -> None:
         scope = {
@@ -870,6 +935,19 @@ print(json.dumps({{"ok": True, "data": data}}))
                                 "The Context Tree requires one authoritative state "
                                 "source, so I will not add a second table."
                             ),
+                            "decision_receipt": {
+                                "version": 1,
+                                "effect": "constrained",
+                                "summary": "Kept one authoritative state source.",
+                                "evidence": [
+                                    {
+                                        "repoUrl": "https://github.com/acme/tree",
+                                        "commit": self.tree_commit,
+                                        "nodePath": "system/architecture.md",
+                                        "heading": "Decision",
+                                    }
+                                ],
+                            },
                         }
                     ],
                     "coverage_gaps": [],
@@ -1271,6 +1349,10 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(["system/architecture.md"], isolated_read["node_paths"])
         self.assertEqual("isolated", isolated_read["read_mode"])
         self.assertEqual(candidate["tree_identity"], isolated_read["tree_identity"])
+        self.assertEqual(
+            "default_branch_match",
+            isolated_read["tree_source"]["status"],
+        )
         self.assertIn("authoritative state", isolated_read["passage"])
         self.assertEqual(
             [
@@ -1326,6 +1408,253 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(
             0o600,
             stat.S_IMODE((self.artifacts / "candidates-one.jsonl").stat().st_mode),
+        )
+
+    def test_codex_missing_and_duplicate_results_stay_unresolved(self) -> None:
+        self.write_chat_export()
+        command = {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": json.dumps(
+                {
+                    "cmd": f"cat {self.tree_file}",
+                    "workdir": str(self.workspace),
+                }
+            ),
+        }
+        output = (
+            "Process exited with code 0\n"
+            + self.tree_file.read_text(encoding="utf-8")
+        )
+        write_jsonl(
+            self.trace_root / "missing-result.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        **command,
+                        "call_id": "call-missing-result",
+                    },
+                },
+            ],
+        )
+        write_jsonl(
+            self.trace_root / "duplicate-call.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                *[
+                    {
+                        "timestamp": f"2026-07-22T10:03:0{index}Z",
+                        "type": "response_item",
+                        "payload": {
+                            **command,
+                            "call_id": "call-duplicate",
+                        },
+                    }
+                    for index in (0, 1)
+                ],
+                {
+                    "timestamp": "2026-07-22T10:03:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-duplicate",
+                        "output": output,
+                    },
+                },
+            ],
+        )
+        write_jsonl(
+            self.trace_root / "duplicate-result.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:04:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        **command,
+                        "call_id": "call-duplicate-result",
+                    },
+                },
+                *[
+                    {
+                        "timestamp": f"2026-07-22T10:04:0{index}Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-duplicate-result",
+                            "output": output,
+                        },
+                    }
+                    for index in (1, 2)
+                ],
+            ],
+        )
+
+        result = self.collect("codex-pairing-candidates.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "codex-pairing-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 4,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {
+                "codex_duplicate_call_id": 2,
+                "codex_duplicate_tool_result": 1,
+                "tree_read_output_missing": 1,
+            },
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+
+    def test_codex_explicit_direct_read_error_stays_unresolved(self) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "direct-read-error.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "call-direct-read-error",
+                        "arguments": json.dumps(
+                            {"path": str(self.tree_file)}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-direct-read-error",
+                        "output": "Error: permission denied",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "call-direct-read-json-error",
+                        "arguments": json.dumps(
+                            {"path": str(self.tree_file)}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:03Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-direct-read-json-error",
+                        "output": json.dumps(
+                            {"error": "permission denied"}
+                        ),
+                    },
+                },
+            ],
+        )
+
+        result = self.collect("direct-read-error-candidates.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "direct-read-error-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 2,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {"tree_read_command_failed": 2},
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+
+    def test_codex_read_call_id_shared_with_non_read_call_is_unresolved(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "ambiguous-call-id.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "call-shared-with-non-read",
+                        "arguments": json.dumps(
+                            {"path": str(self.tree_file)}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "web_search",
+                        "call_id": "call-shared-with-non-read",
+                        "arguments": json.dumps({"query": "unrelated"}),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-shared-with-non-read",
+                        "output": self.tree_file.read_text(encoding="utf-8"),
+                    },
+                },
+            ],
+        )
+
+        result = self.collect("ambiguous-call-id-candidates.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "ambiguous-call-id-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 1,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {"codex_duplicate_call_id": 1},
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
         )
 
     def test_collects_claude_code_native_tool_results(self) -> None:
@@ -1459,6 +1788,85 @@ print(json.dumps({{"ok": True, "data": data}}))
                     self.artifacts / "claude-custom-root-candidates.jsonl"
                 )[0]["reads"]
             ),
+        )
+
+    def test_claude_failed_result_is_not_counted_as_accepted(self) -> None:
+        self.write_chat_export()
+        trace_root = self.root / "claude-failed"
+        write_jsonl(
+            trace_root / "project" / "session.jsonl",
+            [
+                {
+                    "type": "user",
+                    "sessionId": "claude-failed-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:01:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+                    },
+                },
+                {
+                    "type": "assistant",
+                    "sessionId": "claude-failed-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "claude-failed-read",
+                                "name": "Read",
+                                "input": {"file_path": str(self.tree_file)},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "user",
+                    "sessionId": "claude-failed-session",
+                    "cwd": str(self.workspace),
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "claude-failed-read",
+                                "is_error": True,
+                                "content": "read failed",
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        result = self.collect_for_provider(
+            "claude-code",
+            trace_root,
+            "claude-failed-candidates.jsonl",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "claude-failed-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            0,
+            candidate["collector_diagnostics"]["attempt_status_counts"][
+                "accepted_exact"
+            ],
+        )
+        self.assertEqual(
+            1,
+            candidate["collector_diagnostics"]["attempt_status_counts"][
+                "unresolved_opaque"
+            ],
+        )
+        self.assertEqual(
+            {"tree_read_command_failed": 1},
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
         )
 
     def test_claude_tool_result_context_echo_is_not_identity(self) -> None:
@@ -2304,6 +2712,80 @@ print(json.dumps({{"ok": True, "data": data}}))
             ],
         )
 
+    def test_duplicate_continuation_output_keeps_parent_unresolved(self) -> None:
+        self.write_chat_export()
+        terminal_output = (
+            "Process exited with code 0\n"
+            "# Architecture\n\n## Decision\n\n"
+            "Chat history is the authoritative state."
+        )
+        write_jsonl(
+            self.trace_root / "duplicate-continuation.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-duplicate-continuation-parent",
+                        "arguments": json.dumps(
+                            {
+                                "cmd": f"cat {self.tree_file}",
+                                "workdir": str(self.workspace),
+                            }
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-duplicate-continuation-parent",
+                        "output": "Script running with session ID 733",
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "write_stdin",
+                        "call_id": "call-duplicate-continuation",
+                        "arguments": json.dumps(
+                            {"session_id": 733, "chars": ""}
+                        ),
+                    },
+                },
+                *[
+                    {
+                        "timestamp": f"2026-07-22T10:02:0{index}Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call-duplicate-continuation",
+                            "output": terminal_output,
+                        },
+                    }
+                    for index in (3, 4)
+                ],
+            ],
+        )
+
+        result = self.collect("duplicate-continuation-candidate.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "duplicate-continuation-candidate.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {"tree_read_continuation_output_duplicate": 1},
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+
     def test_continuation_after_acquisition_end_stays_pending(self) -> None:
         self.write_chat_export()
         write_jsonl(
@@ -2368,7 +2850,10 @@ print(json.dumps({{"ok": True, "data": data}}))
             self.artifacts / "late-continuation-candidate.jsonl"
         )[0]
         self.assertEqual([], candidate["reads"])
-        self.assertIn("tree_read_output_pending", candidate["coverage_gaps"])
+        self.assertIn(
+            "tree_read_continuation_incomplete_or_out_of_order",
+            candidate["coverage_gaps"],
+        )
         self.assertNotIn("late-private-passage", json.dumps(candidate))
 
     def test_exec_orchestration_classifies_exact_and_promise_all(self) -> None:
@@ -2505,7 +2990,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         candidate = read_jsonl(
             self.artifacts / "exec-orchestration-candidate.jsonl"
         )[0]
-        self.assertEqual(6, len(candidate["reads"]))
+        self.assertEqual(5, len(candidate["reads"]))
         self.assertEqual(
             [
                 "isolated",
@@ -2513,12 +2998,11 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "isolated",
                 "read_only_composite",
                 "read_only_composite",
-                "isolated",
             ],
             [read["read_mode"] for read in candidate["reads"]],
         )
         self.assertEqual(
-            ["exact", "exact", "exact", "aggregate", "aggregate", "exact"],
+            ["exact", "exact", "exact", "aggregate", "aggregate"],
             [read["output_attribution"] for read in candidate["reads"]],
         )
         self.assertNotIn(
@@ -2528,8 +3012,8 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(
             {
                 "accepted_exact": 1,
-                "accepted_read_only_composite": 4,
-                "unresolved_opaque": 0,
+                "accepted_read_only_composite": 3,
+                "unresolved_opaque": 1,
                 "rejected_unsafe": 0,
             },
             candidate["collector_diagnostics"]["attempt_status_counts"],
@@ -2617,8 +3101,8 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(
             {
                 "accepted_exact": 0,
-                "accepted_read_only_composite": 4,
-                "unresolved_opaque": 2,
+                "accepted_read_only_composite": 3,
+                "unresolved_opaque": 3,
                 "rejected_unsafe": 1,
             },
             candidate["collector_diagnostics"]["attempt_status_counts"],
@@ -2628,6 +3112,7 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "unresolved_shell_conditional": 1,
                 "unresolved_unknown_program": 1,
                 "unsafe_git_mutation": 1,
+                "tree_read_auxiliary_output_unresolved": 1,
             },
             candidate["collector_diagnostics"]["attempt_reason_counts"],
         )
@@ -3281,8 +3766,8 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(
             {
                 "accepted_exact": 0,
-                "accepted_read_only_composite": 3,
-                "unresolved_opaque": 3,
+                "accepted_read_only_composite": 1,
+                "unresolved_opaque": 5,
                 "rejected_unsafe": 19,
             },
             candidate["collector_diagnostics"]["attempt_status_counts"],
@@ -3297,6 +3782,7 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "unsafe_program_bat": 3,
                 "unsafe_rg_option": 2,
                 "unresolved_unknown_program": 3,
+                "tree_read_auxiliary_output_unresolved": 2,
             },
             candidate["collector_diagnostics"]["attempt_reason_counts"],
         )
@@ -3622,6 +4108,102 @@ print(json.dumps({{"ok": True, "data": data}}))
         )
         self.assertEqual(2, wrong_tree.returncode)
         self.assertIn("workspace-bound Tree", wrong_tree.stderr)
+
+    def test_verified_effect_requires_default_branch_match(self) -> None:
+        self.write_chat_export()
+        self.write_trace_fixtures()
+        matched = self.collect("matched-source-candidates.jsonl")
+        self.assertEqual(0, matched.returncode, matched.stderr)
+        matched_candidate = read_jsonl(
+            self.artifacts / "matched-source-candidates.jsonl"
+        )[0]
+        self.assertEqual(
+            "local_default_branch",
+            matched_candidate["tree_source_snapshot"]["status"],
+        )
+        self.assertEqual(
+            "default_branch_match",
+            matched_candidate["reads"][0]["tree_source"]["status"],
+        )
+
+        self.tree_file.write_text(
+            "# Architecture\n\n## Decision\n\nUse a replacement state source.\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "-C", str(self.tree_root), "add", "system/architecture.md"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.tree_root), "commit", "-m", "replace"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        replacement_commit = subprocess.run(
+            ["git", "-C", str(self.tree_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.tree_root),
+                "update-ref",
+                "refs/remotes/origin/main",
+                replacement_commit,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
+        candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        self.assertEqual(
+            "local_default_branch",
+            candidate["tree_source_snapshot"]["status"],
+        )
+        self.assertEqual(
+            {"status": "unverified_source"},
+            candidate["reads"][0]["tree_source"],
+        )
+
+        task = self.task_judgment(candidate)
+        overstated = self.report(
+            [task],
+            evidence_name="overstated-source-evidence.jsonl",
+            report_name="overstated-source-REPORT.md",
+        )
+        self.assertEqual(2, overstated.returncode)
+        self.assertIn("requires every cited read", overstated.stderr)
+
+        task["effects"][0]["original_judgment"] = "probable"
+        task["effects"][0]["rubric"]["influence_visible"] = False
+        exploratory = self.report(
+            [task],
+            evidence_name="exploratory-source-evidence.jsonl",
+            report_name="exploratory-source-REPORT.md",
+        )
+        self.assertEqual(0, exploratory.returncode, exploratory.stderr)
+        effect = read_jsonl(
+            self.artifacts / "exploratory-source-evidence.jsonl"
+        )[0]["effects"][0]
+        self.assertEqual(
+            "unverified_source",
+            effect["tree_source_status"],
+        )
+        self.assertEqual("limited", effect["derived_support"])
+        self.assertIn(
+            "unverified source **1**",
+            (
+                self.artifacts / "exploratory-source-REPORT.md"
+            ).read_text(encoding="utf-8"),
+        )
 
     def test_report_handles_excluded_task_without_representative_case(
         self,
@@ -3973,6 +4555,8 @@ print(json.dumps({{"ok": True, "data": data}}))
             exposure_status="confirmed",
             read_ids=["sample-read-121"],
         )
+        novel_tasks[120]["effects"][0]["original_judgment"] = "probable"
+        novel_tasks[120]["effects"][0]["rubric"]["influence_visible"] = False
         missing_signal = self.report(
             novel_tasks,
             evidence_name="missing-signal-evidence.jsonl",

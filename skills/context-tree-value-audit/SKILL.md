@@ -59,13 +59,13 @@ Tree, or more than one workspace or Tree.
 
 Choose exactly one mode from the human's explicit request:
 
-1. `explicit_agent`: all Chats for this one current Agent;
+1. `explicit_agent`: all Chats visible to this one current Agent, only when the
+   human explicitly asks for the current Agent's full Chat scope;
 2. `explicit_chat`: exact Chat UUIDs for this Agent, or the explicitly
    authorized invoking Chat resolved from runtime `chatId`.
 
-Do not infer authorization from Team visibility, Chat visibility, Agent
-ownership, or local trace access. Do not mix modes. Ask the human only when
-authorization is ambiguous.
+Trust the human's explicit scope. Do not broaden it, mix modes, infer another
+Agent, or scan across workspaces. Ask the human only when scope is ambiguous.
 
 Write `scope.json`:
 
@@ -100,7 +100,9 @@ or:
 }
 ```
 
-Every row must name the same current Agent identity.
+Every row must name the same current Agent identity. Do not add human,
+organization, or other authorization-context fields; explicit scope is the
+complete authorization model.
 
 ## Collect deterministic evidence
 
@@ -141,7 +143,11 @@ in-window call that references bound-Tree Markdown exactly once as
 statically closed read-only wrappers, paths, programs, and forwarded outputs.
 Keep exact output/continuation pairing and reject writes, mutation, network
 access, and literal Tree-external reads. Unknown or dynamic shapes remain
-unresolved rather than becoming negative exposure.
+unresolved rather than becoming negative exposure. Missing, failed, duplicate,
+pending, incomplete, or out-of-window results are unresolved and produce no
+accepted read evidence. A unique, completed, non-empty, attributable result
+with no explicit failure signal may remain candidate evidence even when its
+provider has no separate positive-success flag.
 
 For message metadata:
 
@@ -179,9 +185,12 @@ Effects are only `confirmed`, `constrained`, `redirected`, or `conflicted`.
 Keep the original passage-level confidence as `verified` or `probable`, and
 persist its five checks: real read, decision-bearing normal passage, Task
 relevance, read before choice, and visible influence. `verified` requires all
-five; `probable` requires the first four while visible influence is false or
-unknown. Do not use `informed`, `none`, or numeric weights. Every effect needs
-Task-window reads, later same-Agent choice messages, and an outcome anchor.
+five and requires every cited passage to match the bound Tree's local
+`origin/HEAD` snapshot. `probable` requires the first four while visible
+influence is false or unknown, and is the strongest allowed classification for
+an unverified source. Do not use
+`informed`, `none`, or numeric weights. Every effect needs Task-window reads,
+later same-Agent choice messages, and an outcome anchor.
 
 Do not write `support`. The reporter derives definite support from confirmed
 exposure plus verified judgment; every other valid positive effect is limited
@@ -235,6 +244,7 @@ The report must include:
 - quota and saturation status;
 - authorized Chat, message, trace, and coverage-gap counts;
 - the four-class in-window Tree-read attempt conservation table;
+- local-default-branch-match versus unverified-source counts;
 - explicit language that unresolved and receipt absence are unknown;
 - `N/A / pending`, without effect totals or saturation, when no clear Task has
   evidence-ready exposure;
@@ -246,3 +256,5 @@ Because all authorized Chats are not an eligible value denominator, return local
 to `REPORT.md` and `evidence.jsonl`, the acquisition bound if one was supplied,
 authorization mode, sample status, and any material coverage gap. Keep
 artifacts private in the invoking Agent workspace and never commit them.
+Describe the result as an exploratory evidence scan, not causal proof, ROI, or
+an effectiveness rate.

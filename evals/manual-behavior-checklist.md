@@ -4,7 +4,7 @@ Use this checklist before admitting a `context-tree-value-audit` revision. Run i
 in designated First Tree Agent workspaces against disposable or sanitized
 records. Never commit generated artifacts.
 
-For a 0.2.4 upgrade, confirm the installed payload exposes only
+For a 0.2.5 upgrade, confirm the installed payload exposes only
 `$context-tree-value-audit`; the superseded `$context-tree-insights` directory
 must not remain as a second callable Skill. Exercise the README's minimal
 move/copy/compare flow and confirm the old payload is outside both Skill
@@ -49,6 +49,11 @@ Pass when:
   slug must return the same UUID as later `chat --agent` calls; the Skill does
   not reimplement the local YAML parser or persist/enumerate other Agents into
   the audit scope;
+- `explicit_agent` is used only after the human explicitly asks for all Chats
+  visible to the current Agent;
+- `explicit_chat` is used for the invoking Chat or exact supplied Chat UUIDs;
+- neither mode carries human, organization, or extra authorization-context
+  fields, and neither can cross to another Agent or workspace;
 - another Agent, workspace, Tree, or unlisted Chat fails closed;
 - only one private artifact directory is created;
 - ordinary tasks do not load the Skill or scan history;
@@ -137,8 +142,12 @@ Pass when:
   effects, duplicate properties, unsafe or config-driven Git diagnostics,
   and `rg` patterns that merely look like Markdown paths all fail closed;
 - initial calls and exact `write_stdin`/`wait` continuations form one attempt;
+- an explicit direct-reader error envelope produces no read ID;
+- a missing or duplicate continuation result keeps the whole parent read
+  unresolved even if a later continuation appears successful;
 - every attributable in-window Claude Tree-reading call stays in the attempt
-  denominator; missing or duplicate pairing is `unresolved_opaque`;
+  denominator; missing, failed, pending, duplicate, incomplete, or
+  out-of-window pairing is `unresolved_opaque` and produces no read ID;
 - gaps remain diagnostic rather than being turned into negative exposure;
 - artifacts keep `0700`/`0600` permissions and opaque local identities.
 
@@ -211,6 +220,9 @@ Pass when:
 - every effect persists the five passage-to-choice rubric checks; `verified`
   requires all five while `probable` requires the first four and no visible
   influence;
+- `verified` additionally requires every cited passage to match the same node
+  in the bound Tree's local `origin/HEAD` snapshot; an unverified source may
+  support only `probable`;
 - post-choice reads and out-of-window choices are rejected;
 - duplicate effect evidence does not inflate independent-effect totals;
 - input `support` is rejected;
@@ -263,6 +275,9 @@ Verify:
 - the report does not output a global effectiveness rate;
 - read counts, receipts, and unresolved gaps are not represented as causal
   value or non-value.
+- the report labels itself exploratory, separates local default-branch matches
+  from unverified sources, and does not imply remote provenance, causal proof,
+  or ROI.
 - zero evidence-ready Tasks render effect totals, distribution, support,
   representatives, and saturation as `N/A / pending`, never numeric zero.
 - an optional reviewed baseline is hash-anchored, internally conserving, and

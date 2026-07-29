@@ -15,14 +15,16 @@ CHAT_UUID@AGENT_UUID
 Every unit in one run uses the same invoking Agent UUID, managed workspace, and
 bound Tree. Allowed authorization values are:
 
-- `explicit_agent`: the human explicitly authorized all Chats for the current
-  Agent;
+- `explicit_agent`: the human explicitly authorized all Chats visible to this
+  one current Agent;
 - `explicit_chat`: the human supplied exact Chat UUIDs for the current Agent or
   authorized the invoking Chat resolved from runtime `chatId`.
 
-These values record consent, not inferred ownership. A run uses one mode only.
-The Chat-Agent pair remains the authorization, source, and trace-mapping unit;
-it is not the value-counting unit.
+These values record explicit scope. A run uses one mode only, never broadens
+the requested scope, and never crosses to another Agent or workspace. No
+human, organization, or extra authorization-context fields are used. The
+Chat-Agent pair remains the authorization, source, and trace-mapping unit; it
+is not the value-counting unit.
 
 The Agent name in scope and evidence is the immutable lowercase slug from the
 invoking runtime's `FIRST_TREE_AGENT_SLUG`. The runtime's
@@ -100,6 +102,11 @@ gaps. It never blocks Chat export or the full audit.
     "end": "RFC3339"
   },
   "tree_identity": "tree-opaque-hash",
+  "tree_source_snapshot": {
+    "status": "local_default_branch",
+    "branch": "main",
+    "commit": "0123456789abcdef0123456789abcdef01234567"
+  },
   "runtime_provider": "claude-code",
   "candidate_status": "candidate",
   "mapped_trace_files": ["trace-opaque-hash"],
@@ -140,7 +147,13 @@ gaps. It never blocks Chat export or the full audit.
       "command_truncated": false,
       "passage": "actual recorded tool output",
       "passage_truncated": false,
-      "success": true
+      "success": true,
+      "tree_source": {
+        "status": "default_branch_match",
+        "branch": "main",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "node_path": "system/example.md"
+      }
     }
   ],
   "visible_messages": [
@@ -174,6 +187,15 @@ before `window.start`.
 
 `tree_identity` is a deterministic opaque identity for the exact
 Agent/workspace-bound Tree. The audit-row and read-level values must match.
+`tree_source_snapshot` describes the locally available `origin/HEAD` snapshot
+without fetching or changing git state. If it cannot be established, its
+status is `unavailable` with a conservative reason.
+
+Each read's `tree_source` is `default_branch_match` only when its one recorded
+node passage matches that node in the local snapshot. Every other read is
+`unverified_source`. This is a lightweight local-content classification, not
+remote provenance or causal proof.
+
 `runtime_provider` is the canonical local evidence adapter. Schema-v1
 artifacts produced by 0.2.x omitted it because that release was Codex-only;
 the reporter interprets that legacy omission as `codex`.
@@ -189,10 +211,11 @@ The exact sources and support matrix are defined in
 in-window call whose payload can be tied to bound-Tree Markdown is classified
 exactly once:
 
-- `accepted_exact` — one statically closed content read with exact output
-  forwarding;
+- `accepted_exact` — one statically closed content read with one completed,
+  non-empty, exactly attributable output and no explicit failure signal;
 - `accepted_read_only_composite` — a statically closed read-only wrapper,
-  multi-file read, sequence, loop, or pipeline;
+  multi-file read, sequence, loop, or pipeline with one completed, non-empty,
+  attributable result and no explicit failure signal;
 - `unresolved_opaque` — dynamic interpolation, unknown program, incomplete
   path closure, or output attribution that cannot be proved;
 - `rejected_unsafe` — mutation, file output, network access, or a proven
@@ -229,7 +252,7 @@ read-only command shapes:
 - a call is paired with its exact output and continuations; an attributable
   in-window provider call with a missing, duplicate, or otherwise invalid
   result remains one `unresolved_opaque` attempt instead of disappearing from
-  the attempt denominator;
+  the attempt denominator or being counted as accepted;
 - explicit multi-file reads, multiple read statements, static `for` loops,
   single-branch literal filesystem guards, read-only pipelines, filesystem
   predicates, hierarchy selectors, labels, and line counts may coexist at the
@@ -271,8 +294,9 @@ read-only command shapes:
 - `auxiliary_output_possible` records that a composite contained safe
   auxiliary operations, but persisted passage bytes have already passed the
   attribution gate;
-- dynamic, unknown, stdin, lookalike, cross-tree, failed, pending, mutating, or
-  network shapes are unresolved or rejected and produce no read ID;
+- dynamic, unknown, stdin, lookalike, cross-tree, missing-result,
+  duplicate-call/result, failed, pending, incomplete, out-of-window, mutating,
+  or network shapes are unresolved or rejected and produce no read ID;
 - historical output is never replaced with the current Tree file.
 
 `read_components` conserves `node_paths`. `read_mode: isolated` implies

@@ -30,13 +30,17 @@ Every adapter must establish:
 
 - one authorized Chat and the exact current Agent UUID;
 - one local session associated with the managed workspace;
-- a paired successful tool call and full recorded output;
+- one paired, completed, non-empty tool result with no explicit failure signal;
 - a statically attributable Markdown read inside the bound Tree;
 - timestamps inside the acquisition window.
 
 The shared read grammar then classifies the attempt as exact, read-only
 composite, unresolved, or unsafe. Provider-native output never bypasses Tree
-path isolation, mutation checks, or output-attribution checks.
+path isolation, mutation checks, or output-attribution checks. A unique,
+completed, non-empty, attributable result with no explicit failure signal may
+be candidate evidence even when the provider has no separate positive-success
+flag. Missing, failed, duplicate, pending, incomplete, or out-of-window
+results remain unresolved and produce no read IDs.
 
 ## Provider-specific notes
 
@@ -68,6 +72,7 @@ handlers is outside this Skill's scope.
 
 ## Missing evidence
 
-Missing roots, cleaned files, malformed identity, incomplete call/result
-pairs, truncated output, or unsupported historical sessions remain
-`unresolved`. They never become proof of no Tree use or zero effect.
+Missing roots, cleaned files, malformed identity, missing or duplicate calls
+or results, failed or pending results, incomplete call/result pairs, truncated
+output, or unsupported historical sessions remain `unresolved`. They never
+become accepted evidence, proof of no Tree use, or zero effect.

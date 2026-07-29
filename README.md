@@ -1,13 +1,13 @@
 # Context Tree Value Audit
 
-`context-tree-value-audit` 0.2.4 is an explicit-only Skill for task-first,
+`context-tree-value-audit` 0.2.5 is an explicit-only Skill for task-first,
 evidence-first analysis of Context Tree decision value for the current First
 Tree Runtime when its native historical evidence is supported. It reconstructs
 Tasks from authorized Chats, separates confirmed from unresolved exposure,
 judges four visible effect types, and stops sampling through a Task quota plus
 saturation.
 
-Version 0.2.4 also renames the installable Skill from
+The 0.2 series renamed the installable Skill from
 `context-tree-insights` to `context-tree-value-audit`. Replace the old Skill
 directory during upgrade; do not install both names because they represent one
 explicit audit capability, not two independent workflows.
@@ -25,8 +25,9 @@ Tree.
 
 - Invocation is explicit only: `$context-tree-value-audit` in Codex or
   `/context-tree-value-audit` in Claude Code / Claude Code TUI.
-- The invoking human authorizes all Chats for the current Agent, exact Chat
-  UUIDs for that Agent, or the invoking Chat resolved from runtime `chatId`.
+- The invoking human may authorize the current Chat, exact Chat UUIDs, or all
+  Chats visible to this one current Agent. The Skill trusts that explicit
+  scope and never broadens it or crosses to another Agent.
 - `Chat UUID @ Agent UUID` remains the authorization and trace-mapping unit;
   Task is the judgment and counting unit.
 - Local Runtime evidence is preflighted against authorized Chat and Agent IDs
@@ -40,9 +41,15 @@ Tree.
   value by itself.
 - Single-file reads and statically closed read-only composites are recovered;
   dynamic or unknown shapes stay unresolved, and unsafe shapes are rejected.
+- A read attempt with one completed, non-empty, attributable result and no
+  explicit failure signal may become candidate evidence. Missing, failed,
+  duplicate, pending, or out-of-window results stay unresolved.
+- `verified` requires cited passages to match the bound Tree's local
+  `origin/HEAD` snapshot. Unmatched content may support only `probable`.
 - Unresolved exposure is never counted as unused.
 - Missing evidence produces `N/A / pending`, never a numeric zero effect.
-- The report does not produce a global effectiveness rate.
+- The output is an exploratory evidence scan, not causal proof, ROI, or a
+  global effectiveness rate.
 
 The audit writes only private local artifacts in the invoking Agent workspace.
 Never commit real Chat exports, traces, passages, task judgments, evidence
@@ -167,8 +174,9 @@ The Skill orchestrates four stages:
 1. `export-chats` resolves explicit authorization and exports visible records.
 2. `collect` maps authorized Chats to supported native local evidence,
    classifies every in-window Tree-read attempt into a conserving four-state
-   grammar, and reconstructs exact or read-only-composite evidence plus visible
-   choices. Unsupported Runtime history stays pending.
+   grammar, reconstructs exact or read-only-composite evidence plus visible
+   choices, and distinguishes local default-branch matches from unverified
+   sources. Unsupported Runtime history stays pending.
 3. The Agent reconstructs Tasks, Task-window exposure, effects, and sampling
    signals in `task-judgments.jsonl`, including the reproducible five-check
    rubric behind each `verified` or `probable` effect.
