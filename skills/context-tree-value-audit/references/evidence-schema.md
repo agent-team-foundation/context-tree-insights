@@ -232,8 +232,8 @@ read-only command shapes:
   the attempt denominator;
 - explicit multi-file reads, multiple read statements, static `for` loops,
   single-branch literal filesystem guards, read-only pipelines, filesystem
-  predicates, hierarchy selectors, labels, line counts, and bounded read-only
-  git diagnostics may coexist at the command-classification layer;
+  predicates, hierarchy selectors, labels, and line counts may coexist at the
+  command-classification layer;
 - a hierarchy selector must parse as the exact `first-tree tree tree` command
   path with only its documented read options and explicit `--no-pull` (apart
   from an exact standalone help form), and `rg` accepts only a closed option
@@ -243,6 +243,10 @@ read-only command shapes:
 - shell readers and diagnostics use exact bare executable tokens; a
   path-qualified executable is not trusted merely because its basename
   matches an allowed reader;
+- Git diagnostics are not accepted as statically closed reads: unbound
+  system, global, repository, and environment configuration can activate
+  external diff, text-conversion, filesystem-monitor, or equivalent helpers,
+  including while resolving index-backed revisions;
 - conditional guards with dynamic values, alternate branches, nested control,
   or an unsafe body stay unresolved or rejected;
 - null-sink diagnostic output is allowed, while file output is rejected;

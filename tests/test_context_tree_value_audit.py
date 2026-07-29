@@ -2557,7 +2557,7 @@ print(json.dumps({{"ok": True, "data": data}}))
                 f"cat {self.tree_file}"
             ),
             "mixed-diagnostic": (
-                f"git -C {self.tree_root} status && "
+                "pwd && "
                 f"cat {self.tree_file} && "
                 f"if [ -r {self.second_tree_file} ]; then "
                 f"cat {self.second_tree_file}; fi"
@@ -2949,14 +2949,14 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.write_chat_export()
         root_node = self.tree_root / "NODE.md"
         root_node.write_text("# Root\n", encoding="utf-8")
-        outside = self.root / "outside-secret.md"
+        outside = self.root / "outside-secret.txt"
         outside.write_text("outside", encoding="utf-8")
         shapes = (
             (
                 "git-output",
                 (
                     f"git -C {self.tree_root} diff "
-                    f"--output={self.root / 'captured.diff'} && "
+                    "--output=captured.diff && "
                     f"cat {self.tree_file}"
                 ),
                 "unsafe",
@@ -2966,6 +2966,71 @@ print(json.dumps({{"ok": True, "data": data}}))
                 (
                     f"cd {self.tree_root} && "
                     f"git diff --no-index NODE.md {outside} && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-implicit-diff-helper",
+                (
+                    f"git -C {self.tree_root} diff && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-implicit-log-helper",
+                (
+                    f"git -C {self.tree_root} log -1 -p && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-implicit-show-helper",
+                (
+                    f"git -C {self.tree_root} show HEAD && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-implicit-status-hook",
+                (
+                    f"git -C {self.tree_root} status && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-global-exec-path",
+                (
+                    f"git --exec-path=/tmp diff && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-inline-config",
+                (
+                    "git -c diff.external=/tmp/helper diff && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-index-revision",
+                (
+                    f"git -C {self.tree_root} rev-parse --verify :tracked && "
+                    f"cat {self.tree_file}"
+                ),
+                "unsafe",
+            ),
+            (
+                "git-external-repository-path",
+                (
+                    f"git -C {self.tree_root} rev-parse "
+                    "--resolve-git-dir ~/.git && "
                     f"cat {self.tree_file}"
                 ),
                 "unsafe",
@@ -2989,7 +3054,7 @@ print(json.dumps({{"ok": True, "data": data}}))
                     f"git -C {self.tree_root} remote get-url origin && "
                     f"cat {self.tree_file}"
                 ),
-                "accepted-no-passage",
+                "unsafe",
             ),
             (
                 "stderr-null",
@@ -3011,7 +3076,7 @@ print(json.dumps({{"ok": True, "data": data}}))
                     session_meta(self.workspace),
                     context_row(CHAT_ID),
                     {
-                        "timestamp": f"2026-07-22T11:1{index}:00Z",
+                        "timestamp": f"2026-07-22T11:{10 + index:02d}:00Z",
                         "type": "response_item",
                         "payload": {
                             "type": "function_call",
@@ -3026,7 +3091,7 @@ print(json.dumps({{"ok": True, "data": data}}))
                         },
                     },
                     {
-                        "timestamp": f"2026-07-22T11:1{index}:01Z",
+                        "timestamp": f"2026-07-22T11:{10 + index:02d}:01Z",
                         "type": "response_item",
                         "payload": {
                             "type": "function_call_output",
@@ -3044,13 +3109,22 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(
             {
                 "accepted_exact": 1,
-                "accepted_read_only_composite": 2,
+                "accepted_read_only_composite": 1,
                 "unresolved_opaque": 1,
-                "rejected_unsafe": 2,
+                "rejected_unsafe": 11,
             },
             candidate["collector_diagnostics"]["attempt_status_counts"],
         )
-        self.assertIn(
+        self.assertEqual(
+            {
+                "unsafe_git_configured_helper": 4,
+                "unsafe_git_option": 4,
+                "unsafe_git_unbound_configuration": 3,
+                "unresolved_tree_path_without_content_reader": 1,
+            },
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+        self.assertNotIn(
             "tree_read_auxiliary_output_unresolved",
             candidate["coverage_gaps"],
         )

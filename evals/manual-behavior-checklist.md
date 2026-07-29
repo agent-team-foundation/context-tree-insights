@@ -88,11 +88,12 @@ Use sanitized traces covering:
 - successful direct file read;
 - `functions.exec` with one literal nested read, `Promise.all`, multiple
   literal reads, static `for`, multi-path operands, safe pipelines,
-  predicates, labels, hierarchy selectors, line counts, and read-only git;
+  predicates, labels, hierarchy selectors, and line counts;
 - dynamic interpolation, unknown programs, stdin, suffix lookalikes, failed
   output, and pending/completed continuations;
-- null-sink output, file output, git mutation, network programs, and literal
-  non-Tree paths;
+- null-sink output, file output, git mutation, network programs, literal
+  non-Tree paths, and Git commands with implicit configured-helper potential,
+  including index-backed revision resolution and unsafe global options;
 - a valid `first-tree tree tree --no-pull` selector and exact help form beside
   the default-refresh form and a mutating First Tree namespace that merely
   contains the same `tree tree` token pair;
@@ -126,8 +127,8 @@ Pass when:
   diagnostics produce no read ID, even when the command grammar itself is
   accepted;
 - wrapper aliases, output mutation, reversed forwarding, callback side
-  effects, duplicate properties, unsafe git options, and `rg` patterns that
-  merely look like Markdown paths all fail closed;
+  effects, duplicate properties, unsafe or config-driven Git diagnostics,
+  and `rg` patterns that merely look like Markdown paths all fail closed;
 - initial calls and exact `write_stdin`/`wait` continuations form one attempt;
 - every attributable in-window Claude Tree-reading call stays in the attempt
   denominator; missing or duplicate pairing is `unresolved_opaque`;

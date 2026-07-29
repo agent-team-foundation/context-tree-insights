@@ -114,12 +114,10 @@ KNOWN_UNSAFE_PROGRAMS = {
     "xargs",
     "zsh",
 }
-SAFE_GIT_DIAGNOSTICS = {
+SAFE_GIT_DIAGNOSTICS: set[str] = set()
+CONFIG_DRIVEN_GIT_DIAGNOSTICS = {
     "diff",
     "log",
-    "merge-base",
-    "remote",
-    "rev-parse",
     "show",
     "status",
 }
@@ -153,6 +151,7 @@ MUTATING_GIT_COMMANDS = {
     "worktree",
 }
 UNSAFE_GIT_OPTIONS = {
+    "--config-env",
     "--exec-path",
     "--ext-diff",
     "--no-index",
@@ -2134,7 +2133,9 @@ def git_command_parts(
 
 def git_has_unsafe_option(arguments: Sequence[str]) -> bool:
     return any(
-        argument in UNSAFE_GIT_OPTIONS
+        argument == "-c"
+        or argument.startswith("-c")
+        or argument in UNSAFE_GIT_OPTIONS
         or any(
             argument.startswith(f"{option}=")
             for option in UNSAFE_GIT_OPTIONS
@@ -2436,10 +2437,16 @@ def unsafe_shell_reason(tokens: Sequence[str]) -> str | None:
         return "unsafe_rg_option"
     if executable == "git":
         index = 2 if len(arguments) >= 2 and arguments[0] == "-C" else 0
-        if git_has_unsafe_option(arguments[index + 1 :]):
+        if git_has_unsafe_option(arguments):
             return "unsafe_git_option"
+        if (
+            index < len(arguments)
+            and arguments[index] in CONFIG_DRIVEN_GIT_DIAGNOSTICS
+        ):
+            return "unsafe_git_configured_helper"
         if index < len(arguments) and arguments[index] in MUTATING_GIT_COMMANDS:
             return "unsafe_git_mutation"
+        return "unsafe_git_unbound_configuration"
     return None
 
 
