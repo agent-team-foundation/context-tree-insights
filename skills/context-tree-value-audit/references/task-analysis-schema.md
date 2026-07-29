@@ -144,6 +144,14 @@ unknown, not evidence that the Tree was not read or did not matter. An
 Every exposure read must belong to a source Chat, start and complete inside the
 Task window, and be assigned to only one reconstructed Task.
 
+Collector command classification is not exposure by itself. For
+`read_only_composite` or `output_attribution: aggregate`, inspect the recorded
+passage and component paths. `auxiliary_output_possible` means the accepted
+command contained safe auxiliary operations, not that their bytes were kept.
+The collector removes exactly attributable static labels and emits no read ID
+when dynamic diagnostic output cannot be separated. If actual Tree content is
+still not attributable, keep the Task exposure unresolved.
+
 ## Effects and original judgment
 
 Effects use only:
@@ -171,6 +179,12 @@ the first four checks are `true` and `influence_visible` is `false` or `null`
 because the aligned outcome does not expose complete causality. Do not soften a
 failed real-read, normal-passage, relevance, or timing check into `probable`.
 
+An accepted read-only command shape can still fail `real_read` when its output
+contains only status text, labels, selectors, counts, or diagnostics. Exact
+trace recovery improves evidence quality; it is not the only semantic signal,
+and a collector failure never reverses a separately reviewed positive case
+into a zero effect.
+
 Every effect requires read IDs, later same-Agent choice message IDs, a
 non-empty outcome anchor, and a concise summary. Effect reads must be included
 in the Task exposure and must complete no later than the earliest cited choice.
@@ -178,6 +192,43 @@ in the Task exposure and must complete no later than the earliest cited choice.
 The same read or choice cannot be copied across different reconstructed Tasks.
 The reporter derives an independent effect identity from effect type, reads,
 choices, and outcome anchor, so duplicate effect rows do not inflate totals.
+
+### Separately reviewed historical baseline
+
+Do not inject an older positive case into a current unresolved Task. If an
+earlier Task-level review remains valid but its exact current collector IDs
+cannot be recreated, pass an optional one-row `reviewed-baseline.jsonl` to the
+reporter. It must contain:
+
+```json
+{
+  "schema_version": 1,
+  "basis": "separately_reviewed_task_cases",
+  "reviewed_at": "RFC3339",
+  "evidence_anchor": {
+    "artifact_id": "opaque-reviewed-artifact-id",
+    "sha256": "64-lowercase-hex"
+  },
+  "clear_tasks": 162,
+  "effect_tasks": 37,
+  "independent_effects": 37,
+  "effect_counts": {
+    "confirmed": 5,
+    "constrained": 17,
+    "redirected": 13,
+    "conflicted": 2
+  },
+  "support_counts": {
+    "definite": 24,
+    "limited": 13
+  }
+}
+```
+
+Both count maps must conserve `independent_effects`. The baseline appears in a
+separate report section and never changes current exposure, effect totals,
+quota, or saturation. This preserves reviewed evidence without allowing
+arbitrary effects on unresolved Tasks.
 
 ## Derived support and conservation
 
@@ -208,3 +259,9 @@ declaring saturation.
 A partial run is reported as incomplete or continuing; it is not silently
 promoted to a stable rate. If two empty expansion batches establish saturation,
 the validator rejects Task rows beyond that reproducible stop point.
+
+Unresolved exposure cannot make a batch "empty" for effect saturation. When no
+clear Task has evidence-ready exposure, effect totals, distributions, support,
+representatives, and saturation are all `N/A / pending`, not numeric zero. If
+some clear Tasks are confirmed while others remain unresolved, observed
+positive effects may be reported, but saturation remains pending.

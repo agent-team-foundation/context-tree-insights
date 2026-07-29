@@ -1,9 +1,9 @@
 ---
-name: context-tree-insights
-description: Produce task-first, evidence-first insights about Context Tree decision value when a human explicitly invokes $context-tree-insights. The audit is manual, read-only, limited to explicitly authorized Chats for the current First Tree Codex Agent, and uses Task quotas plus saturation rather than Chat counts or a default time window. Do not use for ordinary task reads, stored-tree audits, Tree writes, generic Chat analytics, monitoring, or another Agent.
+name: context-tree-value-audit
+description: Audit Context Tree decision value at Task level when a human explicitly invokes $context-tree-value-audit in Codex or /context-tree-value-audit in Claude. The audit is evidence-first, manual, read-only, limited to explicitly authorized Chats for the current First Tree Agent, and uses Task quotas plus saturation rather than Chat counts or a default time window. Do not use for ordinary task reads, stored-tree audits, Tree writes, generic Chat analytics, monitoring, or another Agent.
 ---
 
-# Context Tree Insights
+# Context Tree Value Audit
 
 ## Capability
 
@@ -25,30 +25,37 @@ evidence, not server-verified causality.
 
 ## Gate the run
 
-Proceed only when a human explicitly invokes `$context-tree-insights` and asks
-for this value audit. Do not trigger from an ordinary task, a normal Context
-Tree read, a stored-tree quality audit, or an implicit analytics request.
+Proceed only when a human explicitly invokes `$context-tree-value-audit` in
+Codex or `/context-tree-value-audit` in Claude and asks for this value audit.
+Do not trigger from an ordinary task, a normal Context Tree read, a stored-tree
+quality audit, or an implicit analytics request.
 
 Keep the run:
 
 - manual and read-only;
 - limited to one invoking Agent, one managed workspace, and one bound Context
   Tree;
-- limited to local Codex provider traces;
+- limited to the invoking Agent's supported local Runtime evidence;
 - confined to a new private artifact directory inside the invoking Agent
   workspace.
 
 Do not modify Chat history, traces, Tree content, git state, schedules, agent
 configuration, databases, or product state. The visible reply and provider's
-automatic trace append are not audit writes. Do not invoke another provider
-adapter or scan another Agent.
+automatic trace append are not audit writes. Do not override the current
+Runtime provider, invoke another Runtime adapter, or scan another Agent.
 
 ## Authorize the source scope
 
-Resolve the exact current Agent name and UUID from the managed workspace
-identity and the exact bound Tree root from runtime configuration. Reject
-symlinks, missing identity, an Agent mismatch, an unbound Tree, or more than
-one workspace or Tree.
+Resolve the exact current Agent UUID and bound Tree root from the managed
+workspace identity. Resolve the immutable Agent `name` slug used by mentions,
+URLs, CLI selectors, and local mirror paths from `FIRST_TREE_AGENT_SLUG`, and
+cross-check `FIRST_TREE_AGENT_ID` and the First Tree CLI's producer-owned local
+binding resolution of that slug against the workspace UUID. The local listing
+is used only for this one identity check and is never persisted or promoted
+into the authorized source scope. `displayName` is a mutable UI label and must
+never be used as the CLI selector. Reject
+symlinks, missing or malformed runtime identity, an Agent mismatch, an unbound
+Tree, or more than one workspace or Tree.
 
 Choose exactly one mode from the human's explicit request:
 
@@ -97,37 +104,44 @@ Every row must name the same current Agent identity.
 
 ## Collect deterministic evidence
 
-Read [references/evidence-schema.md](references/evidence-schema.md). Locate the
-Skill directory, create a private timestamped artifact directory, and keep all
-inputs and outputs inside it. Require directory mode `0700` and file mode
-`0600`. Set `FIRST_TREE_BIN` for a channel-specific executable.
+Read [references/evidence-schema.md](references/evidence-schema.md) and
+[references/runtime-evidence-adapters.md](references/runtime-evidence-adapters.md).
+Locate the Skill directory, create a private timestamped artifact directory,
+and keep all inputs and outputs inside it. Require directory mode `0700` and
+file mode `0600`. Set `FIRST_TREE_BIN` for a channel-specific executable.
 
 ```bash
-python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" export-chats \
-  --artifact-root "$CTI_ARTIFACT_DIR" \
-  --scope "$CTI_ARTIFACT_DIR/scope.json" \
+python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" export-chats \
+  --artifact-root "$CTVA_ARTIFACT_DIR" \
+  --scope "$CTVA_ARTIFACT_DIR/scope.json" \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --output "$CTI_ARTIFACT_DIR/chats.jsonl"
+  --output "$CTVA_ARTIFACT_DIR/chats.jsonl"
 
-python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" collect \
-  --artifact-root "$CTI_ARTIFACT_DIR" \
-  --chats "$CTI_ARTIFACT_DIR/chats.jsonl" \
+python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" collect \
+  --artifact-root "$CTVA_ARTIFACT_DIR" \
+  --chats "$CTVA_ARTIFACT_DIR/chats.jsonl" \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
   --tree-root "/absolute/current/agent/bound/context-tree" \
-  --output "$CTI_ARTIFACT_DIR/candidates.jsonl"
+  --output "$CTVA_ARTIFACT_DIR/candidates.jsonl"
 ```
 
 There is no default lookback. Use `--days N` only when the human explicitly
 wants a time-based acquisition ceiling. It limits data fetching; it does not
-determine sample size or the stopping rule. Use `--now` for reproducible reruns
-and `--trace-root` only for an explicitly resolved local Codex sessions
-directory.
+determine sample size or the stopping rule. Use `--now` for reproducible reruns.
+Normally let the collector resolve the local evidence root from
+`FIRST_TREE_PROVIDER`; use `--trace-root` only for an explicitly resolved root
+for that same Runtime.
 
 Before fully scanning a trace, require bounded metadata/current-context
 preflight to establish one authorized `chatId` for the exact workspace. Never
-search arbitrary full traces to discover an authorized Chat. Keep the existing
-single-file read isolation, exact output pairing, completion, cross-tree, and
-coverage-gap rules.
+search arbitrary full traces to discover an authorized Chat. Classify every
+in-window call that references bound-Tree Markdown exactly once as
+`accepted_exact`, `accepted_read_only_composite`, `unresolved_opaque`, or
+`rejected_unsafe`; the four counts must conserve the attempt total. Allow only
+statically closed read-only wrappers, paths, programs, and forwarded outputs.
+Keep exact output/continuation pairing and reject writes, mutation, network
+access, and literal Tree-external reads. Unknown or dynamic shapes remain
+unresolved rather than becoming negative exposure.
 
 For message metadata:
 
@@ -189,14 +203,21 @@ not turn a time bound or Chat count into a sample-size rule.
 ## Validate and report
 
 ```bash
-python3 "$CTI_SKILL_DIR/scripts/context_tree_insights.py" report \
-  --artifact-root "$CTI_ARTIFACT_DIR" \
+python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" report \
+  --artifact-root "$CTVA_ARTIFACT_DIR" \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --candidates "$CTI_ARTIFACT_DIR/candidates.jsonl" \
-  --task-judgments "$CTI_ARTIFACT_DIR/task-judgments.jsonl" \
-  --evidence-output "$CTI_ARTIFACT_DIR/evidence.jsonl" \
-  --report-output "$CTI_ARTIFACT_DIR/REPORT.md"
+  --candidates "$CTVA_ARTIFACT_DIR/candidates.jsonl" \
+  --task-judgments "$CTVA_ARTIFACT_DIR/task-judgments.jsonl" \
+  --reviewed-baseline "$CTVA_ARTIFACT_DIR/reviewed-baseline.jsonl" \
+  --evidence-output "$CTVA_ARTIFACT_DIR/evidence.jsonl" \
+  --report-output "$CTVA_ARTIFACT_DIR/REPORT.md"
 ```
+
+Omit `--reviewed-baseline` when no independently reviewed earlier case set
+exists. When supplied, it must be a one-row, hash-anchored aggregate that
+conserves its reviewed Task, effect, and support counts. The reporter renders
+it in a separate historical-baseline section; it never imports those effects
+into unresolved current Tasks or into current saturation.
 
 The deterministic reporter rejects unauthorized source messages, Task-window
 violations, unlinked cross-Chat merges, duplicated reads/choices, invalid
@@ -213,7 +234,12 @@ The report must include:
 - derived definite/limited support;
 - quota and saturation status;
 - authorized Chat, message, trace, and coverage-gap counts;
+- the four-class in-window Tree-read attempt conservation table;
 - explicit language that unresolved and receipt absence are unknown;
+- `N/A / pending`, without effect totals or saturation, when no clear Task has
+  evidence-ready exposure;
+- a separately labeled, evidence-anchored historical baseline when supplied,
+  without merging it into the current rerun;
 - no global effectiveness rate.
 
 Because all authorized Chats are not an eligible value denominator, return local links
