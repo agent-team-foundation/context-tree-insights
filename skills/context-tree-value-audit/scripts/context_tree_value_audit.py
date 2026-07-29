@@ -3785,6 +3785,7 @@ def codex_trace_reads(
     expected_chat_id = preflight.audit_id.split("@", 1)[0]
     default_workdir = preflight.workspace
 
+    call_id_counts: Counter[str] = Counter()
     calls: dict[str, list[dict[str, Any]]] = {}
     outputs: dict[
         str,
@@ -3818,6 +3819,7 @@ def codex_trace_reads(
                     call_id = payload.get("call_id")
                     if not isinstance(call_id, str):
                         continue
+                    call_id_counts[call_id] += 1
                     tool_name = str(payload.get("name") or "")
                     is_continuation = (
                         tool_name in SHELL_CONTINUATION_TOOLS | CELL_CONTINUATION_TOOLS
@@ -3891,7 +3893,7 @@ def codex_trace_reads(
     unique_calls = {
         call_id: items[0]
         for call_id, items in calls.items()
-        if len(items) == 1
+        if len(items) == 1 and call_id_counts[call_id] == 1
     }
     unique_outputs = {
         call_id: items[0]
@@ -3959,7 +3961,7 @@ def codex_trace_reads(
                 parent_ids.add(parent)
         if not parent_ids:
             continue
-        if len(call_items) != 1:
+        if len(call_items) != 1 or call_id_counts[continuation_id] != 1:
             for parent in parent_ids:
                 continuation_failures.setdefault(
                     parent,
@@ -4006,7 +4008,7 @@ def codex_trace_reads(
             assessment = call.get("assessment")
             if not isinstance(assessment, ReadAssessment) or assessment.status is None:
                 continue
-            if len(call_items) != 1:
+            if len(call_items) != 1 or call_id_counts[call_id] != 1:
                 record_read_attempt(
                     attempt_counts,
                     gaps,

@@ -1594,6 +1594,69 @@ print(json.dumps({{"ok": True, "data": data}}))
             candidate["collector_diagnostics"]["attempt_reason_counts"],
         )
 
+    def test_codex_read_call_id_shared_with_non_read_call_is_unresolved(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        write_jsonl(
+            self.trace_root / "ambiguous-call-id.jsonl",
+            [
+                session_meta(self.workspace),
+                context_row(CHAT_ID),
+                {
+                    "timestamp": "2026-07-22T10:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "read_file",
+                        "call_id": "call-shared-with-non-read",
+                        "arguments": json.dumps(
+                            {"path": str(self.tree_file)}
+                        ),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "web_search",
+                        "call_id": "call-shared-with-non-read",
+                        "arguments": json.dumps({"query": "unrelated"}),
+                    },
+                },
+                {
+                    "timestamp": "2026-07-22T10:02:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-shared-with-non-read",
+                        "output": self.tree_file.read_text(encoding="utf-8"),
+                    },
+                },
+            ],
+        )
+
+        result = self.collect("ambiguous-call-id-candidates.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "ambiguous-call-id-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 1,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {"codex_duplicate_call_id": 1},
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+
     def test_collects_claude_code_native_tool_results(self) -> None:
         self.write_chat_export()
         claude_config_root = self.root / "claude-config"
