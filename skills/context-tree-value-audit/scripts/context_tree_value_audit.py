@@ -171,11 +171,106 @@ UNSAFE_FIND_ACTIONS = {
     "-okdir",
 }
 UNSAFE_RG_OPTIONS = {
+    "--file",
     "--generate",
+    "--hostname-bin",
+    "--ignore-file",
     "--pre",
     "--pre-glob",
     "--replace",
+    "-f",
     "-r",
+}
+RG_PATTERN_OPTIONS = {"-e", "--regexp"}
+RG_VALUE_OPTIONS = {
+    "-A",
+    "--after-context",
+    "-B",
+    "--before-context",
+    "-C",
+    "--context",
+    "--color",
+    "--colors",
+    "-E",
+    "--encoding",
+    "--engine",
+    "-g",
+    "--glob",
+    "--iglob",
+    "-j",
+    "--threads",
+    "-m",
+    "--max-count",
+    "--max-depth",
+    "--max-filesize",
+    "--sort",
+    "--sortr",
+    "-t",
+    "--type",
+    "-T",
+    "--type-not",
+}
+RG_FLAG_OPTIONS = {
+    "-0",
+    "--null",
+    "-a",
+    "--text",
+    "-c",
+    "--count",
+    "--count-matches",
+    "--column",
+    "--crlf",
+    "-F",
+    "--fixed-strings",
+    "--files",
+    "--files-with-matches",
+    "--files-without-match",
+    "-H",
+    "--with-filename",
+    "--heading",
+    "--hidden",
+    "-i",
+    "--ignore-case",
+    "-I",
+    "--no-filename",
+    "-l",
+    "-n",
+    "--line-number",
+    "--mmap",
+    "--multiline-dotall",
+    "-N",
+    "--no-line-number",
+    "--no-config",
+    "--no-heading",
+    "--no-ignore",
+    "--no-ignore-dot",
+    "--no-ignore-exclude",
+    "--no-ignore-files",
+    "--no-ignore-global",
+    "--no-ignore-messages",
+    "--no-ignore-parent",
+    "--no-ignore-vcs",
+    "--no-messages",
+    "--no-require-git",
+    "--no-unicode",
+    "--null-data",
+    "--one-file-system",
+    "--passthru",
+    "--pcre2",
+    "-S",
+    "--smart-case",
+    "--stats",
+    "--trim",
+    "--type-list",
+    "-U",
+    "--multiline",
+    "--unicode",
+    "-v",
+    "--invert-match",
+    "-w",
+    "--word-regexp",
+    "-x",
+    "--line-regexp",
 }
 _ARTIFACT_LEXICAL_ROOTS: dict[Path, Path] = {}
 UUID_PATTERN = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -1940,18 +2035,74 @@ def safe_wc_command(
     return pipe_input or paths > 0
 
 
-def safe_tree_cli(tokens: Sequence[str]) -> bool:
-    if not tokens:
+def safe_tree_cli(
+    tokens: Sequence[str],
+    workdir: Path,
+    tree_root: Path,
+) -> bool:
+    if len(tokens) < 3:
         return False
-    executable = Path(tokens[0]).name
+    executable = tokens[0]
     if executable not in {"first-tree", "first-tree-staging"}:
         return False
-    if tokens_have_dynamic_expansion(tokens[1:]):
+    if (
+        tuple(tokens[1:3]) != ("tree", "tree")
+        or tokens_have_dynamic_expansion(tokens[3:])
+    ):
         return False
-    return any(
-        tuple(tokens[index : index + 2]) == ("tree", "tree")
-        for index in range(1, len(tokens) - 1)
-    )
+
+    path_operand: str | None = None
+    arguments = list(tokens[3:])
+    index = 0
+    after_options = False
+    while index < len(arguments):
+        argument = arguments[index]
+        if not after_options and argument == "--":
+            after_options = True
+            index += 1
+            continue
+        if not after_options and argument in {"-h", "--help", "--no-pull"}:
+            index += 1
+            continue
+        if not after_options and argument in {"-L", "--level"}:
+            if (
+                index + 1 >= len(arguments)
+                or re.fullmatch(r"\d+", arguments[index + 1]) is None
+            ):
+                return False
+            index += 2
+            continue
+        if not after_options and argument.startswith("--level="):
+            if re.fullmatch(r"\d+", argument.split("=", 1)[1]) is None:
+                return False
+            index += 1
+            continue
+        if not after_options and argument in {"-P", "--pattern"}:
+            if index + 1 >= len(arguments) or not arguments[index + 1]:
+                return False
+            index += 2
+            continue
+        if not after_options and argument.startswith("--pattern="):
+            if not argument.split("=", 1)[1]:
+                return False
+            index += 1
+            continue
+        if not after_options and argument.startswith("-"):
+            return False
+        if path_operand is not None or any(
+            character in argument for character in "*?[]{}"
+        ):
+            return False
+        path_operand = argument
+        index += 1
+
+    if path_operand is None:
+        return path_is_within(workdir, tree_root)
+    candidate = Path(path_operand).expanduser()
+    resolved = (
+        candidate if candidate.is_absolute() else workdir / candidate
+    ).resolve(strict=False)
+    return path_is_within(resolved, tree_root)
 
 
 def git_command_parts(
@@ -2025,37 +2176,16 @@ def safe_git_diagnostic(
     return True
 
 
-def rg_read_component(
+def parse_rg_arguments(
     tokens: Sequence[str],
-    workdir: Path,
-    tree_roots: Sequence[Path],
-) -> ReadComponent | None:
-    if not tokens or Path(tokens[0]).name != "rg":
+) -> tuple[list[str], bool, bool] | None:
+    if not tokens or tokens[0] != "rg":
         return None
     arguments = list(tokens[1:])
-    if "--files" in arguments:
+    if tokens_have_dynamic_expansion(arguments):
         return None
-
-    value_options = {
-        "-A",
-        "--after-context",
-        "-B",
-        "--before-context",
-        "-C",
-        "--context",
-        "-g",
-        "--glob",
-        "-m",
-        "--max-count",
-        "-t",
-        "--type",
-        "-T",
-        "--type-not",
-        "--sort",
-        "--sortr",
-    }
-    pattern_options = {"-e", "--regexp"}
     explicit_pattern = False
+    files_mode = False
     positionals: list[str] = []
     index = 0
     after_options = False
@@ -2065,7 +2195,7 @@ def rg_read_component(
             after_options = True
             index += 1
             continue
-        if not after_options and argument in pattern_options:
+        if not after_options and argument in RG_PATTERN_OPTIONS:
             if index + 1 >= len(arguments):
                 return None
             explicit_pattern = True
@@ -2073,31 +2203,56 @@ def rg_read_component(
             continue
         if not after_options and any(
             argument.startswith(f"{option}=")
-            for option in pattern_options
+            for option in RG_PATTERN_OPTIONS
             if option.startswith("--")
         ):
             explicit_pattern = True
             index += 1
             continue
-        if not after_options and argument in value_options:
+        if not after_options and argument in RG_VALUE_OPTIONS:
             if index + 1 >= len(arguments):
                 return None
             index += 2
             continue
         if not after_options and any(
             argument.startswith(f"{option}=")
-            for option in value_options
+            for option in RG_VALUE_OPTIONS
             if option.startswith("--")
         ):
+            index += 1
+            continue
+        if not after_options and argument in RG_FLAG_OPTIONS:
+            files_mode = files_mode or argument in {"--files", "--type-list"}
             index += 1
             continue
         if not after_options and argument.startswith("-"):
-            index += 1
-            continue
+            return None
         positionals.append(argument)
         index += 1
 
-    path_operands = positionals if explicit_pattern else positionals[1:]
+    if files_mode and explicit_pattern:
+        return None
+    path_operands = (
+        positionals
+        if explicit_pattern or files_mode
+        else positionals[1:]
+    )
+    if any(path == "-" for path in path_operands):
+        return None
+    return path_operands, explicit_pattern, files_mode
+
+
+def rg_read_component(
+    tokens: Sequence[str],
+    workdir: Path,
+    tree_roots: Sequence[Path],
+) -> ReadComponent | None:
+    parsed = parse_rg_arguments(tokens)
+    if parsed is None:
+        return None
+    path_operands, _explicit_pattern, files_mode = parsed
+    if files_mode:
+        return None
     paths = {
         path
         for argument in path_operands
@@ -2161,7 +2316,7 @@ def safe_read_only_diagnostic(
             pipe_input=False,
         )
     if executable in {"first-tree", "first-tree-staging"}:
-        return safe_tree_cli(tokens)
+        return safe_tree_cli(tokens, workdir, tree_root)
     if executable == "git":
         return safe_git_diagnostic(tokens, workdir, tree_root)
     if executable == "rg":
@@ -2171,9 +2326,18 @@ def safe_read_only_diagnostic(
             for argument in arguments
         ):
             return False
-        for argument in arguments:
-            candidate = diagnostic_path(argument, workdir)
-            if candidate is not None and not path_is_within(candidate, tree_root):
+        parsed = parse_rg_arguments(tokens)
+        if parsed is None:
+            return False
+        path_operands, _explicit_pattern, _files_mode = parsed
+        for argument in path_operands:
+            candidate_path = Path(argument).expanduser()
+            candidate = (
+                candidate_path
+                if candidate_path.is_absolute()
+                else workdir / candidate_path
+            ).resolve(strict=False)
+            if not path_is_within(candidate, tree_root):
                 return False
         return True
     if executable == "find":
@@ -2240,6 +2404,8 @@ def unsafe_shell_reason(tokens: Sequence[str]) -> str | None:
         return None
     executable = Path(tokens[0]).name
     arguments = list(tokens[1:])
+    if tokens[0] != executable:
+        return "unsafe_path_qualified_program"
     if executable in KNOWN_UNSAFE_PROGRAMS:
         return f"unsafe_program_{executable}"
     if executable == "sed" and any(
@@ -2326,6 +2492,14 @@ def shell_command_assessment(
                 return rejected_assessment(unsafe_reason)
             deferred_unsafe_reason = unsafe_reason
             continue
+        if executable in {"first-tree", "first-tree-staging"} and not safe_tree_cli(
+            segment,
+            current_workdir,
+            tree_root,
+        ):
+            if node_paths or components or allow_diagnostic_plan:
+                return rejected_assessment("unsafe_first_tree_command")
+            return ReadAssessment(None, None, "not_a_tree_markdown_read")
         literal_non_tree_path = False
         for argument in segment[1:]:
             if not argument.startswith(("/", "./", "../")):
@@ -3770,31 +3944,13 @@ def provider_read_rows(
     attempt_counts: Counter[str] = Counter()
     for pair in pairs:
         started_at = provider_timestamp(pair.get("started_at"))
-        completed_at = provider_timestamp(pair.get("completed_at"))
-        if (
-            started_at is None
-            or completed_at is None
-        ):
-            gaps.add(f"{preflight.runtime_provider.replace('-', '_')}_tool_timestamp_missing")
-            continue
-        if (
-            not in_window(started_at, window)
-            or not in_window(completed_at, window)
-        ):
-            continue
-        started_index = pair.get("started_index")
-        completed_index = pair.get("completed_index")
-        if (
-            isinstance(started_index, int)
-            and isinstance(completed_index, int)
-            and completed_index <= started_index
-        ):
+        if started_at is None:
             gaps.add(
-                f"{preflight.runtime_provider.replace('-', '_')}_tool_result_out_of_order"
+                f"{preflight.runtime_provider.replace('-', '_')}"
+                "_tool_timestamp_missing"
             )
             continue
-        if parse_datetime(completed_at) < parse_datetime(started_at):
-            gaps.add(f"{preflight.runtime_provider.replace('-', '_')}_tool_result_out_of_order")
+        if not in_window(started_at, window):
             continue
         tool_name = pair.get("tool_name")
         arguments = pair.get("arguments")
@@ -3818,6 +3974,48 @@ def provider_read_rows(
             preflight.workspace,
         )
         if assessment.status is None:
+            continue
+        pairing_error = pair.get("pairing_error")
+        if isinstance(pairing_error, str):
+            reason = f"unresolved_{pairing_error}"
+            attempt_counts["unresolved_opaque"] += 1
+            attempt_counts[f"reason:{reason}"] += 1
+            gaps.add(pairing_error)
+            continue
+        completed_at = provider_timestamp(pair.get("completed_at"))
+        if completed_at is None:
+            gap = (
+                f"{preflight.runtime_provider.replace('-', '_')}"
+                "_tool_timestamp_missing"
+            )
+            attempt_counts["unresolved_opaque"] += 1
+            attempt_counts[f"reason:unresolved_{gap}"] += 1
+            gaps.add(gap)
+            continue
+        started_index = pair.get("started_index")
+        completed_index = pair.get("completed_index")
+        out_of_order = (
+            isinstance(started_index, int)
+            and isinstance(completed_index, int)
+            and completed_index <= started_index
+        ) or parse_datetime(completed_at) < parse_datetime(started_at)
+        if out_of_order:
+            gap = (
+                f"{preflight.runtime_provider.replace('-', '_')}"
+                "_tool_result_out_of_order"
+            )
+            attempt_counts["unresolved_opaque"] += 1
+            attempt_counts[f"reason:unresolved_{gap}"] += 1
+            gaps.add(gap)
+            continue
+        if not in_window(completed_at, window):
+            gap = (
+                f"{preflight.runtime_provider.replace('-', '_')}"
+                "_tool_result_outside_window"
+            )
+            attempt_counts["unresolved_opaque"] += 1
+            attempt_counts[f"reason:unresolved_{gap}"] += 1
+            gaps.add(gap)
             continue
         attempt_counts[assessment.status] += 1
         if assessment.reason is not None:
@@ -4081,9 +4279,8 @@ def preflight_claude_trace(
 def claude_trace_pairs(
     preflight: TracePreflight,
 ) -> tuple[list[dict[str, Any]], set[str]]:
-    calls: dict[str, dict[str, Any]] = {}
-    results: dict[str, dict[str, Any]] = {}
-    invalid_call_ids: set[str] = set()
+    calls: dict[str, list[dict[str, Any]]] = {}
+    results: dict[str, list[dict[str, Any]]] = {}
     gaps: set[str] = set()
     expected_chat_id = preflight.audit_id.split("@", 1)[0]
     identity_changed = False
@@ -4136,17 +4333,16 @@ def claude_trace_pairs(
                         call_id = block.get("id")
                         if not isinstance(call_id, str):
                             continue
-                        if call_id in calls:
-                            invalid_call_ids.add(call_id)
-                            gaps.add("claude_tool_call_duplicate")
-                            continue
-                        calls[call_id] = {
-                            "call_id": call_id,
-                            "tool_name": block.get("name"),
-                            "arguments": block.get("input"),
-                            "started_at": row.get("timestamp"),
-                            "started_index": row_index,
-                        }
+                        call_rows = calls.setdefault(call_id, [])
+                        call_rows.append(
+                            {
+                                "call_id": call_id,
+                                "tool_name": block.get("name"),
+                                "arguments": block.get("input"),
+                                "started_at": row.get("timestamp"),
+                                "started_index": row_index,
+                            }
+                        )
                 elif row.get("type") == "user":
                     for block in content:
                         if not isinstance(block, dict) or block.get("type") != "tool_result":
@@ -4154,27 +4350,35 @@ def claude_trace_pairs(
                         call_id = block.get("tool_use_id")
                         if not isinstance(call_id, str):
                             continue
-                        if call_id in results:
-                            invalid_call_ids.add(call_id)
-                            gaps.add("claude_tool_result_duplicate")
-                            continue
-                        results[call_id] = {
-                            "completed_at": row.get("timestamp"),
-                            "completed_index": row_index,
-                            "output": payload_text(block.get("content")),
-                            "success": block.get("is_error") is not True,
-                        }
+                        result_rows = results.setdefault(call_id, [])
+                        result_rows.append(
+                            {
+                                "completed_at": row.get("timestamp"),
+                                "completed_index": row_index,
+                                "output": payload_text(block.get("content")),
+                                "success": block.get("is_error") is not True,
+                            }
+                        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         gaps.add("claude_trace_malformed_or_partially_cleaned")
     if identity_changed:
         return [], gaps
-    pairs = [
-        {**call, **results[call_id]}
-        for call_id, call in calls.items()
-        if call_id in results and call_id not in invalid_call_ids
-    ]
-    if set(calls) != set(results):
-        gaps.add("claude_tool_result_missing")
+    pairs: list[dict[str, Any]] = []
+    for call_id, call_rows in calls.items():
+        result_rows = results.get(call_id, [])
+        if len(call_rows) == 1 and len(result_rows) == 1:
+            pairs.append({**call_rows[0], **result_rows[0]})
+            continue
+        if len(call_rows) > 1:
+            pairing_error = "claude_tool_call_duplicate"
+        elif not result_rows:
+            pairing_error = "claude_tool_result_missing"
+        else:
+            pairing_error = "claude_tool_result_duplicate"
+        pairs.extend(
+            {**call, "pairing_error": pairing_error}
+            for call in call_rows
+        )
     return pairs, gaps
 
 

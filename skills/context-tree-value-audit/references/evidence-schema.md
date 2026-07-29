@@ -200,8 +200,10 @@ exactly once:
 
 The four status counts must sum to `in_window_tree_read_attempts`. Reason
 counts conserve the unresolved and rejected calls. The acquisition window is
-applied before diagnostics, so an older call cannot contaminate the current
-run's gaps.
+applied to call start time before diagnostics, so an older call cannot
+contaminate the current run's gaps. A call that starts in-window but whose
+result completes after the acquisition end remains one `unresolved_opaque`
+attempt; it does not disappear from the denominator.
 
 `visible_messages` supports Task reconstruction. `visible_choice_candidates`
 contains only later visible messages authored by the audited Agent; human or
@@ -224,11 +226,21 @@ read-only command shapes:
 - an outer `functions.exec` assignment may omit only the final JavaScript
   semicolon when it still forwards the same nested result's `.output` directly;
   every nested command and workdir must remain literal;
-- a call is paired with its exact output and continuations;
+- a call is paired with its exact output and continuations; an attributable
+  in-window provider call with a missing, duplicate, or otherwise invalid
+  result remains one `unresolved_opaque` attempt instead of disappearing from
+  the attempt denominator;
 - explicit multi-file reads, multiple read statements, static `for` loops,
   single-branch literal filesystem guards, read-only pipelines, filesystem
   predicates, hierarchy selectors, labels, line counts, and bounded read-only
   git diagnostics may coexist at the command-classification layer;
+- a hierarchy selector must parse as the exact `first-tree tree tree` command
+  path with only its documented read options, and `rg` accepts only a closed
+  option grammar; file-valued, external-program, unknown, and Tree-external
+  options never become accepted read-only diagnostics;
+- shell readers and diagnostics use exact bare executable tokens; a
+  path-qualified executable is not trusted merely because its basename
+  matches an allowed reader;
 - conditional guards with dynamic values, alternate branches, nested control,
   or an unsafe body stay unresolved or rejected;
 - null-sink diagnostic output is allowed, while file output is rejected;

@@ -1863,6 +1863,260 @@ print(json.dumps({{"ok": True, "data": data}}))
             "claude_tool_call_duplicate",
             claude_candidate["coverage_gaps"],
         )
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 2,
+                "rejected_unsafe": 0,
+            },
+            claude_candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {"unresolved_claude_tool_call_duplicate": 2},
+            claude_candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+        self.assertEqual(
+            2,
+            claude_candidate["collector_diagnostics"][
+                "in_window_tree_read_attempts"
+            ],
+        )
+
+    def test_claude_unpaired_tree_calls_stay_in_attempt_denominator(self) -> None:
+        self.write_chat_export()
+        claude_root = self.root / "claude-unpaired"
+        context = {
+            "type": "user",
+            "sessionId": "claude-unpaired-session",
+            "cwd": str(self.workspace),
+            "timestamp": "2026-07-22T10:01:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+            },
+        }
+        missing_call = {
+            "type": "assistant",
+            "sessionId": "claude-unpaired-session",
+            "cwd": str(self.workspace),
+            "timestamp": "2026-07-22T10:02:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "missing-result",
+                        "name": "Read",
+                        "input": {"file_path": str(self.tree_file)},
+                    }
+                ],
+            },
+        }
+        write_jsonl(
+            claude_root / "missing" / "session.jsonl",
+            [context, missing_call],
+        )
+
+        duplicate_call = json.loads(json.dumps(missing_call))
+        duplicate_call["message"]["content"][0]["id"] = "duplicate-result"
+        duplicate_result = {
+            "type": "user",
+            "sessionId": "claude-unpaired-session",
+            "cwd": str(self.workspace),
+            "timestamp": "2026-07-22T10:02:01Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "duplicate-result",
+                        "content": self.tree_file.read_text(encoding="utf-8"),
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "duplicate-result",
+                        "content": self.tree_file.read_text(encoding="utf-8"),
+                    },
+                ],
+            },
+        }
+        write_jsonl(
+            claude_root / "duplicate" / "session.jsonl",
+            [context, duplicate_call, duplicate_result],
+        )
+
+        result = self.collect_for_provider(
+            "claude-code",
+            claude_root,
+            "claude-unpaired-candidates.jsonl",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "claude-unpaired-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 2,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {
+                "unresolved_claude_tool_result_duplicate": 1,
+                "unresolved_claude_tool_result_missing": 1,
+            },
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+        self.assertEqual(
+            2,
+            candidate["collector_diagnostics"]["in_window_tree_read_attempts"],
+        )
+        self.assertIn("claude_tool_result_duplicate", candidate["coverage_gaps"])
+        self.assertIn("claude_tool_result_missing", candidate["coverage_gaps"])
+
+    def test_claude_pairing_respects_the_acquisition_window(self) -> None:
+        self.write_chat_export()
+        claude_root = self.root / "claude-window"
+
+        def context(timestamp: str, session_id: str) -> dict[str, Any]:
+            return {
+                "type": "user",
+                "sessionId": session_id,
+                "cwd": str(self.workspace),
+                "timestamp": timestamp,
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": context_block(CHAT_ID)}],
+                },
+            }
+
+        def call(timestamp: str, session_id: str, call_id: str) -> dict[str, Any]:
+            return {
+                "type": "assistant",
+                "sessionId": session_id,
+                "cwd": str(self.workspace),
+                "timestamp": timestamp,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": call_id,
+                            "name": "Read",
+                            "input": {"file_path": str(self.tree_file)},
+                        }
+                    ],
+                },
+            }
+
+        def result(timestamp: str, session_id: str, call_id: str) -> dict[str, Any]:
+            return {
+                "type": "user",
+                "sessionId": session_id,
+                "cwd": str(self.workspace),
+                "timestamp": timestamp,
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": self.tree_file.read_text(encoding="utf-8"),
+                        }
+                    ],
+                },
+            }
+
+        write_jsonl(
+            claude_root / "cross-end" / "session.jsonl",
+            [
+                context("2026-07-23T23:58:00Z", "cross-end-session"),
+                call(
+                    "2026-07-23T23:59:00Z",
+                    "cross-end-session",
+                    "cross-end-read",
+                ),
+                result(
+                    "2026-07-24T00:01:00Z",
+                    "cross-end-session",
+                    "cross-end-read",
+                ),
+            ],
+        )
+        write_jsonl(
+            claude_root / "old-missing" / "session.jsonl",
+            [
+                context("2026-07-16T10:00:00Z", "old-missing-session"),
+                call(
+                    "2026-07-16T10:01:00Z",
+                    "old-missing-session",
+                    "old-missing-read",
+                ),
+            ],
+        )
+        old_duplicate_result = result(
+            "2026-07-16T10:02:00Z",
+            "old-duplicate-session",
+            "old-duplicate-read",
+        )
+        write_jsonl(
+            claude_root / "old-duplicate" / "session.jsonl",
+            [
+                context("2026-07-16T10:00:00Z", "old-duplicate-session"),
+                call(
+                    "2026-07-16T10:01:00Z",
+                    "old-duplicate-session",
+                    "old-duplicate-read",
+                ),
+                old_duplicate_result,
+                json.loads(json.dumps(old_duplicate_result)),
+            ],
+        )
+
+        collect_result = self.collect_for_provider(
+            "claude-code",
+            claude_root,
+            "claude-window-candidates.jsonl",
+        )
+        self.assertEqual(0, collect_result.returncode, collect_result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "claude-window-candidates.jsonl"
+        )[0]
+        self.assertEqual([], candidate["reads"])
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 0,
+                "unresolved_opaque": 1,
+                "rejected_unsafe": 0,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {"unresolved_claude_code_tool_result_outside_window": 1},
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+        self.assertEqual(
+            1,
+            candidate["collector_diagnostics"]["in_window_tree_read_attempts"],
+        )
+        self.assertIn(
+            "claude_code_tool_result_outside_window",
+            candidate["coverage_gaps"],
+        )
+        self.assertNotIn(
+            "claude_tool_result_missing",
+            candidate["coverage_gaps"],
+        )
+        self.assertNotIn(
+            "claude_tool_result_duplicate",
+            candidate["coverage_gaps"],
+        )
 
     def test_provider_mismatch_fails_before_trace_collection(self) -> None:
         self.write_chat_export()
@@ -2801,6 +3055,135 @@ print(json.dumps({{"ok": True, "data": data}}))
             "diagnostic-or-private-output",
             json.dumps(candidate, sort_keys=True),
         )
+
+    def test_tree_cli_and_rg_options_use_closed_read_only_grammars(self) -> None:
+        self.write_chat_export()
+        outside_ignore = self.root / "outside.ignore"
+        outside_ignore.write_text("private pattern", encoding="utf-8")
+        shapes = {
+            "tree-selector": (
+                f"cd {self.tree_root} && "
+                "first-tree-staging tree tree -P '*.md' -L 2 --no-pull && "
+                f"cat {self.tree_file}"
+            ),
+            "tree-mutating-namespace": (
+                f"cd {self.tree_root} && "
+                "first-tree-staging chat send tree tree && "
+                f"cat {self.tree_file}"
+            ),
+            "tree-path-qualified": (
+                f"/tmp/first-tree-staging tree tree && cat {self.tree_file}"
+            ),
+            "rg-file-equals": (
+                f"cd {self.tree_root} && "
+                f"rg --file=/etc/passwd Decision {self.tree_file}"
+            ),
+            "rg-ignore-file": (
+                f"cd {self.tree_root} && "
+                f"rg --ignore-file {outside_ignore} "
+                f"Decision {self.tree_file}"
+            ),
+            "rg-unknown-option": (
+                f"cd {self.tree_root} && "
+                f"rg --mystery Decision {self.tree_file}"
+            ),
+            "rg-stdin": (
+                f"cd {self.tree_root} && "
+                f"rg -- Decision - && cat {self.tree_file}"
+            ),
+            "rg-absolute-executable": (
+                f"/tmp/rg Decision {self.tree_file}"
+            ),
+            "rg-relative-executable": (
+                f"./rg Decision {self.tree_file}"
+            ),
+            "cat-path-qualified": (
+                f"/usr/bin/cat {self.tree_file}"
+            ),
+            "rg-closed-options": (
+                f"cd {self.tree_root} && "
+                f"rg -n -g '*.md' Decision {self.tree_file}"
+            ),
+        }
+        for index, (label, command) in enumerate(shapes.items(), start=1):
+            call_id = f"call-closed-grammar-{label}"
+            write_jsonl(
+                self.trace_root / f"closed-grammar-{label}.jsonl",
+                [
+                    session_meta(self.workspace),
+                    context_row(CHAT_ID),
+                    {
+                        "timestamp": f"2026-07-22T14:{index:02d}:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "exec_command",
+                            "call_id": call_id,
+                            "arguments": json.dumps(
+                                {
+                                    "cmd": command,
+                                    "workdir": str(self.workspace),
+                                }
+                            ),
+                        },
+                    },
+                    {
+                        "timestamp": f"2026-07-22T14:{index:02d}:01Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": (
+                                "Process exited with code 0\n"
+                                "# Architecture\n\n## Decision\n\n"
+                                f"closed-grammar-output-{label}"
+                            ),
+                        },
+                    },
+                ],
+            )
+
+        result = self.collect("closed-command-grammars.jsonl")
+        self.assertEqual(0, result.returncode, result.stderr)
+        candidate = read_jsonl(
+            self.artifacts / "closed-command-grammars.jsonl"
+        )[0]
+        self.assertEqual(1, len(candidate["reads"]))
+        self.assertEqual(
+            {
+                "accepted_exact": 0,
+                "accepted_read_only_composite": 2,
+                "unresolved_opaque": 0,
+                "rejected_unsafe": 9,
+            },
+            candidate["collector_diagnostics"]["attempt_status_counts"],
+        )
+        self.assertEqual(
+            {
+                "unsafe_first_tree_command": 1,
+                "unsafe_or_unresolved_rg": 2,
+                "unsafe_path_qualified_program": 4,
+                "unsafe_rg_option": 2,
+            },
+            candidate["collector_diagnostics"]["attempt_reason_counts"],
+        )
+        self.assertEqual(
+            11,
+            candidate["collector_diagnostics"]["in_window_tree_read_attempts"],
+        )
+        serialized = json.dumps(candidate, sort_keys=True)
+        for label in (
+            "tree-mutating-namespace",
+            "rg-file-equals",
+            "rg-ignore-file",
+            "rg-unknown-option",
+            "rg-stdin",
+            "rg-absolute-executable",
+            "rg-relative-executable",
+            "cat-path-qualified",
+            "tree-path-qualified",
+        ):
+            self.assertNotIn(f"closed-grammar-output-{label}", serialized)
 
     def test_preflight_rejects_conflicting_mirror_and_mirror_only_trace(
         self,

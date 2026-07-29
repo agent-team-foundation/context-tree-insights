@@ -93,6 +93,15 @@ Use sanitized traces covering:
   output, and pending/completed continuations;
 - null-sink output, file output, git mutation, network programs, and literal
   non-Tree paths;
+- a valid `first-tree tree tree` selector beside a mutating First Tree
+  namespace that merely contains the same `tree tree` token pair;
+- ordinary whitelisted `rg` options beside `--file`, `--ignore-file`, and an
+  unknown option, including both separate-value and `--option=value` forms;
+- bare allowed readers beside `./rg`, `/tmp/rg`, path-qualified
+  `first-tree-staging`, and another path-qualified reader basename;
+- Claude Tree-reading `tool_use` rows with a missing result, duplicate result,
+  duplicate call ID, a result after the acquisition end, and the same pairing
+  failures wholly before the acquisition start;
 - another Tree path and an unauthorized trace with a unique sentinel.
 
 Pass when:
@@ -105,7 +114,8 @@ Pass when:
   `accepted_exact`, `accepted_read_only_composite`, `unresolved_opaque`, or
   `rejected_unsafe`, and the four counts conserve the total;
 - calls outside the acquisition window do not contaminate attempt counts or
-  coverage gaps;
+  coverage gaps; a call started in-window with a result after the acquisition
+  end remains one unresolved attempt;
 - dynamic/unknown calls remain unresolved; mutation, file output, network
   access, and Tree-external reads are rejected;
 - unauthorized, unresolved, and unsafe sentinels never appear in output;
@@ -116,6 +126,8 @@ Pass when:
   effects, duplicate properties, unsafe git options, and `rg` patterns that
   merely look like Markdown paths all fail closed;
 - initial calls and exact `write_stdin`/`wait` continuations form one attempt;
+- every attributable in-window Claude Tree-reading call stays in the attempt
+  denominator; missing or duplicate pairing is `unresolved_opaque`;
 - gaps remain diagnostic rather than being turned into negative exposure;
 - artifacts keep `0700`/`0600` permissions and opaque local identities.
 
