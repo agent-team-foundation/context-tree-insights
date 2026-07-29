@@ -179,6 +179,12 @@ the first four checks are `true` and `influence_visible` is `false` or `null`
 because the aligned outcome does not expose complete causality. Do not soften a
 failed real-read, normal-passage, relevance, or timing check into `probable`.
 
+`verified` also requires every cited read to carry
+`tree_source.status: default_branch_match`. The collector assigns that status
+only when the recorded passage matches the same node in the bound Tree's local
+`origin/HEAD` snapshot. An `unverified_source` may support `probable`, never
+`verified`. This is a local content match, not remote provenance.
+
 An accepted read-only command shape can still fail `real_read` when its output
 contains only status text, labels, selectors, counts, or diagnostics. Exact
 trace recovery improves evidence quality; it is not the only semantic signal,
@@ -236,6 +242,9 @@ Never persist a `support` field in `task-judgments.jsonl`. The reporter derives:
 
 - `definite`: confirmed exposure plus `verified`;
 - `limited`: every other still-valid positive effect.
+
+The derived effect evidence also carries `tree_source_status` so the report
+separately counts local default-branch matches and unverified sources.
 
 The report must conserve:
 

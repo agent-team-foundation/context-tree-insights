@@ -693,6 +693,11 @@ def load_scope(path: Path) -> Scope:
     }
     if len(identities) != 1:
         raise AuditError("Scope must name one exact Agent name and UUID.")
+    if "authorization_context" in raw:
+        raise AuditError(
+            "Scope must not contain authorization_context; explicit scope is "
+            "the complete authorization model."
+        )
     return Scope(agents=tuple(agents), chats=tuple(chats))
 
 
@@ -964,6 +969,118 @@ def supported_repository_identity(value: Any) -> str | None:
     return repository
 
 
+def git_output(tree_root: Path, arguments: Sequence[str]) -> str | None:
+    completed = subprocess.run(
+        ["git", "-C", str(tree_root), *arguments],
+        capture_output=True,
+        check=False,
+        text=True,
+        env={
+            **os.environ,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def resolve_tree_source_snapshot(tree_root: Path) -> dict[str, Any]:
+    repository_root = git_output(tree_root, ["rev-parse", "--show-toplevel"])
+    if (
+        not isinstance(repository_root, str)
+        or Path(repository_root).resolve(strict=False)
+        != tree_root.resolve(strict=False)
+    ):
+        return {
+            "status": "unavailable",
+            "reason": "bound_tree_is_not_repository_root",
+        }
+    remote_head = git_output(
+        tree_root,
+        ["symbolic-ref", "refs/remotes/origin/HEAD"],
+    )
+    if not isinstance(remote_head, str):
+        return {
+            "status": "unavailable",
+            "reason": "default_branch_ref_unavailable",
+        }
+    match = re.fullmatch(r"refs/remotes/([^/]+)/(.+)", remote_head)
+    if match is None:
+        return {
+            "status": "unavailable",
+            "reason": "default_branch_ref_malformed",
+        }
+    _, branch = match.groups()
+    commit = git_output(tree_root, ["rev-parse", "--verify", remote_head])
+    if (
+        not isinstance(commit, str)
+        or re.fullmatch(r"[0-9a-fA-F]{40}", commit) is None
+    ):
+        return {
+            "status": "unavailable",
+            "reason": "default_branch_identity_unavailable",
+        }
+    return {
+        "status": "local_default_branch",
+        "branch": branch,
+        "commit": commit.lower(),
+    }
+
+
+def git_file_at_commit(
+    tree_root: Path,
+    commit: str,
+    node_path: str,
+) -> str | None:
+    completed = subprocess.run(
+        ["git", "-C", str(tree_root), "show", f"{commit}:{node_path}"],
+        capture_output=True,
+        check=False,
+        text=True,
+        env={
+            **os.environ,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+    )
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def read_tree_source(
+    read: Mapping[str, Any],
+    tree_root: Path,
+    snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    unverified = {"status": "unverified_source"}
+    if snapshot.get("status") != "local_default_branch":
+        return unverified
+    node_paths = read.get("node_paths")
+    passage = read.get("passage")
+    if (
+        not isinstance(node_paths, list)
+        or len(node_paths) != 1
+        or not isinstance(node_paths[0], str)
+        or not isinstance(passage, str)
+        or not passage.strip()
+    ):
+        return unverified
+    snapshot_commit = snapshot.get("commit")
+    if not isinstance(snapshot_commit, str):
+        return unverified
+    node_path = node_paths[0]
+    default_content = git_file_at_commit(tree_root, snapshot_commit, node_path)
+    if default_content is None or passage.strip() not in default_content:
+        return unverified
+    return {
+        "status": "default_branch_match",
+        "branch": snapshot["branch"],
+        "commit": snapshot_commit,
+        "node_path": node_path,
+    }
+
+
 def normalize_context_decision(value: Any) -> dict[str, Any] | None:
     """Return the minimal valid contextDecision v1 projection.
 
@@ -1102,12 +1219,18 @@ def export_chats(args: argparse.Namespace) -> None:
     chat_sources: dict[tuple[str, str], dict[str, Any]] = {}
 
     for scoped_agent in scope.agents:
-        for chat in paginated_items(first_tree_binary, ["chat", "list"], agent=scoped_agent.name):
+        for chat in paginated_items(
+            first_tree_binary,
+            ["chat", "list"],
+            agent=scoped_agent.name,
+        ):
             chat_id = chat.get("id")
-            if not isinstance(chat_id, str) or re.fullmatch(UUID_PATTERN, chat_id) is None:
+            if (
+                not isinstance(chat_id, str)
+                or re.fullmatch(UUID_PATTERN, chat_id) is None
+            ):
                 continue
-            last_message_at = chat.get("lastMessageAt")
-            if strictly_before_window(last_message_at, window):
+            if strictly_before_window(chat.get("lastMessageAt"), window):
                 continue
             key = (chat_id, scoped_agent.agent_id)
             chat_sources.setdefault(
@@ -3226,6 +3349,28 @@ def output_success(output: str) -> bool | None:
         return False
     if re.search(r"(?:process exited with code|exit[_ ]code[\"']?\s*[:=])\s*0", lowered):
         return True
+    try:
+        envelope = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+        envelope = None
+    if isinstance(envelope, Mapping):
+        status = envelope.get("status")
+        if (
+            envelope.get("is_error") is True
+            or envelope.get("error") not in (None, False, "")
+            or (envelope.get("ok") is False and envelope.get("error"))
+            or (
+                isinstance(status, str)
+                and status.lower() in {"error", "failed", "failure"}
+            )
+        ):
+            return False
+    if re.search(
+        r"\A\s*(?:error|failed|permission denied|access denied|"
+        r"no such file(?: or directory)?|file not found)\b",
+        lowered,
+    ):
+        return False
     return None
 
 
@@ -3365,14 +3510,19 @@ def normalize_chat(value: Mapping[str, Any], window: Window) -> dict[str, Any]:
     supplied_audit_id = value.get("audit_id")
     if supplied_audit_id is not None and supplied_audit_id != expected_audit_id:
         raise AuditError(f"Chat {chat_id} audit_id does not match its Chat and audited-Agent UUIDs.")
+    authorization = validate_authorization(
+        value.get("authorization"),
+        f"Chat {chat_id} authorization",
+    )
+    if "authorization_context" in value:
+        raise AuditError(
+            f"Chat {chat_id} must not contain authorization_context."
+        )
     return {
         "audit_id": expected_audit_id,
         "chat_id": chat_id,
         "title": str(value.get("title") or value.get("topic") or chat_id),
-        "authorization": validate_authorization(
-            value.get("authorization"),
-            f"Chat {chat_id} authorization",
-        ),
+        "authorization": authorization,
         "source_agent": require_string(
             value.get("source_agent"),
             f"Chat {chat_id} source_agent",
@@ -3607,6 +3757,19 @@ def redact_local_roots(
     return result
 
 
+def record_read_attempt(
+    attempt_counts: Counter[str],
+    gaps: set[str],
+    status: str,
+    reason: str | None = None,
+) -> None:
+    attempt_counts[status] += 1
+    if status in {"unresolved_opaque", "rejected_unsafe"}:
+        current_reason = reason or status
+        attempt_counts[f"reason:{current_reason}"] += 1
+        gaps.add(current_reason)
+
+
 def codex_trace_reads(
     preflight: TracePreflight,
     tree_root: Path,
@@ -3622,10 +3785,10 @@ def codex_trace_reads(
     expected_chat_id = preflight.audit_id.split("@", 1)[0]
     default_workdir = preflight.workspace
 
-    calls: dict[str, dict[str, Any]] = {}
+    calls: dict[str, list[dict[str, Any]]] = {}
     outputs: dict[
         str,
-        tuple[str, str | None, bool, tuple[str, ...]],
+        list[tuple[str, str | None, bool, tuple[str, ...]]],
     ] = {}
     try:
         with preflight.path.open("r", encoding="utf-8") as handle:
@@ -3671,17 +3834,19 @@ def codex_trace_reads(
                         if assessment.status is None:
                             continue
                         read_plan = assessment.plan
-                    calls[call_id] = {
-                        "timestamp": row.get("timestamp"),
-                        "payload": payload,
-                        "arguments": parse_tool_arguments(payload),
-                        "read_plan": read_plan,
-                        "assessment": assessment,
-                    }
+                    calls.setdefault(call_id, []).append(
+                        {
+                            "timestamp": row.get("timestamp"),
+                            "payload": payload,
+                            "arguments": parse_tool_arguments(payload),
+                            "read_plan": read_plan,
+                            "assessment": assessment,
+                        }
+                    )
                     continue
                 if payload_type in {"custom_tool_call_output", "function_call_output"}:
                     call_id = payload.get("call_id")
-                    if not isinstance(call_id, str) or call_id not in calls:
+                    if not isinstance(call_id, str):
                         continue
                     raw_output_value = payload.get("output")
                     raw_parts = (
@@ -3711,16 +3876,28 @@ def codex_trace_reads(
                         max_passage_chars,
                     )
                     output_truncated = output_truncated or aggregate_truncated
-                    outputs[call_id] = (
-                        output,
-                        row.get("timestamp"),
-                        output_truncated,
-                        tuple(output_parts),
+                    outputs.setdefault(call_id, []).append(
+                        (
+                            output,
+                            row.get("timestamp"),
+                            output_truncated,
+                            tuple(output_parts),
+                        )
                     )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         gaps.add("codex_trace_malformed_or_partially_cleaned")
         return reads, sessions, gaps, attempt_counts
 
+    unique_calls = {
+        call_id: items[0]
+        for call_id, items in calls.items()
+        if len(items) == 1
+    }
+    unique_outputs = {
+        call_id: items[0]
+        for call_id, items in outputs.items()
+        if len(items) == 1
+    }
     shell_sessions: dict[str, str] = {}
     cell_sessions: dict[str, str] = {}
     continuation_outputs: dict[
@@ -3735,10 +3912,15 @@ def codex_trace_reads(
             ]
         ],
     ] = {}
-    for call_id, call in calls.items():
+    continuation_failures: dict[str, str] = {}
+
+    # Resolve parent session handles first, independently of continuation row
+    # order. A continuation can contribute evidence only when both its call and
+    # result are unique.
+    for call_id, call in unique_calls.items():
         payload = call["payload"]
         tool_name = str(payload.get("name") or "")
-        output, output_completed_at, output_truncated, output_parts = outputs.get(
+        output, output_completed_at, output_truncated, output_parts = unique_outputs.get(
             call_id,
             ("", None, False, ()),
         )
@@ -3750,194 +3932,336 @@ def codex_trace_reads(
             match = CELL_SESSION_PATTERN.search(output)
             if match:
                 cell_sessions[match.group(1)] = call_id
-        if tool_name in SHELL_CONTINUATION_TOOLS:
-            session_id = call["arguments"].get("session_id")
-            original_call_id = shell_sessions.get(str(session_id))
-            if original_call_id is not None:
-                continuation_outputs.setdefault(original_call_id, []).append(
-                    (
-                        output,
-                        output_completed_at,
-                        call.get("timestamp"),
-                        output_truncated,
-                        output_parts,
-                    )
+
+    for continuation_id, call_items in calls.items():
+        continuation_tools = {
+            str(call["payload"].get("name") or "")
+            for call in call_items
+        }
+        if not continuation_tools.intersection(
+            SHELL_CONTINUATION_TOOLS | CELL_CONTINUATION_TOOLS
+        ):
+            continue
+        parent_ids: set[str] = set()
+        for call in call_items:
+            tool_name = str(call["payload"].get("name") or "")
+            if tool_name in SHELL_CONTINUATION_TOOLS:
+                parent = shell_sessions.get(
+                    str(call["arguments"].get("session_id"))
                 )
-        elif tool_name in CELL_CONTINUATION_TOOLS:
-            cell_id = call["arguments"].get("cell_id")
-            original_call_id = cell_sessions.get(str(cell_id))
-            if original_call_id is not None:
-                continuation_outputs.setdefault(original_call_id, []).append(
-                    (
-                        output,
-                        output_completed_at,
-                        call.get("timestamp"),
-                        output_truncated,
-                        output_parts,
-                    )
+            elif tool_name in CELL_CONTINUATION_TOOLS:
+                parent = cell_sessions.get(
+                    str(call["arguments"].get("cell_id"))
                 )
+            else:
+                parent = None
+            if parent is not None:
+                parent_ids.add(parent)
+        if not parent_ids:
+            continue
+        if len(call_items) != 1:
+            for parent in parent_ids:
+                continuation_failures.setdefault(
+                    parent,
+                    "tree_read_continuation_call_duplicate",
+                )
+            continue
+        output_items = outputs.get(continuation_id, [])
+        if len(output_items) != 1:
+            reason = (
+                "tree_read_continuation_output_missing"
+                if not output_items
+                else "tree_read_continuation_output_duplicate"
+            )
+            for parent in parent_ids:
+                continuation_failures.setdefault(parent, reason)
+            continue
+        output, output_completed_at, output_truncated, output_parts = (
+            output_items[0]
+        )
+        call = call_items[0]
+        for parent in parent_ids:
+            continuation_outputs.setdefault(parent, []).append(
+                (
+                    output,
+                    output_completed_at,
+                    call.get("timestamp"),
+                    output_truncated,
+                    output_parts,
+                )
+            )
 
     for items in continuation_outputs.values():
         items.sort(key=lambda item: str(item[2] or ""))
 
-    for call_id, call in calls.items():
-        timestamp = call.get("timestamp")
-        if not isinstance(timestamp, str) or not in_window(timestamp, window):
-            continue
-        payload = call["payload"]
-        tool_name = str(payload.get("name") or "")
-        if tool_name in SHELL_CONTINUATION_TOOLS | CELL_CONTINUATION_TOOLS:
-            continue
-        assessment = call.get("assessment")
-        if not isinstance(assessment, ReadAssessment) or assessment.status is None:
-            continue
-        attempt_counts[assessment.status] += 1
-        if assessment.reason is not None:
-            attempt_counts[f"reason:{assessment.reason}"] += 1
-        if assessment.status in {"unresolved_opaque", "rejected_unsafe"}:
-            gaps.add(assessment.reason or assessment.status)
-            continue
-        read_plan = call.get("read_plan")
-        if not isinstance(read_plan, ReadPlan):
-            continue
-        (
-            initial_output,
-            completed_at,
-            initial_truncated,
-            initial_parts,
-        ) = outputs.get(call_id, ("", None, False, ()))
-        if (
-            not isinstance(completed_at, str)
-            or not in_window(completed_at, window)
-        ):
-            initial_output, completed_at, initial_truncated, initial_parts = (
-                "",
-                None,
-                False,
-                (),
-            )
-        continuations = [
-            item
-            for item in continuation_outputs.get(call_id, [])
-            if isinstance(item[1], str)
-            and in_window(item[1], window)
-            and isinstance(item[2], str)
-            and in_window(item[2], window)
-        ]
-        output = initial_output
-        output_parts = list(initial_parts)
-        output_was_truncated = initial_truncated
-        if continuations:
-            output = "\n".join([output, *(item[0] for item in continuations)])
-            output_parts.extend(
-                part
-                for item in continuations
-                for part in item[4]
-            )
-            completed_at = continuations[-1][1]
-            output_was_truncated = output_was_truncated or any(item[3] for item in continuations)
-        initial_handle = (
-            SHELL_SESSION_PATTERN.search(initial_output)
-            if tool_name in EXEC_COMMAND_TOOLS
-            else CELL_SESSION_PATTERN.search(initial_output)
-            if tool_name in EXEC_ORCHESTRATION_TOOLS
-            else None
-        )
-        if initial_handle is not None:
-            last_output = continuations[-1][0] if continuations else ""
-            last_pending = (
-                SHELL_SESSION_PATTERN.search(last_output)
-                if tool_name in EXEC_COMMAND_TOOLS
-                else CELL_SESSION_PATTERN.search(last_output)
-            )
-            if not continuations or last_pending is not None:
-                gaps.add("tree_read_output_pending")
+    for call_id, call_items in calls.items():
+        for call in call_items:
+            timestamp = call.get("timestamp")
+            if not isinstance(timestamp, str) or not in_window(timestamp, window):
                 continue
-        if not output.strip():
-            gaps.add("tree_read_output_missing")
-            continue
-        success = output_success(output)
-        if success is False:
-            gaps.add("tree_read_command_failed")
-            continue
-        if success is None:
-            success = True
-        content_parts = [
-            cleaned
-            for part in output_parts or [output]
-            if (cleaned := content_output(part, tool_name)).strip()
-        ]
-        if not content_parts:
-            gaps.add("tree_read_output_missing")
-            continue
-        subplans = assessment.subplans or (read_plan,)
-        sliced = len(subplans) > 1 and len(content_parts) == len(subplans)
-        if sliced:
-            plan_outputs = list(zip(subplans, content_parts, strict=True))
-        else:
-            if len(subplans) > 1:
-                gaps.add("tree_read_output_attribution_aggregate")
-            plan_outputs = [(read_plan, "\n".join(content_parts))]
-        for read_index, (current_plan, passage_source) in enumerate(plan_outputs):
-            node_paths = list(current_plan.node_paths)
-            passage_source, attribution_gap = attributable_passage(
-                passage_source,
-                current_plan,
-            )
-            if passage_source is None:
-                gaps.add(
-                    attribution_gap
-                    or "tree_read_output_attribution_unresolved"
+            payload = call["payload"]
+            tool_name = str(payload.get("name") or "")
+            if tool_name in SHELL_CONTINUATION_TOOLS | CELL_CONTINUATION_TOOLS:
+                continue
+            assessment = call.get("assessment")
+            if not isinstance(assessment, ReadAssessment) or assessment.status is None:
+                continue
+            if len(call_items) != 1:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "codex_duplicate_call_id",
                 )
                 continue
-            passage, passage_truncated = clipped(
-                passage_source,
-                max_passage_chars,
+            if assessment.status in {"unresolved_opaque", "rejected_unsafe"}:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    assessment.status,
+                    assessment.reason,
+                )
+                continue
+            read_plan = call.get("read_plan")
+            if not isinstance(read_plan, ReadPlan):
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "tree_read_plan_missing",
+                )
+                continue
+            output_items = outputs.get(call_id, [])
+            if not output_items:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "tree_read_output_missing",
+                )
+                continue
+            if len(output_items) != 1:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "codex_duplicate_tool_result",
+                )
+                continue
+            (
+                initial_output,
+                completed_at,
+                initial_truncated,
+                initial_parts,
+            ) = output_items[0]
+            if not isinstance(completed_at, str):
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "codex_tool_result_timestamp_missing",
+                )
+                continue
+            if not in_window(completed_at, window):
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "codex_tool_result_outside_window",
+                )
+                continue
+            if parse_datetime(completed_at) < parse_datetime(timestamp):
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "codex_tool_result_out_of_order",
+                )
+                continue
+            continuation_failure = continuation_failures.get(call_id)
+            continuations = continuation_outputs.get(call_id, [])
+            previous_completed_at = completed_at
+            for item in continuations:
+                continuation_completed_at = item[1]
+                continuation_started_at = item[2]
+                if (
+                    not isinstance(continuation_completed_at, str)
+                    or not isinstance(continuation_started_at, str)
+                    or not in_window(continuation_completed_at, window)
+                    or not in_window(continuation_started_at, window)
+                    or parse_datetime(continuation_started_at)
+                    < parse_datetime(previous_completed_at)
+                    or parse_datetime(continuation_completed_at)
+                    < parse_datetime(continuation_started_at)
+                ):
+                    continuation_failure = (
+                        "tree_read_continuation_incomplete_or_out_of_order"
+                    )
+                    break
+                previous_completed_at = continuation_completed_at
+            if continuation_failure is not None:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    continuation_failure,
+                )
+                continue
+            output = initial_output
+            output_parts = list(initial_parts)
+            output_was_truncated = initial_truncated
+            if continuations:
+                output = "\n".join(
+                    [output, *(item[0] for item in continuations)]
+                )
+                output_parts.extend(
+                    part
+                    for item in continuations
+                    for part in item[4]
+                )
+                completed_at = continuations[-1][1]
+                output_was_truncated = output_was_truncated or any(
+                    item[3] for item in continuations
+                )
+            initial_handle = (
+                SHELL_SESSION_PATTERN.search(initial_output)
+                if tool_name in EXEC_COMMAND_TOOLS
+                else CELL_SESSION_PATTERN.search(initial_output)
+                if tool_name in EXEC_ORCHESTRATION_TOOLS
+                else None
             )
-            passage_truncated = passage_truncated or output_was_truncated
-            if passage_truncated:
-                gaps.add("tree_read_passage_truncated")
-            read_id = hashlib.sha256(
-                f"{preflight.trace_id}:{call_id}:{read_index}".encode()
-            ).hexdigest()[:20]
-            reads.append(
-                {
-                    "read_id": read_id,
-                    "timestamp": timestamp,
-                    "completed_at": completed_at,
-                    "session_file": preflight.trace_id,
-                    "call_id": call_id,
-                    "nested_call_index": (
-                        read_index if sliced else None
-                    ),
-                    "tool_name": tool_name,
-                    "runtime_provider": preflight.runtime_provider,
-                    "reader_agent_id": preflight.agent_id,
-                    "tree_identity": tree_id,
-                    "node_paths": node_paths,
-                    "read_components": [
-                        {
-                            "reader": component.reader,
-                            "node_paths": list(component.node_paths),
-                        }
-                        for component in current_plan.components
-                    ],
-                    "read_mode": current_plan.mode,
-                    "output_attribution": (
-                        "exact"
-                        if current_plan.mode == "isolated"
-                        else "aggregate"
-                    ),
-                    "auxiliary_output_possible": (
-                        current_plan.auxiliary_output_possible
-                    ),
-                    "content_class_hint": content_class_hint(node_paths),
-                    "command": current_plan.command,
-                    "command_truncated": False,
-                    "passage": passage,
-                    "passage_truncated": passage_truncated,
-                    "success": success,
-                }
+            if initial_handle is not None:
+                last_output = continuations[-1][0] if continuations else ""
+                last_pending = (
+                    SHELL_SESSION_PATTERN.search(last_output)
+                    if tool_name in EXEC_COMMAND_TOOLS
+                    else CELL_SESSION_PATTERN.search(last_output)
+                )
+                if not continuations or last_pending is not None:
+                    record_read_attempt(
+                        attempt_counts,
+                        gaps,
+                        "unresolved_opaque",
+                        "tree_read_output_pending",
+                    )
+                    continue
+            if not output.strip():
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "tree_read_output_missing",
+                )
+                continue
+            success = output_success(output)
+            if success is False:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "tree_read_command_failed",
+                )
+                continue
+            content_parts = [
+                cleaned
+                for part in output_parts or [output]
+                if (cleaned := content_output(part, tool_name)).strip()
+            ]
+            if not content_parts:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    "tree_read_output_missing",
+                )
+                continue
+            subplans = assessment.subplans or (read_plan,)
+            sliced = len(subplans) > 1 and len(content_parts) == len(subplans)
+            if sliced:
+                plan_outputs = list(zip(subplans, content_parts, strict=True))
+            else:
+                if len(subplans) > 1:
+                    gaps.add("tree_read_output_attribution_aggregate")
+                plan_outputs = [(read_plan, "\n".join(content_parts))]
+            call_reads: list[dict[str, Any]] = []
+            attribution_failure: str | None = None
+            for read_index, (current_plan, passage_source) in enumerate(
+                plan_outputs
+            ):
+                node_paths = list(current_plan.node_paths)
+                passage_source, attribution_gap = attributable_passage(
+                    passage_source,
+                    current_plan,
+                )
+                if passage_source is None:
+                    attribution_failure = (
+                        attribution_gap
+                        or "tree_read_output_attribution_unresolved"
+                    )
+                    break
+                passage, passage_truncated = clipped(
+                    passage_source,
+                    max_passage_chars,
+                )
+                passage_truncated = passage_truncated or output_was_truncated
+                if passage_truncated:
+                    gaps.add("tree_read_passage_truncated")
+                read_id = hashlib.sha256(
+                    f"{preflight.trace_id}:{call_id}:{read_index}".encode()
+                ).hexdigest()[:20]
+                call_reads.append(
+                    {
+                        "read_id": read_id,
+                        "timestamp": timestamp,
+                        "completed_at": completed_at,
+                        "session_file": preflight.trace_id,
+                        "call_id": call_id,
+                        "nested_call_index": (
+                            read_index if sliced else None
+                        ),
+                        "tool_name": tool_name,
+                        "runtime_provider": preflight.runtime_provider,
+                        "reader_agent_id": preflight.agent_id,
+                        "tree_identity": tree_id,
+                        "node_paths": node_paths,
+                        "read_components": [
+                            {
+                                "reader": component.reader,
+                                "node_paths": list(component.node_paths),
+                            }
+                            for component in current_plan.components
+                        ],
+                        "read_mode": current_plan.mode,
+                        "output_attribution": (
+                            "exact"
+                            if current_plan.mode == "isolated"
+                            else "aggregate"
+                        ),
+                        "auxiliary_output_possible": (
+                            current_plan.auxiliary_output_possible
+                        ),
+                        "content_class_hint": content_class_hint(node_paths),
+                        "command": current_plan.command,
+                        "command_truncated": False,
+                        "passage": passage,
+                        "passage_truncated": passage_truncated,
+                        "success": True,
+                    }
+                )
+            if attribution_failure is not None or not call_reads:
+                record_read_attempt(
+                    attempt_counts,
+                    gaps,
+                    "unresolved_opaque",
+                    attribution_failure
+                    or "tree_read_output_attribution_unresolved",
+                )
+                continue
+            reads.extend(call_reads)
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                assessment.status,
             )
     return reads, sessions, gaps, attempt_counts
 
@@ -4029,8 +4353,12 @@ def provider_read_rows(
         pairing_error = pair.get("pairing_error")
         if isinstance(pairing_error, str):
             reason = f"unresolved_{pairing_error}"
-            attempt_counts["unresolved_opaque"] += 1
-            attempt_counts[f"reason:{reason}"] += 1
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                reason,
+            )
             gaps.add(pairing_error)
             continue
         completed_at = provider_timestamp(pair.get("completed_at"))
@@ -4039,8 +4367,12 @@ def provider_read_rows(
                 f"{preflight.runtime_provider.replace('-', '_')}"
                 "_tool_timestamp_missing"
             )
-            attempt_counts["unresolved_opaque"] += 1
-            attempt_counts[f"reason:unresolved_{gap}"] += 1
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                f"unresolved_{gap}",
+            )
             gaps.add(gap)
             continue
         started_index = pair.get("started_index")
@@ -4055,8 +4387,12 @@ def provider_read_rows(
                 f"{preflight.runtime_provider.replace('-', '_')}"
                 "_tool_result_out_of_order"
             )
-            attempt_counts["unresolved_opaque"] += 1
-            attempt_counts[f"reason:unresolved_{gap}"] += 1
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                f"unresolved_{gap}",
+            )
             gaps.add(gap)
             continue
         if not in_window(completed_at, window):
@@ -4064,22 +4400,38 @@ def provider_read_rows(
                 f"{preflight.runtime_provider.replace('-', '_')}"
                 "_tool_result_outside_window"
             )
-            attempt_counts["unresolved_opaque"] += 1
-            attempt_counts[f"reason:unresolved_{gap}"] += 1
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                f"unresolved_{gap}",
+            )
             gaps.add(gap)
             continue
-        attempt_counts[assessment.status] += 1
-        if assessment.reason is not None:
-            attempt_counts[f"reason:{assessment.reason}"] += 1
         if assessment.status in {"unresolved_opaque", "rejected_unsafe"}:
-            gaps.add(assessment.reason or assessment.status)
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                assessment.status,
+                assessment.reason,
+            )
             continue
         if pair.get("success") is not True:
-            gaps.add("tree_read_command_failed")
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                "tree_read_command_failed",
+            )
             continue
         raw_output = pair.get("output")
         if not isinstance(raw_output, str) or not raw_output.strip():
-            gaps.add("tree_read_output_missing")
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                "tree_read_output_missing",
+            )
             continue
         output, output_truncated = clipped(
             redact_local_roots(
@@ -4091,6 +4443,12 @@ def provider_read_rows(
         )
         plan = assessment.plan
         if plan is None:
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                "tree_read_plan_missing",
+            )
             continue
         content_parts = [
             cleaned
@@ -4108,7 +4466,12 @@ def provider_read_rows(
             ).strip()
         ]
         if not content_parts:
-            gaps.add("tree_read_output_missing")
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                "tree_read_output_missing",
+            )
             continue
         subplans = assessment.subplans or (plan,)
         sliced = len(subplans) > 1 and len(content_parts) == len(subplans)
@@ -4118,17 +4481,19 @@ def provider_read_rows(
             if len(subplans) > 1:
                 gaps.add("tree_read_output_attribution_aggregate")
             plan_outputs = [(plan, "\n".join(content_parts))]
+        call_reads: list[dict[str, Any]] = []
+        attribution_failure: str | None = None
         for read_index, (current_plan, passage_source) in enumerate(plan_outputs):
             passage_source, attribution_gap = attributable_passage(
                 passage_source,
                 current_plan,
             )
             if passage_source is None:
-                gaps.add(
+                attribution_failure = (
                     attribution_gap
                     or "tree_read_output_attribution_unresolved"
                 )
-                continue
+                break
             passage, passage_truncated = clipped(
                 passage_source,
                 max_passage_chars,
@@ -4139,7 +4504,7 @@ def provider_read_rows(
             read_id = hashlib.sha256(
                 f"{preflight.trace_id}:{call_id}:{read_index}".encode()
             ).hexdigest()[:20]
-            reads.append(
+            call_reads.append(
                 {
                     "read_id": read_id,
                     "timestamp": started_at,
@@ -4174,6 +4539,21 @@ def provider_read_rows(
                     "success": True,
                 }
             )
+        if attribution_failure is not None or not call_reads:
+            record_read_attempt(
+                attempt_counts,
+                gaps,
+                "unresolved_opaque",
+                attribution_failure
+                or "tree_read_output_attribution_unresolved",
+            )
+            continue
+        reads.extend(call_reads)
+        record_read_attempt(
+            attempt_counts,
+            gaps,
+            assessment.status,
+        )
     return reads, sessions, gaps, attempt_counts
 
 
@@ -4536,6 +4916,7 @@ def collect_evidence(args: argparse.Namespace) -> None:
             "--tree-root must exactly match the Context Tree bound in workspace identity."
         )
     current_tree_id = tree_identity(workspace_identity)
+    tree_source_snapshot = resolve_tree_source_snapshot(tree_root)
     runtime_provider = resolve_runtime_provider(args.runtime_provider)
 
     if runtime_provider not in SUPPORTED_EVIDENCE_PROVIDERS:
@@ -4622,6 +5003,12 @@ def collect_evidence(args: argparse.Namespace) -> None:
         agent_messages = [
             message for message in messages if message.get("sender_id") == chat["source_agent_id"]
         ]
+        for read in reads:
+            read["tree_source"] = read_tree_source(
+                read,
+                tree_root,
+                tree_source_snapshot,
+            )
         receipt_messages = [
             message for message in agent_messages if "decision_receipt" in message
         ]
@@ -4692,6 +5079,7 @@ def collect_evidence(args: argparse.Namespace) -> None:
                 },
                 "window": {"start": window_start_text(window), "end": isoformat(window.end)},
                 "tree_identity": current_tree_id,
+                "tree_source_snapshot": tree_source_snapshot,
                 "runtime_provider": runtime_provider,
                 "candidate_status": candidate_status,
                 "mapped_trace_files": sorted(per_audit_sessions[current_audit_id]),
@@ -5230,6 +5618,25 @@ def validate_task_refs(
                 raise AuditError(
                     f"Effect in task[{task_id}] references reads outside its exposure."
                 )
+            tree_source_status = (
+                "default_branch_match"
+                if all(
+                    reads[read_id][1].get("tree_source", {}).get("status")
+                    == "default_branch_match"
+                    for read_id in effect["read_ids"]
+                )
+                else "unverified_source"
+            )
+            if (
+                effect["original_judgment"] == "verified"
+                and tree_source_status != "default_branch_match"
+            ):
+                raise AuditError(
+                    f"Verified effect in task[{task_id}] requires every cited "
+                    "read passage to match the bound Tree's local default-branch "
+                    "snapshot; use probable otherwise."
+                )
+            effect["tree_source_status"] = tree_source_status
             read_times = [
                 parse_datetime(
                     reads[read_id][1]["completed_at"],
@@ -5465,6 +5872,10 @@ def render_report(
     support_counts = Counter(
         effect["derived_support"] for _, effect in independent_effects.values()
     )
+    tree_source_counts = Counter(
+        effect["tree_source_status"]
+        for _, effect in independent_effects.values()
+    )
     if len(confirmed_exposure_tasks) + len(unresolved_exposure_tasks) != len(clear_tasks):
         raise AuditError("Task exposure counts do not conserve clear Tasks.")
     if sum(task_type_effect.values()) != len(independent_effects):
@@ -5521,7 +5932,7 @@ def render_report(
     }
 
     lines = [
-        "# Context Tree Value Audit: Task-First Value Audit",
+        "# Context Tree Value Audit: Exploratory Task-First Scan",
         "",
         f"Generated: {isoformat(generated_at)}",
         f"Acquisition bound: {window_start} – {window_end}",
@@ -5541,6 +5952,8 @@ def render_report(
                 len(independent_effects) if effect_metrics_available else "N/A",
             ]
         ),
+        "",
+        "This is an exploratory evidence scan, not causal proof, ROI, or a global effectiveness rate.",
         "",
         "Unresolved exposure is unknown coverage, not an unused/no-value denominator. Receipt absence is also unknown.",
         "",
@@ -5630,6 +6043,12 @@ def render_report(
             [
                 "",
                 f"Derived support: definite **{support_counts['definite']}**, limited **{support_counts['limited']}**. Support is derived during reporting and is never accepted from task-judgments input.",
+                (
+                    "Tree source: local default-branch match "
+                    f"**{tree_source_counts['default_branch_match']}**, "
+                    "unverified source "
+                    f"**{tree_source_counts['unverified_source']}**."
+                ),
                 "",
                 "## Task Type × Effect",
                 "",
@@ -5657,6 +6076,9 @@ def render_report(
         for task in representatives:
             effects = task["effects"]
             effect_labels = ", ".join(f"`{effect['effect']}`" for effect in effects)
+            source_labels = ", ".join(
+                f"`{effect['tree_source_status']}`" for effect in effects
+            )
             lines.extend(
                 [
                     f"### {task['objective']} (`{task['task_id']}`)",
@@ -5664,6 +6086,7 @@ def render_report(
                     f"- Task type: `{task['task_type']}`",
                     f"- Exposure: `{task['exposure']['status']}`",
                     f"- Effects: {effect_labels}",
+                    f"- Tree source: {source_labels}",
                     f"- Outcome: {task['outcome']}",
                     f"- Influence: {'; '.join(effect['summary'] for effect in effects)}",
                     "",
@@ -5788,13 +6211,54 @@ def render_report(
             "",
             "A clear Task requires a concrete objective, object scope, outcome, bounded source fragments, and one of the five task types. Excluded Tasks do not carry exposure or effects.",
             "",
-            "Effects retain the four strict values `confirmed`, `constrained`, `redirected`, and `conflicted`. `verified` and `probable` preserve the original passage-level confidence; neither a receipt nor aligned output is server-verified causality.",
+            "Effects retain the four strict values `confirmed`, `constrained`, `redirected`, and `conflicted`. `verified` additionally requires the recorded passage to match the bound Tree's local default-branch snapshot; an unverified source may support only `probable`. This local match is not remote provenance or server-verified causality.",
             "",
             f"{provider_note} The audit remains read-only and limited to one explicitly authorized Agent, one workspace, and one bound Tree.",
             "",
         ]
     )
     return "\n".join(lines)
+
+
+def validate_tree_source_snapshot(
+    value: Any,
+    workspace_identity: WorkspaceIdentity,
+    *,
+    field: str,
+) -> dict[str, Any]:
+    if value is None:
+        return {
+            "status": "unavailable",
+            "reason": "legacy_candidate_without_source_snapshot",
+        }
+    if not isinstance(value, Mapping):
+        raise AuditError(f"{field} must be an object.")
+    status = value.get("status")
+    if status == "unavailable":
+        return {
+            "status": status,
+            "reason": require_string(value.get("reason"), f"{field}.reason"),
+        }
+    if status != "local_default_branch":
+        raise AuditError(f"{field}.status is invalid.")
+    branch = require_string(value.get("branch"), f"{field}.branch")
+    commit = require_string(value.get("commit"), f"{field}.commit").lower()
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise AuditError(f"{field} has an invalid commit.")
+    current = resolve_tree_source_snapshot(workspace_identity.bound_tree_root)
+    if (
+        current.get("status") != "local_default_branch"
+        or current.get("branch") != branch
+        or current.get("commit") != commit
+    ):
+        raise AuditError(
+            f"{field} no longer matches the bound Tree's local default branch."
+        )
+    return {
+        "status": status,
+        "branch": branch,
+        "commit": commit,
+    }
 
 
 def validate_report_candidate(
@@ -5830,10 +6294,14 @@ def validate_report_candidate(
         raise AuditError(
             f"Candidate {chat_id} audit_id does not match its Chat and Agent UUIDs."
         )
-    validate_authorization(
+    authorization = validate_authorization(
         chat.get("authorization"),
         f"candidate[{expected_audit_id}].chat.authorization",
     )
+    if "authorization_context" in chat:
+        raise AuditError(
+            f"Candidate {expected_audit_id} must not contain authorization_context."
+        )
     if not isinstance(chat.get("title"), str) or not isinstance(
         chat.get("message_count"), int
     ):
@@ -5850,6 +6318,11 @@ def validate_report_candidate(
         raise AuditError(
             f"Candidate {expected_audit_id} does not match the workspace-bound Tree."
         )
+    tree_source_snapshot = validate_tree_source_snapshot(
+        value.get("tree_source_snapshot"),
+        workspace_identity,
+        field=f"candidate[{expected_audit_id}].tree_source_snapshot",
+    )
     window = value.get("window")
     if not isinstance(window, dict):
         raise AuditError(f"Candidate {expected_audit_id} must contain a window.")
@@ -6022,6 +6495,18 @@ def validate_report_candidate(
         if receipt is not None and normalize_context_decision(receipt) != receipt:
             raise AuditError(
                 f"Candidate {expected_audit_id} contains an invalid decision receipt."
+            )
+    for read in reads:
+        expected_source = read_tree_source(
+            read,
+            workspace_identity.bound_tree_root,
+            tree_source_snapshot,
+        )
+        if read.get("tree_source") is None:
+            read["tree_source"] = expected_source
+        elif read.get("tree_source") != expected_source:
+            raise AuditError(
+                f"Candidate {expected_audit_id} contains invalid Tree source provenance."
             )
     choice_ids: set[str] = set()
     for message in choices:
