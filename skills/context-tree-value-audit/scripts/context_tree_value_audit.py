@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build task-first Context Tree audits from First Tree Chats and local runtime evidence.
+"""Build three-stage Context Tree audits from First Tree Chats and runtime evidence.
 
 Collection remains deliberately conservative and read-only.  Semantic value is
-judged at Task level after authorized Chat evidence has been collected.
+judged only after a message-only Task inventory has been frozen.
 """
 
 from __future__ import annotations
@@ -29,18 +29,17 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
-TASK_JUDGMENT_SCHEMA_VERSION = 3
+TASK_INVENTORY_SCHEMA_VERSION = 4
+TASK_ANALYSIS_SCHEMA_VERSION = 4
 AUTHORIZATION_VALUES = {"explicit_agent", "explicit_chat"}
 EFFECT_VALUES = {"confirmed", "constrained", "redirected", "conflicted"}
 READ_STATUS_VALUES = {"observed", "unresolved"}
 TASK_STATUS_VALUES = {"clear", "excluded"}
-TASK_OWNERSHIP_VALUES = {"assigned", "transferred", "accepted"}
 TASK_EXCLUSION_VALUES = {
     "greeting_or_acknowledgement",
     "status_ping_or_continuation",
     "context_dependent_clarification",
     "missing_objective",
-    "missing_scope",
     "missing_outcome",
     "ownership_not_established",
     "automatic_or_provider_only",
@@ -5189,6 +5188,19 @@ def optional_text(value: Any, *, field: str) -> str | None:
     return value.strip() or None
 
 
+def require_exact_keys(
+    value: Mapping[str, Any],
+    allowed: set[str],
+    *,
+    field: str,
+) -> None:
+    unexpected = sorted(set(value) - allowed)
+    if unexpected:
+        raise AuditError(
+            f"{field} contains unsupported field(s): {', '.join(unexpected)}."
+        )
+
+
 def strip_edge_decorations(value: str, *, preserve_at: bool) -> str:
     result = value.strip()
     while result:
@@ -5296,78 +5308,29 @@ def is_weak_task_fragment(value: str) -> bool:
     )
 
 
-def validate_task_episode(value: Any, *, task_id: str) -> dict[str, Any]:
-    field = f"task[{task_id}].episode"
-    if not isinstance(value, dict):
-        raise AuditError(f"{field} must be an object.")
-    ownership = value.get("ownership")
-    if not isinstance(ownership, dict):
-        raise AuditError(f"{field}.ownership must be an object.")
-    ownership_kind = require_string(
-        ownership.get("kind"), f"{field}.ownership.kind"
+def validate_task_sources(value: Mapping[str, Any], *, task_id: str) -> dict[str, Any]:
+    objective_source_ids = string_id_list(
+        value.get("objective_source_message_ids"),
+        field=f"task[{task_id}].objective_source_message_ids",
     )
-    if ownership_kind not in TASK_OWNERSHIP_VALUES:
+    outcome_source_ids = string_id_list(
+        value.get("outcome_source_message_ids"),
+        field=f"task[{task_id}].outcome_source_message_ids",
+    )
+    if not objective_source_ids or not outcome_source_ids:
         raise AuditError(
-            f"{field}.ownership.kind must be one of: "
-            f"{', '.join(sorted(TASK_OWNERSHIP_VALUES))}."
+            f"task[{task_id}] requires objective and outcome source message IDs."
         )
-    ownership_anchor_ids = string_id_list(
-        ownership.get("anchor_message_ids"),
-        field=f"{field}.ownership.anchor_message_ids",
-    )
-    objective_anchor_ids = string_id_list(
-        value.get("objective_anchor_message_ids"),
-        field=f"{field}.objective_anchor_message_ids",
-    )
-    outcome_anchor_ids = string_id_list(
-        value.get("outcome_anchor_message_ids"),
-        field=f"{field}.outcome_anchor_message_ids",
-    )
-    continuation_ids = string_id_list(
-        value.get("continuation_message_ids", []),
-        field=f"{field}.continuation_message_ids",
-    )
-    if (
-        not ownership_anchor_ids
-        or not objective_anchor_ids
-        or not outcome_anchor_ids
-    ):
+    if set(objective_source_ids) & set(outcome_source_ids):
         raise AuditError(
-            f"{field} requires ownership, objective, and outcome anchor IDs."
-        )
-    ownership_anchor_set = set(ownership_anchor_ids)
-    objective_anchor_set = set(objective_anchor_ids)
-    outcome_anchor_set = set(outcome_anchor_ids)
-    if outcome_anchor_set & (
-        ownership_anchor_set | objective_anchor_set
-    ):
-        raise AuditError(
-            f"{field}.outcome_anchor_message_ids must be separate from ownership "
-            "and objective anchors."
-        )
-    if set(continuation_ids) & (
-        ownership_anchor_set | objective_anchor_set | outcome_anchor_set
-    ):
-        raise AuditError(
-            f"{field}.continuation_message_ids must be separate from ownership, "
-            "objective, and outcome anchors."
+            f"task[{task_id}] objective and outcome source messages must be separate."
         )
     return {
-        "ownership": {
-            "kind": ownership_kind,
-            "anchor_message_ids": ownership_anchor_ids,
-            "reason": require_string(
-                ownership.get("reason"), f"{field}.ownership.reason"
-            ),
-        },
-        "objective_anchor_message_ids": objective_anchor_ids,
-        "outcome_anchor_message_ids": outcome_anchor_ids,
-        "continuation_message_ids": continuation_ids,
-        "primary_deliverable": require_string(
-            value.get("primary_deliverable"), f"{field}.primary_deliverable"
-        ),
-        "boundary_reason": require_string(
-            value.get("boundary_reason"), f"{field}.boundary_reason"
+        "objective_source_message_ids": objective_source_ids,
+        "outcome_source_message_ids": outcome_source_ids,
+        "primary_deliverable": optional_text(
+            value.get("primary_deliverable"),
+            field=f"task[{task_id}].primary_deliverable",
         ),
     }
 
@@ -5378,16 +5341,36 @@ def positive_int(value: Any, *, field: str) -> int:
     return value
 
 
+def non_negative_int(value: Any, *, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise AuditError(f"{field} must be a non-negative integer.")
+    return value
+
+
 def load_reviewed_baseline(path: Path) -> dict[str, Any]:
     rows = list(iter_jsonl(path))
     if len(rows) != 1:
         raise AuditError("--reviewed-baseline must contain exactly one JSONL row.")
     row = rows[0]
-    if row.get("schema_version") != TASK_JUDGMENT_SCHEMA_VERSION:
+    if row.get("schema_version") != TASK_ANALYSIS_SCHEMA_VERSION:
         raise AuditError(
             "Reviewed baseline must use schema_version "
-            f"{TASK_JUDGMENT_SCHEMA_VERSION}."
+            f"{TASK_ANALYSIS_SCHEMA_VERSION}."
         )
+    require_exact_keys(
+        row,
+        {
+            "schema_version",
+            "basis",
+            "reviewed_at",
+            "evidence_anchor",
+            "clear_tasks",
+            "effect_tasks",
+            "effects",
+            "effect_counts",
+        },
+        field="reviewed_baseline",
+    )
     if row.get("basis") != "separately_reviewed_task_cases":
         raise AuditError(
             "Reviewed baseline basis must be separately_reviewed_task_cases."
@@ -5395,6 +5378,11 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
     anchor = row.get("evidence_anchor")
     if not isinstance(anchor, dict):
         raise AuditError("Reviewed baseline requires evidence_anchor.")
+    require_exact_keys(
+        anchor,
+        {"artifact_id", "sha256"},
+        field="reviewed_baseline.evidence_anchor",
+    )
     artifact_id = require_string(
         anchor.get("artifact_id"),
         "reviewed_baseline.evidence_anchor.artifact_id",
@@ -5420,7 +5408,7 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
     clear_tasks = positive_int(
         row.get("clear_tasks"), field="reviewed_baseline.clear_tasks"
     )
-    effect_tasks = positive_int(
+    effect_tasks = non_negative_int(
         row.get("effect_tasks"), field="reviewed_baseline.effect_tasks"
     )
     if effect_tasks > clear_tasks:
@@ -5428,6 +5416,13 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
             "Reviewed baseline effect_tasks must not exceed clear_tasks."
         )
 
+    effects = non_negative_int(
+        row.get("effects"), field="reviewed_baseline.effects"
+    )
+    if effects < effect_tasks:
+        raise AuditError(
+            "Reviewed baseline effects must not be less than effect_tasks."
+        )
     effect_counts = row.get("effect_counts")
     if not isinstance(effect_counts, dict) or set(effect_counts) != EFFECT_VALUES:
         raise AuditError(
@@ -5441,9 +5436,9 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
                 f"reviewed_baseline.effect_counts.{effect} must be a non-negative integer."
             )
         normalized_effect_counts[effect] = value
-    if sum(normalized_effect_counts.values()) != effect_tasks:
+    if sum(normalized_effect_counts.values()) != effects:
         raise AuditError(
-            "Reviewed baseline effect_counts must conserve effect_tasks."
+            "Reviewed baseline effect_counts must conserve effects."
         )
     return {
         "basis": "separately_reviewed_task_cases",
@@ -5454,18 +5449,40 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
         },
         "clear_tasks": clear_tasks,
         "effect_tasks": effect_tasks,
+        "effects": effects,
         "effect_counts": normalized_effect_counts,
     }
 
 
-def load_task_judgments(path: Path) -> list[dict[str, Any]]:
+def load_task_inventory(
+    path: Path,
+    *,
+    require_frozen: bool,
+) -> tuple[list[dict[str, Any]], str | None]:
     tasks: list[dict[str, Any]] = []
     task_ids: set[str] = set()
+    declared_digests: set[str] = set()
     for row in iter_jsonl(path):
-        if row.get("schema_version") != TASK_JUDGMENT_SCHEMA_VERSION:
+        if row.get("schema_version") != TASK_INVENTORY_SCHEMA_VERSION:
             raise AuditError(
-                "Every Task judgment must use schema_version "
-                f"{TASK_JUDGMENT_SCHEMA_VERSION}."
+                "Every Task inventory row must use schema_version "
+                f"{TASK_INVENTORY_SCHEMA_VERSION}."
+            )
+        declared_digest = row.get("inventory_sha256")
+        if require_frozen:
+            if (
+                not isinstance(declared_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", declared_digest) is None
+            ):
+                raise AuditError(
+                    "Every frozen Task inventory row requires one lowercase "
+                    "inventory_sha256."
+                )
+            declared_digests.add(declared_digest)
+        elif declared_digest is not None:
+            raise AuditError(
+                "Task inventory drafts must not contain inventory_sha256; "
+                "freeze-tasks creates it."
             )
         task_id = require_string(row.get("task_id"), "task.task_id")
         if task_id in task_ids:
@@ -5476,7 +5493,33 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             raise AuditError(
                 f"task[{task_id}].status must be one of: {', '.join(sorted(TASK_STATUS_VALUES))}."
             )
-        normalized = dict(row)
+        common_fields = {
+            "schema_version",
+            "task_id",
+            "status",
+            "objective",
+            "object_scope",
+            "outcome",
+            "started_at",
+            "ended_at",
+            "source_fragments",
+        }
+        allowed_fields = (
+            common_fields
+            | {"exclusion_kind", "exclusion_reason"}
+            if status == "excluded"
+            else common_fields
+            | {
+                "objective_source_message_ids",
+                "outcome_source_message_ids",
+                "primary_deliverable",
+            }
+        )
+        if require_frozen:
+            allowed_fields.add("inventory_sha256")
+        normalized: dict[str, Any] = {
+            "schema_version": TASK_INVENTORY_SCHEMA_VERSION,
+        }
         normalized["task_id"] = task_id
         normalized["status"] = status
         normalized["objective"] = optional_text(
@@ -5511,6 +5554,11 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             field = f"task[{task_id}].source_fragments[{index}]"
             if not isinstance(fragment, dict):
                 raise AuditError(f"{field} must be an object.")
+            require_exact_keys(
+                fragment,
+                {"audit_id", "message_ids", "linkage"},
+                field=field,
+            )
             current_audit_id = require_string(fragment.get("audit_id"), f"{field}.audit_id")
             message_ids = string_id_list(
                 fragment.get("message_ids"), field=f"{field}.message_ids"
@@ -5525,6 +5573,11 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             if linkage is not None:
                 if not isinstance(linkage, dict):
                     raise AuditError(f"{field}.linkage must be an object.")
+                require_exact_keys(
+                    linkage,
+                    {"kind", "key"},
+                    field=f"{field}.linkage",
+                )
                 kind = require_string(linkage.get("kind"), f"{field}.linkage.kind")
                 if kind not in LINKAGE_VALUES:
                     raise AuditError(
@@ -5542,23 +5595,42 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             "sampling_order",
             "saturation_signals",
             "exposure",
-            "effects",
             "support",
+            "episode",
+            "read",
+            "reads",
+            "read_ids",
+            "read_attribution",
+            "effect",
+            "effects",
+            "effect_type",
+            "effect_judgment",
+            "effect_reason",
+            "decision_receipt",
         ):
             if removed_field in row:
                 raise AuditError(
-                    f"task[{task_id}].{removed_field} belongs to the "
-                    "superseded v0.2 judgment model."
+                    f"task[{task_id}].{removed_field} does not belong in the "
+                    "pure Task inventory."
                 )
+        require_exact_keys(
+            row,
+            allowed_fields,
+            field=f"task[{task_id}] pure Task inventory",
+        )
 
         if status == "excluded":
             if any(
                 field in row
-                for field in ("episode", "read", "effect", "effect_reason")
+                for field in (
+                    "objective_source_message_ids",
+                    "outcome_source_message_ids",
+                    "primary_deliverable",
+                )
             ):
                 raise AuditError(
-                    f"Excluded task[{task_id}] must not contain episode, read, "
-                    "or effect judgment."
+                    f"Excluded task[{task_id}] must not contain clear-Task sources "
+                    "or a primary deliverable."
                 )
             exclusion_kind = require_string(
                 row.get("exclusion_kind"), f"task[{task_id}].exclusion_kind"
@@ -5575,12 +5647,9 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             tasks.append(normalized)
             continue
 
-        if not all(
-            normalized[field] is not None
-            for field in ("objective", "object_scope", "outcome")
-        ):
+        if normalized["objective"] is None or normalized["outcome"] is None:
             raise AuditError(
-                f"Clear task[{task_id}] requires objective, object_scope, and outcome."
+                f"Clear task[{task_id}] requires objective and outcome."
             )
         if "exclusion_kind" in row or "exclusion_reason" in row:
             raise AuditError(
@@ -5593,71 +5662,223 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
                 "prompt, or context-dependent fragment; merge it into its parent "
                 "episode or exclude it."
             )
-        normalized["episode"] = validate_task_episode(
-            row.get("episode"), task_id=task_id
-        )
-
-        read = row.get("read")
-        if not isinstance(read, dict):
-            raise AuditError(f"Clear task[{task_id}] requires a read object.")
-        read_status = require_string(
-            read.get("status"), f"task[{task_id}].read.status"
-        )
-        if read_status not in READ_STATUS_VALUES:
+        normalized.update(validate_task_sources(row, task_id=task_id))
+        tasks.append(normalized)
+    if not tasks:
+        raise AuditError("No Task inventory rows were provided.")
+    digest = task_inventory_digest(tasks)
+    if require_frozen:
+        if len(declared_digests) != 1:
             raise AuditError(
-                f"task[{task_id}].read.status must be observed or unresolved."
+                "Frozen Task inventory rows must share exactly one inventory_sha256."
             )
-        observed_reads = string_id_list(
-            read.get("read_ids", []),
-            field=f"task[{task_id}].read.read_ids",
+        declared_digest = next(iter(declared_digests))
+        if declared_digest != digest:
+            raise AuditError(
+                "Frozen Task inventory digest does not match its Task rows."
+            )
+        return tasks, digest
+    return tasks, None
+
+
+def sorted_task_inventory(
+    tasks: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        dict(task)
+        for task in sorted(
+            tasks,
+            key=lambda item: (
+                item["status"] != "clear",
+                item["started_at"],
+                item["task_id"],
+            ),
+        )
+    ]
+
+
+def task_inventory_digest(tasks: Sequence[Mapping[str, Any]]) -> str:
+    payload = "\n".join(
+        json.dumps(
+            task,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for task in sorted_task_inventory(tasks)
+    )
+    return hashlib.sha256(f"{payload}\n".encode("utf-8")).hexdigest()
+
+
+def frozen_task_inventory(
+    tasks: Sequence[Mapping[str, Any]],
+    digest: str,
+) -> list[dict[str, Any]]:
+    return [
+        {**task, "inventory_sha256": digest}
+        for task in sorted_task_inventory(tasks)
+    ]
+
+
+def load_read_attributions(
+    path: Path,
+    *,
+    tasks: Sequence[Mapping[str, Any]],
+    inventory_sha256: str,
+) -> dict[str, dict[str, Any]]:
+    clear_task_ids = {
+        task["task_id"] for task in tasks if task["status"] == "clear"
+    }
+    rows: dict[str, dict[str, Any]] = {}
+    for row in iter_jsonl(path):
+        if row.get("schema_version") != TASK_ANALYSIS_SCHEMA_VERSION:
+            raise AuditError(
+                "Every Read attribution must use schema_version "
+                f"{TASK_ANALYSIS_SCHEMA_VERSION}."
+            )
+        if row.get("inventory_sha256") != inventory_sha256:
+            raise AuditError(
+                "Every Read attribution must reference the frozen Task inventory."
+            )
+        require_exact_keys(
+            row,
+            {
+                "schema_version",
+                "inventory_sha256",
+                "task_id",
+                "status",
+                "read_ids",
+                "reason",
+            },
+            field="read_attribution",
+        )
+        task_id = require_string(row.get("task_id"), "read_attribution.task_id")
+        if task_id not in clear_task_ids:
+            raise AuditError(
+                f"Read attribution references unknown clear Task {task_id}."
+            )
+        if task_id in rows:
+            raise AuditError(f"Duplicate Read attribution for Task {task_id}.")
+        status = require_string(
+            row.get("status"), f"read_attribution[{task_id}].status"
+        )
+        if status not in READ_STATUS_VALUES:
+            raise AuditError(
+                f"read_attribution[{task_id}].status must be observed or unresolved."
+            )
+        read_ids = string_id_list(
+            row.get("read_ids", []),
+            field=f"read_attribution[{task_id}].read_ids",
         )
         reason = optional_text(
-            read.get("reason"), field=f"task[{task_id}].read.reason"
+            row.get("reason"), field=f"read_attribution[{task_id}].reason"
         )
-        if read_status == "observed" and not observed_reads:
-            raise AuditError(f"Observed read for task[{task_id}] requires read_ids.")
-        if read_status == "observed" and reason is not None:
-            raise AuditError(f"Observed read for task[{task_id}] must not include a reason.")
-        if read_status == "unresolved" and reason is None:
-            raise AuditError(f"Unresolved read for task[{task_id}] requires a reason.")
-        if read_status == "unresolved" and observed_reads:
+        if status == "observed" and not read_ids:
             raise AuditError(
-                f"Unresolved read for task[{task_id}] must not contain read_ids."
+                f"Observed Read attribution for Task {task_id} requires read_ids."
             )
-        normalized["read"] = {
-            "status": read_status,
-            "read_ids": observed_reads,
+        if status == "observed" and reason is not None:
+            raise AuditError(
+                f"Observed Read attribution for Task {task_id} must not include a reason."
+            )
+        if status == "unresolved" and reason is None:
+            raise AuditError(
+                f"Unresolved Read attribution for Task {task_id} requires a reason."
+            )
+        if status == "unresolved" and read_ids:
+            raise AuditError(
+                f"Unresolved Read attribution for Task {task_id} must not contain read_ids."
+            )
+        rows[task_id] = {
+            "status": status,
+            "read_ids": read_ids,
             "reason": reason,
         }
-
-        effect = row.get("effect")
-        effect_reason = optional_text(
-            row.get("effect_reason"), field=f"task[{task_id}].effect_reason"
+    missing = clear_task_ids - set(rows)
+    if missing:
+        raise AuditError(
+            "Missing Read attribution for clear Task(s): "
+            + ", ".join(sorted(missing))
+            + "."
         )
-        if effect is None:
-            if effect_reason is None:
-                raise AuditError(
-                    f"task[{task_id}] without an effect requires effect_reason."
-                )
-            normalized["effect"] = None
-            normalized["effect_reason"] = effect_reason
-        else:
-            field = f"task[{task_id}].effect"
+    return rows
+
+
+def load_effect_judgments(
+    path: Path,
+    *,
+    tasks: Sequence[Mapping[str, Any]],
+    reads_by_task: Mapping[str, Mapping[str, Any]],
+    inventory_sha256: str,
+) -> dict[str, dict[str, Any]]:
+    clear_task_ids = {
+        task["task_id"] for task in tasks if task["status"] == "clear"
+    }
+    rows: dict[str, dict[str, Any]] = {}
+    for row in iter_jsonl(path):
+        if row.get("schema_version") != TASK_ANALYSIS_SCHEMA_VERSION:
+            raise AuditError(
+                "Every Effect judgment must use schema_version "
+                f"{TASK_ANALYSIS_SCHEMA_VERSION}."
+            )
+        if row.get("inventory_sha256") != inventory_sha256:
+            raise AuditError(
+                "Every Effect judgment must reference the frozen Task inventory."
+            )
+        require_exact_keys(
+            row,
+            {
+                "schema_version",
+                "inventory_sha256",
+                "task_id",
+                "effects",
+                "effect_reason",
+            },
+            field="effect_judgment",
+        )
+        task_id = require_string(row.get("task_id"), "effect_judgment.task_id")
+        if task_id not in clear_task_ids:
+            raise AuditError(
+                f"Effect judgment references unknown clear Task {task_id}."
+            )
+        if task_id in rows:
+            raise AuditError(f"Duplicate Effect judgment for Task {task_id}.")
+        raw_effects = row.get("effects")
+        if not isinstance(raw_effects, list):
+            raise AuditError(
+                f"effect_judgment[{task_id}].effects must be an array."
+            )
+        effects: list[dict[str, Any]] = []
+        for index, effect in enumerate(raw_effects):
+            field = f"effect_judgment[{task_id}].effects[{index}]"
             if not isinstance(effect, dict):
                 raise AuditError(f"{field} must be an object.")
-            if effect_reason is not None:
-                raise AuditError(
-                    f"task[{task_id}] with an effect must not include effect_reason."
-                )
-            for removed_field in ("original_judgment", "rubric", "support"):
+            for removed_field in (
+                "original_judgment",
+                "rubric",
+                "support",
+                "confidence",
+            ):
                 if removed_field in effect:
                     raise AuditError(
-                        f"{field}.{removed_field} belongs to the superseded v0.2 judgment model."
+                        f"{field}.{removed_field} belongs to a superseded model."
                     )
-            effect_value = require_string(effect.get("type"), f"{field}.type")
-            if effect_value not in EFFECT_VALUES:
+            require_exact_keys(
+                effect,
+                {
+                    "type",
+                    "read_ids",
+                    "choice_message_ids",
+                    "outcome_message_id",
+                    "summary",
+                },
+                field=field,
+            )
+            effect_type = require_string(effect.get("type"), f"{field}.type")
+            if effect_type not in EFFECT_VALUES:
                 raise AuditError(
-                    f"{field}.type must be one of: {', '.join(sorted(EFFECT_VALUES))}."
+                    f"{field}.type must be one of: "
+                    f"{', '.join(sorted(EFFECT_VALUES))}."
                 )
             effect_reads = string_id_list(
                 effect.get("read_ids"), field=f"{field}.read_ids"
@@ -5667,23 +5888,51 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
                 field=f"{field}.choice_message_ids",
             )
             if not effect_reads or not choice_ids:
-                raise AuditError(f"{field} requires read_ids and choice_message_ids.")
-            normalized["effect"] = {
-                "type": effect_value,
-                "read_ids": effect_reads,
-                "choice_message_ids": choice_ids,
-                "outcome_anchor": require_string(
-                    effect.get("outcome_anchor"), f"{field}.outcome_anchor"
-                ),
-                "summary": require_string(effect.get("summary"), f"{field}.summary"),
-            }
-            normalized["effect_reason"] = None
-        if read_status == "unresolved" and normalized["effect"] is not None:
-            raise AuditError(
-                f"Unresolved read for task[{task_id}] must not contain an effect."
+                raise AuditError(
+                    f"{field} requires read_ids and choice_message_ids."
+                )
+            effects.append(
+                {
+                    "type": effect_type,
+                    "read_ids": effect_reads,
+                    "choice_message_ids": choice_ids,
+                    "outcome_message_id": require_string(
+                        effect.get("outcome_message_id"),
+                        f"{field}.outcome_message_id",
+                    ),
+                    "summary": require_string(
+                        effect.get("summary"), f"{field}.summary"
+                    ),
+                }
             )
-        tasks.append(normalized)
-    return tasks
+        effect_reason = optional_text(
+            row.get("effect_reason"),
+            field=f"effect_judgment[{task_id}].effect_reason",
+        )
+        if effects and effect_reason is not None:
+            raise AuditError(
+                f"Task {task_id} with Effects must not include effect_reason."
+            )
+        if not effects and effect_reason is None:
+            raise AuditError(
+                f"Task {task_id} without an Effect requires effect_reason."
+            )
+        if reads_by_task[task_id]["status"] == "unresolved" and effects:
+            raise AuditError(
+                f"Unresolved Read attribution for Task {task_id} cannot have Effects."
+            )
+        rows[task_id] = {
+            "effects": effects,
+            "effect_reason": effect_reason,
+        }
+    missing = clear_task_ids - set(rows)
+    if missing:
+        raise AuditError(
+            "Missing Effect judgment for clear Task(s): "
+            + ", ".join(sorted(missing))
+            + "."
+        )
+    return rows
 
 
 def timestamp_in_task(value: Any, *, start: datetime, end: datetime, field: str) -> datetime:
@@ -5693,44 +5942,28 @@ def timestamp_in_task(value: Any, *, start: datetime, end: datetime, field: str)
     return timestamp
 
 
-def validate_task_refs(
+def validate_task_inventory_refs(
     candidates: Sequence[Mapping[str, Any]],
     tasks: Sequence[dict[str, Any]],
-) -> None:
+) -> dict[str, dict[str, Any]]:
     candidates_by_id = {candidate["audit_id"]: candidate for candidate in candidates}
     messages_by_audit: dict[str, dict[str, Mapping[str, Any]]] = {}
-    choices: dict[str, tuple[str, Mapping[str, Any]]] = {}
-    reads: dict[str, tuple[str, Mapping[str, Any]]] = {}
     for candidate in candidates:
         current_audit_id = candidate["audit_id"]
         visible_messages = candidate.get("visible_messages")
         if not isinstance(visible_messages, list):
-            visible_messages = [
-                *candidate.get("visible_choice_candidates", []),
-                *candidate.get("visible_tree_mentions", []),
-            ]
+            raise AuditError(
+                f"Task source {current_audit_id} requires visible_messages."
+            )
         message_index = {
             message.get("message_id"): message
             for message in visible_messages
             if isinstance(message, dict) and isinstance(message.get("message_id"), str)
         }
         messages_by_audit[current_audit_id] = message_index
-        for choice in candidate["visible_choice_candidates"]:
-            message_id = choice.get("message_id")
-            if isinstance(message_id, str):
-                if message_id in choices:
-                    raise AuditError(f"Choice message ID {message_id} is not globally unique.")
-                choices[message_id] = (current_audit_id, choice)
-        for read in candidate["reads"]:
-            read_id = read.get("read_id")
-            if isinstance(read_id, str):
-                if read_id in reads:
-                    raise AuditError(f"Read ID {read_id} is not globally unique.")
-                reads[read_id] = (current_audit_id, read)
 
-    read_owners: dict[str, str] = {}
-    choice_owners: dict[str, str] = {}
-    episode_anchor_owners: dict[str, str] = {}
+    identity_source_owners: dict[str, str] = {}
+    contexts: dict[str, dict[str, Any]] = {}
     for task in tasks:
         task_id = task["task_id"]
         start = parse_datetime(task["started_at"], field=f"task {task_id} started_at")
@@ -5795,33 +6028,25 @@ def validate_task_refs(
 
         if task["status"] == "excluded":
             continue
-        episode = task["episode"]
-        identity_anchor_ids = {
-            *episode["ownership"]["anchor_message_ids"],
-            *episode["objective_anchor_message_ids"],
-            *episode["outcome_anchor_message_ids"],
+        objective_source_ids = task["objective_source_message_ids"]
+        outcome_source_ids = task["outcome_source_message_ids"]
+        identity_source_ids = {
+            *objective_source_ids,
+            *outcome_source_ids,
         }
-        for message_id in identity_anchor_ids:
-            previous = episode_anchor_owners.setdefault(message_id, task_id)
+        for message_id in identity_source_ids:
+            previous = identity_source_owners.setdefault(message_id, task_id)
             if previous != task_id:
                 raise AuditError(
-                    f"Episode anchor {message_id} is copied across incompatible "
+                    f"Task identity source {message_id} is copied across incompatible "
                     f"Tasks {previous} and {task_id}."
                 )
-        episode_message_ids = {
-            *identity_anchor_ids,
-            *episode["continuation_message_ids"],
-        }
-        if not episode_message_ids.issubset(source_message_ids):
-            unknown = ", ".join(sorted(episode_message_ids - source_message_ids))
+        if not identity_source_ids.issubset(source_message_ids):
+            unknown = ", ".join(sorted(identity_source_ids - source_message_ids))
             raise AuditError(
-                f"task[{task_id}].episode references messages outside its source "
+                f"task[{task_id}] identity sources reference messages outside its source "
                 f"fragments: {unknown}."
             )
-        episode_messages = {
-            message_id: source_messages[message_id]
-            for message_id in episode_message_ids
-        }
         source_agent_ids = {
             candidates_by_id[audit]["chat"]["source_agent_id"]
             for audit in source_audits
@@ -5831,149 +6056,62 @@ def validate_task_refs(
                 f"task[{task_id}] source fragments must belong to one audited Agent."
             )
         source_agent_id = next(iter(source_agent_ids))
-        objective_anchor_messages = {
-            message_id: episode_messages[message_id]
-            for message_id in episode["objective_anchor_message_ids"]
+        objective_source_messages = {
+            message_id: source_messages[message_id]
+            for message_id in objective_source_ids
         }
-        objective_anchor_senders = {
-            message.get("sender_id")
-            for message in objective_anchor_messages.values()
-        }
-        if episode["ownership"]["kind"] == "accepted":
-            compatible_ownership_anchor_ids = [
-                message_id
-                for message_id in episode["ownership"]["anchor_message_ids"]
-                if episode_messages[message_id].get("sender_id")
-                == source_agent_id
-            ]
-            if not compatible_ownership_anchor_ids:
-                raise AuditError(
-                    f"Accepted ownership for task[{task_id}] requires a "
-                    "current-Agent anchor."
-                )
-            if source_agent_id not in objective_anchor_senders:
-                raise AuditError(
-                    f"Accepted ownership for task[{task_id}] requires a "
-                    "current-Agent objective anchor."
-                )
-            concrete_compatible_objective_ids = [
-                message_id
-                for message_id, message in objective_anchor_messages.items()
-                if message.get("sender_id") == source_agent_id
-                and isinstance(message.get("content"), str)
-                and not is_weak_task_fragment(message["content"])
-            ]
-        else:
-            compatible_ownership_anchor_ids = [
-                message_id
-                for message_id in episode["ownership"]["anchor_message_ids"]
-                if isinstance(
-                    episode_messages[message_id].get("sender_id"), str
-                )
-                and bool(
-                    episode_messages[message_id]["sender_id"].strip()
-                )
-                and episode_messages[message_id]["sender_id"]
-                != source_agent_id
-            ]
-            if not compatible_ownership_anchor_ids:
-                raise AuditError(
-                    f"{episode['ownership']['kind'].title()} ownership for "
-                    f"task[{task_id}] requires a non-current-Agent anchor."
-                )
-            if not any(
-                isinstance(sender_id, str)
-                and bool(sender_id.strip())
-                and sender_id != source_agent_id
-                for sender_id in objective_anchor_senders
-            ):
-                raise AuditError(
-                    f"{episode['ownership']['kind'].title()} ownership for "
-                    f"task[{task_id}] requires a non-current-Agent objective anchor."
-                )
-            concrete_compatible_objective_ids = [
-                message_id
-                for message_id, message in objective_anchor_messages.items()
-                if isinstance(message.get("sender_id"), str)
-                and bool(message["sender_id"].strip())
-                and message["sender_id"] != source_agent_id
-                and isinstance(message.get("content"), str)
-                and not is_weak_task_fragment(message["content"])
-            ]
-        if not concrete_compatible_objective_ids:
+        concrete_objective_ids = [
+            message_id
+            for message_id, message in objective_source_messages.items()
+            if isinstance(message.get("sender_id"), str)
+            and bool(message["sender_id"].strip())
+            and isinstance(message.get("content"), str)
+            and not is_weak_task_fragment(message["content"])
+        ]
+        if not concrete_objective_ids:
             raise AuditError(
-                f"task[{task_id}] requires at least one ownership-compatible "
-                "concrete objective-anchor source message; weak continuations, "
-                "context-only prompts, and another sender's objective cannot be "
+                f"task[{task_id}] requires at least one concrete objective-source "
+                "message; weak continuations and context-only prompts cannot be "
                 "normalized into a clear objective."
             )
-        invalid_outcome_anchor_ids = [
+        invalid_outcome_source_ids = [
             message_id
-            for message_id in episode["outcome_anchor_message_ids"]
-            if episode_messages[message_id].get("sender_id") != source_agent_id
+            for message_id in outcome_source_ids
+            if source_messages[message_id].get("sender_id") != source_agent_id
             or not isinstance(
-                episode_messages[message_id].get("content"), str
+                source_messages[message_id].get("content"), str
             )
-            or not episode_messages[message_id]["content"].strip()
+            or not source_messages[message_id]["content"].strip()
         ]
-        if invalid_outcome_anchor_ids:
+        if invalid_outcome_source_ids:
             raise AuditError(
-                f"task[{task_id}] requires every outcome anchor to be a "
+                f"task[{task_id}] requires every outcome source to be a "
                 "non-empty current-Agent message."
             )
-        ownership_times = [
+        objective_source_times = [
             parse_datetime(
-                episode_messages[message_id]["created_at"],
-                field=f"task {task_id} ownership anchor {message_id}",
+                source_messages[message_id]["created_at"],
+                field=f"task {task_id} objective source {message_id}",
             )
-            for message_id in episode["ownership"]["anchor_message_ids"]
+            for message_id in objective_source_ids
         ]
-        compatible_ownership_times = [
+        outcome_source_times = [
             parse_datetime(
-                episode_messages[message_id]["created_at"],
-                field=(
-                    f"task {task_id} compatible ownership anchor "
-                    f"{message_id}"
-                ),
+                source_messages[message_id]["created_at"],
+                field=f"task {task_id} outcome source {message_id}",
             )
-            for message_id in compatible_ownership_anchor_ids
+            for message_id in outcome_source_ids
         ]
-        objective_anchor_times = [
-            parse_datetime(
-                episode_messages[message_id]["created_at"],
-                field=f"task {task_id} objective anchor {message_id}",
-            )
-            for message_id in episode["objective_anchor_message_ids"]
-        ]
-        concrete_objective_times = [
-            parse_datetime(
-                episode_messages[message_id]["created_at"],
-                field=(
-                    f"task {task_id} concrete objective anchor "
-                    f"{message_id}"
-                ),
-            )
-            for message_id in concrete_compatible_objective_ids
-        ]
-        evidence_started_at = max(
-            min(compatible_ownership_times), min(concrete_objective_times)
-        )
-        episode_started_at = min(
-            [*ownership_times, *objective_anchor_times]
-        )
-        objective_times = [*ownership_times, *objective_anchor_times]
-        outcome_times = [
-            parse_datetime(
-                episode_messages[message_id]["created_at"],
-                field=f"task {task_id} outcome anchor {message_id}",
-            )
-            for message_id in episode["outcome_anchor_message_ids"]
-        ]
-        episode_ended_at = max(outcome_times)
-        if min(outcome_times) <= max(objective_times):
+        episode_started_at = min(objective_source_times)
+        episode_ended_at = max(outcome_source_times)
+        if min(outcome_source_times) <= max(objective_source_times):
             raise AuditError(
-                f"task[{task_id}] outcome anchors must strictly follow ownership "
-                "and objective anchors."
+                f"task[{task_id}] outcome sources must strictly follow objective sources."
+            )
+        if start != episode_started_at or end != episode_ended_at:
+            raise AuditError(
+                f"task[{task_id}] started_at and ended_at must equal its first "
+                "objective source and final outcome source."
             )
         for message_id, message in source_messages.items():
             message_time = parse_datetime(
@@ -5985,63 +6123,121 @@ def validate_task_refs(
                     f"task[{task_id}] source message {message_id} is outside its "
                     "established episode."
                 )
+        contexts[task_id] = {
+            "start": start,
+            "end": end,
+            "source_audits": source_audits,
+            "source_message_ids": source_message_ids,
+            "source_messages": source_messages,
+            "source_agent_id": source_agent_id,
+        }
+    return contexts
 
-        observed_reads = set(task["read"]["read_ids"])
-        for read_id in observed_reads:
+
+def candidate_reads(
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[str, Mapping[str, Any]]]:
+    reads: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    for candidate in candidates:
+        for read in candidate["reads"]:
+            read_id = read.get("read_id")
+            if isinstance(read_id, str):
+                if read_id in reads:
+                    raise AuditError(
+                        f"Read ID {read_id} is not globally unique."
+                    )
+                reads[read_id] = (candidate["audit_id"], read)
+    return reads
+
+
+def validate_read_refs(
+    candidates: Sequence[Mapping[str, Any]],
+    tasks: Sequence[Mapping[str, Any]],
+    reads_by_task: Mapping[str, Mapping[str, Any]],
+    contexts: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[str, Mapping[str, Any]]]:
+    reads = candidate_reads(candidates)
+    read_owners: dict[str, str] = {}
+    for task in tasks:
+        if task["status"] != "clear":
+            continue
+        task_id = task["task_id"]
+        context = contexts[task_id]
+        for read_id in reads_by_task[task_id]["read_ids"]:
             item = reads.get(read_id)
             if item is None:
-                raise AuditError(f"task[{task_id}] references unknown read {read_id}.")
-            current_audit_id, read = item
-            if current_audit_id not in source_audits:
                 raise AuditError(
-                    f"task[{task_id}] read {read_id} is outside its source Chat fragments."
+                    f"Read attribution for Task {task_id} references unknown Read {read_id}."
+                )
+            current_audit_id, read = item
+            if current_audit_id not in context["source_audits"]:
+                raise AuditError(
+                    f"Task {task_id} Read {read_id} is outside its source Chat fragments."
                 )
             read_started_at = timestamp_in_task(
                 read.get("timestamp"),
-                start=start,
-                end=end,
+                start=context["start"],
+                end=context["end"],
                 field=f"task {task_id} read {read_id} timestamp",
             )
             read_completed_at = timestamp_in_task(
                 read.get("completed_at"),
-                start=start,
-                end=end,
+                start=context["start"],
+                end=context["end"],
                 field=f"task {task_id} read {read_id} completion",
             )
-            if (
-                read_started_at < evidence_started_at
-                or read_completed_at < evidence_started_at
-            ):
+            if read_started_at > read_completed_at:
                 raise AuditError(
-                    f"task[{task_id}] read {read_id} precedes established "
-                    "episode ownership/objective."
-                )
-            if (
-                read_started_at > episode_ended_at
-                or read_completed_at > episode_ended_at
-            ):
-                raise AuditError(
-                    f"task[{task_id}] read {read_id} occurs after the episode "
-                    "outcome."
+                    f"Task {task_id} Read {read_id} completes before it starts."
                 )
             previous = read_owners.setdefault(read_id, task_id)
             if previous != task_id:
                 raise AuditError(
-                    f"Read {read_id} is copied across incompatible Tasks {previous} and {task_id}."
+                    f"Read {read_id} is copied across incompatible Tasks "
+                    f"{previous} and {task_id}."
                 )
+    return reads
 
-        effect = task["effect"]
-        if effect is not None:
+
+def candidate_choices(
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, tuple[str, Mapping[str, Any]]]:
+    choices: dict[str, tuple[str, Mapping[str, Any]]] = {}
+    for candidate in candidates:
+        for choice in candidate["visible_choice_candidates"]:
+            message_id = choice.get("message_id")
+            if isinstance(message_id, str):
+                if message_id in choices:
+                    raise AuditError(
+                        f"Choice message ID {message_id} is not globally unique."
+                    )
+                choices[message_id] = (candidate["audit_id"], choice)
+    return choices
+
+
+def validate_effect_refs(
+    candidates: Sequence[Mapping[str, Any]],
+    tasks: Sequence[Mapping[str, Any]],
+    reads_by_task: Mapping[str, Mapping[str, Any]],
+    effects_by_task: Mapping[str, Mapping[str, Any]],
+    contexts: Mapping[str, Mapping[str, Any]],
+    reads: Mapping[str, tuple[str, Mapping[str, Any]]],
+) -> None:
+    choices = candidate_choices(candidates)
+    choice_owners: dict[str, tuple[str, int]] = {}
+    for task in tasks:
+        if task["status"] != "clear":
+            continue
+        task_id = task["task_id"]
+        context = contexts[task_id]
+        observed_reads = set(reads_by_task[task_id]["read_ids"])
+        for effect_index, effect in enumerate(
+            effects_by_task[task_id]["effects"]
+        ):
+            effect_name = f"Effect {effect_index + 1} in Task {task_id}"
             if not set(effect["read_ids"]).issubset(observed_reads):
                 raise AuditError(
-                    f"Effect in task[{task_id}] references reads outside its observed reads."
-                )
-            if effect["outcome_anchor"] not in set(
-                episode["outcome_anchor_message_ids"]
-            ):
-                raise AuditError(
-                    f"Effect in task[{task_id}] must bind outcome_anchor to one "
-                    "of the episode outcome anchors."
+                    f"{effect_name} references Reads outside its attributed Reads."
                 )
             read_times = [
                 parse_datetime(
@@ -6050,55 +6246,65 @@ def validate_task_refs(
                 )
                 for read_id in effect["read_ids"]
             ]
-            outcome_anchor_time = parse_datetime(
-                episode_messages[effect["outcome_anchor"]]["created_at"],
-                field=(
-                    f"task {task_id} effect outcome anchor "
-                    f"{effect['outcome_anchor']}"
-                ),
-            )
             choice_times: list[datetime] = []
             for message_id in effect["choice_message_ids"]:
-                if message_id not in source_message_ids:
+                if message_id not in context["source_message_ids"]:
                     raise AuditError(
-                        f"Effect in task[{task_id}] choice {message_id} is outside "
-                        "its source fragments."
+                        f"{effect_name} choice {message_id} is outside its "
+                        "Task source fragments."
                     )
                 item = choices.get(message_id)
                 if item is None:
                     raise AuditError(
-                        f"Effect in task[{task_id}] references unknown choice {message_id}."
+                        f"{effect_name} references unknown same-Agent choice "
+                        f"{message_id}."
                     )
                 current_audit_id, choice = item
-                if current_audit_id not in source_audits:
+                if current_audit_id not in context["source_audits"]:
                     raise AuditError(
-                        f"task[{task_id}] choice {message_id} is outside its source Chat fragments."
+                        f"{effect_name} choice {message_id} is outside its "
+                        "source Chats."
                     )
                 choice_time = timestamp_in_task(
                     choice.get("created_at"),
-                    start=start,
-                    end=end,
+                    start=context["start"],
+                    end=context["end"],
                     field=f"task {task_id} choice {message_id}",
                 )
-                if not evidence_started_at <= choice_time <= episode_ended_at:
-                    raise AuditError(
-                        f"task[{task_id}] choice {message_id} is outside its "
-                        "established episode."
-                    )
                 choice_times.append(choice_time)
-                previous = choice_owners.setdefault(message_id, task_id)
-                if previous != task_id:
+                owner = (task_id, effect_index)
+                previous = choice_owners.setdefault(message_id, owner)
+                if previous != owner:
                     raise AuditError(
-                        f"Choice {message_id} is copied across incompatible Tasks {previous} and {task_id}."
+                        f"Choice {message_id} is reused across independent Effects."
                     )
-            if max(read_times) > min(choice_times):
+            outcome_message_id = effect["outcome_message_id"]
+            outcome_message = context["source_messages"].get(outcome_message_id)
+            if (
+                outcome_message is None
+                or outcome_message.get("sender_id")
+                != context["source_agent_id"]
+                or not isinstance(outcome_message.get("content"), str)
+                or not outcome_message["content"].strip()
+            ):
                 raise AuditError(
-                    f"Effect in task[{task_id}] cites a read completed after its earliest choice."
+                    f"{effect_name} requires a non-empty current-Agent outcome "
+                    "message inside its Task."
                 )
-            if outcome_anchor_time < max([*read_times, *choice_times]):
+            outcome_time = timestamp_in_task(
+                outcome_message.get("created_at"),
+                start=context["start"],
+                end=context["end"],
+                field=f"task {task_id} Effect outcome {outcome_message_id}",
+            )
+            if max(read_times) >= min(choice_times):
                 raise AuditError(
-                    f"Effect in task[{task_id}] binds an outcome anchor that "
-                    "precedes a cited Read completion or choice."
+                    f"{effect_name} requires every Read to complete before its "
+                    "earliest choice."
+                )
+            if outcome_time < max([*read_times, *choice_times]):
+                raise AuditError(
+                    f"{effect_name} outcome precedes a cited Read completion or choice."
                 )
 
 
@@ -6117,7 +6323,7 @@ def independent_effect_id(effect: Mapping[str, Any]) -> str:
         "effect": effect["type"],
         "read_ids": sorted(effect["read_ids"]),
         "choice_message_ids": sorted(effect["choice_message_ids"]),
-        "outcome_anchor": effect["outcome_anchor"],
+        "outcome_message_id": effect["outcome_message_id"],
     }
     digest = hashlib.sha256(
         json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -6125,21 +6331,27 @@ def independent_effect_id(effect: Mapping[str, Any]) -> str:
     return f"effect-{digest}"
 
 
-def build_task_evidence(tasks: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def build_task_evidence(
+    tasks: Sequence[Mapping[str, Any]],
+    *,
+    inventory_sha256: str,
+    reads_by_task: Mapping[str, Mapping[str, Any]],
+    effects_by_task: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
-    for task in sorted(
-        tasks,
-        key=lambda item: (
-            item["status"] != "clear",
-            item["started_at"],
-            item["task_id"],
-        ),
-    ):
-        row = dict(task)
-        if task["status"] == "clear" and task["effect"] is not None:
-            projected = dict(task["effect"])
-            projected["effect_id"] = independent_effect_id(task["effect"])
-            row["effect"] = projected
+    for task in sorted_task_inventory(tasks):
+        row = {**task, "inventory_sha256": inventory_sha256}
+        if task["status"] == "clear":
+            task_id = task["task_id"]
+            row["read"] = dict(reads_by_task[task_id])
+            row["effects"] = [
+                {
+                    **effect,
+                    "effect_id": independent_effect_id(effect),
+                }
+                for effect in effects_by_task[task_id]["effects"]
+            ]
+            row["effect_reason"] = effects_by_task[task_id]["effect_reason"]
         evidence.append(row)
     return evidence
 
@@ -6168,13 +6380,18 @@ def render_report(
     unresolved_read_tasks = [
         task for task in clear_tasks if task["read"]["status"] == "unresolved"
     ]
-    effect_tasks = [task for task in clear_tasks if task["effect"] is not None]
+    effect_tasks = [task for task in clear_tasks if task["effects"]]
     observed_without_effect_tasks = [
         task
         for task in observed_read_tasks
-        if task["effect"] is None
+        if not task["effects"]
     ]
-    effect_counts = Counter(task["effect"]["type"] for task in effect_tasks)
+    effects = [
+        effect
+        for task in clear_tasks
+        for effect in task["effects"]
+    ]
+    effect_counts = Counter(effect["type"] for effect in effects)
     exclusion_counts = Counter(
         task["exclusion_kind"] for task in excluded_tasks
     )
@@ -6189,8 +6406,10 @@ def render_report(
         raise AuditError(
             "Effect and no-Effect counts do not conserve observed Read Tasks."
         )
-    if sum(effect_counts.values()) != len(effect_tasks):
-        raise AuditError("Effect distribution does not conserve Effect Tasks.")
+    if len(effects) < len(effect_tasks):
+        raise AuditError("Effect count cannot be less than Effect Task count.")
+    if sum(effect_counts.values()) != len(effects):
+        raise AuditError("Effect distribution does not conserve Effects.")
 
     mapped_audits = sum(1 for row in candidates if row["mapped_trace_files"])
     chat_message_counts: dict[str, int] = {}
@@ -6250,6 +6469,7 @@ def render_report(
         table_row(["Read observed Tasks", len(observed_read_tasks)]),
         table_row(["Read unresolved Tasks", len(unresolved_read_tasks)]),
         table_row(["Effect Tasks", len(effect_tasks)]),
+        table_row(["Effects", len(effects)]),
         table_row(
             [
                 "Observed Read without Effect",
@@ -6265,7 +6485,7 @@ def render_report(
         "",
         "## Effect Distribution",
         "",
-        table_row(["Effect", "Tasks"]),
+        table_row(["Effect", "Effects"]),
         table_row(["---", "---:"]),
     ]
     for effect_type in ("confirmed", "constrained", "redirected", "conflicted"):
@@ -6297,7 +6517,6 @@ def render_report(
             table_row(
                 [
                     "Task ID",
-                    "Ownership",
                     "Objective",
                     "Object scope",
                     "Primary deliverable",
@@ -6317,7 +6536,6 @@ def render_report(
                     "---",
                     "---",
                     "---",
-                    "---",
                 ]
             ),
         ]
@@ -6325,71 +6543,116 @@ def render_report(
     for task in sorted(
         clear_tasks, key=lambda item: (item["started_at"], item["task_id"])
     ):
-        effect = task["effect"]
+        task_effects = task["effects"]
         effect_label = (
-            effect["type"]
-            if effect is not None
+            ", ".join(effect["type"] for effect in task_effects)
+            if task_effects
             else "not judged"
             if task["read"]["status"] == "unresolved"
             else "none"
+        )
+        evidence_summary = (
+            "; ".join(effect["summary"] for effect in task_effects)
+            if task_effects
+            else task["effect_reason"]
         )
         lines.append(
             table_row(
                 [
                     f"`{task['task_id']}`",
-                    f"`{task['episode']['ownership']['kind']}`",
                     report_cell(task["objective"]),
                     report_cell(task["object_scope"]),
-                    report_cell(task["episode"]["primary_deliverable"]),
+                    report_cell(task["primary_deliverable"]),
                     report_cell(task["outcome"]),
                     task["read"]["status"],
                     effect_label,
-                    effect["summary"] if effect is not None else task["effect_reason"],
+                    evidence_summary,
                 ]
             )
         )
     if not clear_tasks:
         lines.append(
-            table_row(["None", "—", "—", "—", "—", "—", "—", "—", "—"])
+            table_row(["None", "—", "—", "—", "—", "—", "—", "—"])
         )
     lines.append("")
 
-    if clear_tasks:
-        lines.extend(["## Clear Task Boundary Rationale", ""])
-        for index, task in enumerate(
-            sorted(
-                clear_tasks,
-                key=lambda item: (item["started_at"], item["task_id"]),
-            ),
-            start=1,
-        ):
-            episode = task["episode"]
-            ownership = episode["ownership"]
+    if tasks:
+        inventory_sha256 = tasks[0]["inventory_sha256"]
+        lines.extend(
+            [
+                "## Frozen Task Inventory",
+                "",
+                f"Inventory digest: `sha256:{inventory_sha256}`.",
+                "",
+            ]
+        )
+        if clear_tasks:
+            for index, task in enumerate(
+                sorted(
+                    clear_tasks,
+                    key=lambda item: (item["started_at"], item["task_id"]),
+                ),
+                start=1,
+            ):
+                lines.extend(
+                    [
+                        f"### {index}. `{task['task_id']}`",
+                        "",
+                        "- Objective sources: "
+                        + ", ".join(
+                            f"`{message_id}`"
+                            for message_id in task[
+                                "objective_source_message_ids"
+                            ]
+                        ),
+                        "- Outcome sources: "
+                        + ", ".join(
+                            f"`{message_id}`"
+                            for message_id in task[
+                                "outcome_source_message_ids"
+                            ]
+                        ),
+                        "",
+                    ]
+                )
+        else:
             lines.extend(
                 [
-                    f"### {index}. `{task['task_id']}`",
-                    "",
-                    f"- Ownership: `{ownership['kind']}` — "
-                    f"{report_cell(ownership['reason'])}",
-                    "- Ownership anchors: "
-                    + ", ".join(
-                        f"`{message_id}`"
-                        for message_id in ownership["anchor_message_ids"]
-                    ),
-                    "- Objective anchors: "
-                    + ", ".join(
-                        f"`{message_id}`"
-                        for message_id in episode["objective_anchor_message_ids"]
-                    ),
-                    "- Outcome anchors: "
-                    + ", ".join(
-                        f"`{message_id}`"
-                        for message_id in episode["outcome_anchor_message_ids"]
-                    ),
-                    f"- Boundary: {report_cell(episode['boundary_reason'])}",
+                    "No clear Tasks were reconstructed; the digest still binds "
+                    "the excluded-candidate inventory.",
                     "",
                 ]
             )
+
+    if effects:
+        lines.extend(["## Effect Details", ""])
+        effect_number = 0
+        for task in sorted(
+            clear_tasks,
+            key=lambda item: (item["started_at"], item["task_id"]),
+        ):
+            for effect in task["effects"]:
+                effect_number += 1
+                lines.extend(
+                    [
+                        f"### {effect_number}. `{effect['effect_id']}`",
+                        "",
+                        f"- Task: `{task['task_id']}`",
+                        f"- Type: `{effect['type']}`",
+                        "- Reads: "
+                        + ", ".join(
+                            f"`{read_id}`" for read_id in effect["read_ids"]
+                        ),
+                        "- Choices: "
+                        + ", ".join(
+                            f"`{message_id}`"
+                            for message_id in effect["choice_message_ids"]
+                        ),
+                        f"- Outcome message: `{effect['outcome_message_id']}`",
+                        f"- Summary: {report_cell(effect['summary'])}",
+                        "",
+                    ]
+                )
 
     if excluded_tasks:
         lines.extend(
@@ -6428,8 +6691,9 @@ def render_report(
                 table_row(["---", "---:"]),
                 table_row(["Reviewed clear Tasks", reviewed_baseline["clear_tasks"]]),
                 table_row(["Reviewed effect Tasks", reviewed_baseline["effect_tasks"]]),
+                table_row(["Reviewed Effects", reviewed_baseline["effects"]]),
                 "",
-                table_row(["Effect", "Reviewed Tasks"]),
+                table_row(["Effect", "Reviewed Effects"]),
                 table_row(["---", "---:"]),
             ]
         )
@@ -6463,7 +6727,7 @@ def render_report(
             table_row(["Chats mapped to local runtime evidence", len(mapped_chat_ids)]),
             table_row(["Audit units mapped to local runtime evidence", mapped_audits]),
             table_row(["In-window Tree-read attempts", attempt_total]),
-            table_row(["Task judgments", len(tasks)]),
+            table_row(["Frozen Task inventory rows", len(tasks)]),
             "",
             "### Tree-read grammar conservation",
             "",
@@ -6506,11 +6770,11 @@ def render_report(
             "",
             "## Rule and Boundaries",
             "",
-            "A clear Task is one single-Agent-owned continuous work episode. It requires a concrete objective, material object scope, independently judgeable outcome or terminal state, bounded source fragments, explicit ownership/objective/outcome anchors, and one primary terminal deliverable. Short continuations, status prompts, context-dependent questions, and phases or corrections of one delivery stay inside their parent episode. Excluded candidates carry a structured exclusion kind and no episode, Read, or Effect.",
+            "A clear Task is one continuous work episode in which the audited Agent accepted a concrete objective and produced an independently judgeable outcome. Scope and primary deliverable may clarify the boundary but are not mandatory. Short continuations, status prompts, context-dependent questions, and phases or corrections of one delivery stay inside their parent episode. Task reconstruction is frozen before Read attribution and Effect analysis.",
             "",
             "Read is `observed` only when the recovered Task-window evidence contains attributable Tree content; otherwise it is `unresolved` with a reason.",
             "",
-            "An Effect exists only when a real relevant normal-content read precedes the choice, the later choice or outcome reasonably shows `confirmed`, `constrained`, `redirected`, or `conflicted` influence, and no more direct evidence fully explains the result. Otherwise the Effect is blank with a short reason.",
+            "Each Task may have zero or more Effects. Every Effect exists only when a real relevant normal-content Read precedes one distinct choice, the later same-Agent choice or outcome reasonably shows `confirmed`, `constrained`, `redirected`, or `conflicted` influence, and no more direct evidence fully explains the result. Otherwise the Effect list is empty with a short reason.",
             "",
             "A decision receipt may support this judgment but cannot create an Effect by itself.",
             "",
@@ -6586,6 +6850,149 @@ def validate_read_tree_source(
         "branch": branch,
         "commit": commit,
         "node_path": node_path,
+    }
+
+
+def validate_task_source_candidate(
+    value: Mapping[str, Any],
+    workspace_identity: WorkspaceIdentity,
+) -> dict[str, Any]:
+    """Validate only authority and work messages needed for Stage 1."""
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise AuditError(
+            f"Every candidate must use schema_version {SCHEMA_VERSION}."
+        )
+    chat = value.get("chat")
+    window = value.get("window")
+    visible_messages = value.get("visible_messages")
+    if (
+        not isinstance(chat, dict)
+        or not isinstance(window, dict)
+        or not isinstance(visible_messages, list)
+    ):
+        raise AuditError(
+            "Every Task-source candidate requires chat, window, and visible_messages."
+        )
+    chat_id = require_uuid(chat.get("chat_id"), "candidate.chat.chat_id")
+    source_agent_id = require_uuid(
+        chat.get("source_agent_id"),
+        f"candidate[{chat_id}].chat.source_agent_id",
+    )
+    source_agent = require_string(
+        chat.get("source_agent"),
+        f"candidate[{chat_id}].chat.source_agent",
+    )
+    if (
+        source_agent_id != workspace_identity.agent_id
+        or source_agent != workspace_identity.agent_name
+    ):
+        raise AuditError(
+            f"Candidate {chat_id} does not match the authorized Agent workspace identity."
+        )
+    expected_audit_id = audit_id(chat_id, source_agent_id)
+    if value.get("audit_id") != expected_audit_id:
+        raise AuditError(
+            f"Candidate {chat_id} audit_id does not match its Chat and Agent UUIDs."
+        )
+    authorization = validate_authorization(
+        chat.get("authorization"),
+        f"candidate[{expected_audit_id}].chat.authorization",
+    )
+    if "authorization_context" in chat:
+        raise AuditError(
+            f"Candidate {expected_audit_id} must not contain authorization_context."
+        )
+    message_count = chat.get("message_count")
+    if not isinstance(message_count, int) or isinstance(message_count, bool):
+        raise AuditError(
+            f"Candidate {expected_audit_id} must contain integer message_count."
+        )
+    start_value = window.get("start")
+    parsed_window_start = None
+    if start_value is not None:
+        parsed_window_start = parse_datetime(
+            require_string(
+                start_value,
+                f"candidate[{expected_audit_id}].window.start",
+            ),
+            field=f"candidate {expected_audit_id} window start",
+        )
+    end_value = require_string(
+        window.get("end"),
+        f"candidate[{expected_audit_id}].window.end",
+    )
+    parsed_window_end = parse_datetime(
+        end_value,
+        field=f"candidate {expected_audit_id} window end",
+    )
+    if (
+        parsed_window_start is not None
+        and parsed_window_start > parsed_window_end
+    ):
+        raise AuditError(
+            f"Candidate {expected_audit_id} window starts after it ends."
+        )
+    if message_count != len(visible_messages):
+        raise AuditError(
+            f"Candidate {expected_audit_id} message_count does not match visible_messages."
+        )
+    seen_message_ids: set[str] = set()
+    projected_messages: list[dict[str, Any]] = []
+    for message in visible_messages:
+        if (
+            not isinstance(message, dict)
+            or not isinstance(message.get("message_id"), str)
+            or not isinstance(message.get("created_at"), str)
+            or not isinstance(message.get("sender_id"), str)
+            or not isinstance(message.get("content"), str)
+        ):
+            raise AuditError(
+                f"Candidate {expected_audit_id} contains an invalid visible message."
+            )
+        message_id = message["message_id"]
+        if message_id in seen_message_ids:
+            raise AuditError(
+                f"Candidate {expected_audit_id} contains duplicate visible message "
+                f"{message_id}."
+            )
+        seen_message_ids.add(message_id)
+        message_time = parse_datetime(
+            message["created_at"],
+            field=f"candidate {expected_audit_id} message {message_id}",
+        )
+        if (
+            parsed_window_start is not None
+            and message_time < parsed_window_start
+        ) or message_time > parsed_window_end:
+            raise AuditError(
+                f"Candidate {expected_audit_id} message {message_id} is outside "
+                "its acquisition window."
+            )
+        projected_messages.append(
+            {
+                field: message.get(field)
+                for field in (
+                    "message_id",
+                    "created_at",
+                    "sender_id",
+                    "sender_kind",
+                    "content",
+                )
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "audit_id": expected_audit_id,
+        "chat": {
+            "chat_id": chat_id,
+            "authorization": authorization,
+            "source_agent_id": source_agent_id,
+        },
+        "window": {
+            "start": start_value,
+            "end": end_value,
+        },
+        "visible_messages": projected_messages,
     }
 
 
@@ -6867,16 +7274,268 @@ def validate_report_candidate(
     return dict(value)
 
 
+def build_task_source(
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "schema_version": SCHEMA_VERSION,
+            "audit_id": candidate["audit_id"],
+            "chat": {
+                "chat_id": candidate["chat"]["chat_id"],
+                "authorization": candidate["chat"]["authorization"],
+                "source_agent_id": candidate["chat"]["source_agent_id"],
+            },
+            "window": dict(candidate["window"]),
+            "visible_messages": [
+                {
+                    field: message.get(field)
+                    for field in (
+                        "message_id",
+                        "created_at",
+                        "sender_id",
+                        "sender_kind",
+                        "content",
+                    )
+                }
+                for message in candidate["visible_messages"]
+            ],
+        }
+        for candidate in sorted(
+            candidates,
+            key=lambda item: item["audit_id"],
+        )
+    ]
+
+
+def validate_task_source(
+    value: Mapping[str, Any],
+    workspace_identity: WorkspaceIdentity,
+) -> dict[str, Any]:
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise AuditError(
+            f"Every Task source must use schema_version {SCHEMA_VERSION}."
+        )
+    require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "audit_id",
+            "chat",
+            "window",
+            "visible_messages",
+        },
+        field="task_source",
+    )
+    chat = value.get("chat")
+    window = value.get("window")
+    visible_messages = value.get("visible_messages")
+    if (
+        not isinstance(chat, dict)
+        or not isinstance(window, dict)
+        or not isinstance(visible_messages, list)
+    ):
+        raise AuditError(
+            "Every Task source requires chat, window, and visible_messages."
+        )
+    require_exact_keys(
+        chat,
+        {"chat_id", "authorization", "source_agent_id"},
+        field="task_source.chat",
+    )
+    require_exact_keys(
+        window,
+        {"start", "end"},
+        field="task_source.window",
+    )
+    chat_id = require_uuid(chat.get("chat_id"), "task_source.chat.chat_id")
+    source_agent_id = require_uuid(
+        chat.get("source_agent_id"),
+        f"task_source[{chat_id}].chat.source_agent_id",
+    )
+    if source_agent_id != workspace_identity.agent_id:
+        raise AuditError(
+            f"Task source {chat_id} does not match the authorized Agent."
+        )
+    expected_audit_id = audit_id(chat_id, source_agent_id)
+    if value.get("audit_id") != expected_audit_id:
+        raise AuditError(
+            f"Task source {chat_id} audit_id does not match its Chat and Agent."
+        )
+    authorization = validate_authorization(
+        chat.get("authorization"),
+        f"task_source[{expected_audit_id}].chat.authorization",
+    )
+    start_value = window.get("start")
+    if start_value is not None:
+        parse_datetime(
+            require_string(
+                start_value,
+                f"task_source[{expected_audit_id}].window.start",
+            ),
+            field=f"task source {expected_audit_id} window start",
+        )
+    parse_datetime(
+        require_string(
+            window.get("end"),
+            f"task_source[{expected_audit_id}].window.end",
+        ),
+        field=f"task source {expected_audit_id} window end",
+    )
+    seen_message_ids: set[str] = set()
+    projected_messages: list[dict[str, Any]] = []
+    for message in visible_messages:
+        if (
+            not isinstance(message, dict)
+            or not isinstance(message.get("message_id"), str)
+            or not isinstance(message.get("created_at"), str)
+            or not isinstance(message.get("sender_id"), str)
+            or not isinstance(message.get("content"), str)
+        ):
+            raise AuditError(
+                f"Task source {expected_audit_id} contains an invalid visible message."
+            )
+        require_exact_keys(
+            message,
+            {
+                "message_id",
+                "created_at",
+                "sender_id",
+                "sender_kind",
+                "content",
+            },
+            field=f"task_source[{expected_audit_id}].visible_message",
+        )
+        message_id = message["message_id"]
+        if message_id in seen_message_ids:
+            raise AuditError(
+                f"Task source {expected_audit_id} contains duplicate message "
+                f"{message_id}."
+            )
+        seen_message_ids.add(message_id)
+        parse_datetime(
+            message["created_at"],
+            field=f"task source {expected_audit_id} message {message_id}",
+        )
+        projected_messages.append(
+            {
+                field: message.get(field)
+                for field in (
+                    "message_id",
+                    "created_at",
+                    "sender_id",
+                    "sender_kind",
+                    "content",
+                )
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "audit_id": expected_audit_id,
+        "chat": {
+            "chat_id": chat_id,
+            "authorization": authorization,
+            "source_agent_id": source_agent_id,
+        },
+        "window": {
+            "start": start_value,
+            "end": window["end"],
+        },
+        "visible_messages": projected_messages,
+    }
+
+
+def project_task_source(args: argparse.Namespace) -> None:
+    workspace_identity = parse_agent_workspace(args.agent_workspace)
+    artifact_root = resolve_artifact_root(args.artifact_root, workspace_identity)
+    candidates_path = artifact_path(
+        artifact_root, args.candidates, field="--candidates", must_exist=True
+    )
+    output_path = artifact_path(
+        artifact_root, args.output, field="--output", must_exist=False
+    )
+    require_distinct_paths(
+        {
+            "--candidates": candidates_path,
+            "--output": output_path,
+        }
+    )
+    candidates = [
+        validate_task_source_candidate(candidate, workspace_identity)
+        for candidate in iter_jsonl(candidates_path)
+    ]
+    if not candidates:
+        raise AuditError("No candidate records were provided.")
+    if len({candidate["audit_id"] for candidate in candidates}) != len(candidates):
+        raise AuditError("Candidate evidence contains duplicate Chat-Agent audit rows.")
+    write_jsonl(output_path, build_task_source(candidates))
+
+
+def freeze_task_inventory(args: argparse.Namespace) -> None:
+    workspace_identity = parse_agent_workspace(args.agent_workspace)
+    artifact_root = resolve_artifact_root(args.artifact_root, workspace_identity)
+    task_source_path = artifact_path(
+        artifact_root,
+        args.task_source,
+        field="--task-source",
+        must_exist=True,
+    )
+    draft_path = artifact_path(
+        artifact_root,
+        args.task_inventory_draft,
+        field="--task-inventory-draft",
+        must_exist=True,
+    )
+    output_path = artifact_path(
+        artifact_root,
+        args.task_inventory_output,
+        field="--task-inventory-output",
+        must_exist=False,
+    )
+    require_distinct_paths(
+        {
+            "--task-source": task_source_path,
+            "--task-inventory-draft": draft_path,
+            "--task-inventory-output": output_path,
+        }
+    )
+    task_sources = [
+        validate_task_source(row, workspace_identity)
+        for row in iter_jsonl(task_source_path)
+    ]
+    if not task_sources:
+        raise AuditError("No Task source records were provided.")
+    if len({row["audit_id"] for row in task_sources}) != len(task_sources):
+        raise AuditError("Task source contains duplicate Chat-Agent audit rows.")
+    tasks, _ = load_task_inventory(draft_path, require_frozen=False)
+    validate_task_inventory_refs(task_sources, tasks)
+    digest = task_inventory_digest(tasks)
+    write_jsonl(output_path, frozen_task_inventory(tasks, digest))
+    print(f"task_inventory_sha256={digest}")
+
+
 def finalize_report(args: argparse.Namespace) -> None:
     workspace_identity = parse_agent_workspace(args.agent_workspace)
     artifact_root = resolve_artifact_root(args.artifact_root, workspace_identity)
     candidates_path = artifact_path(
         artifact_root, args.candidates, field="--candidates", must_exist=True
     )
-    task_judgments_path = artifact_path(
+    task_inventory_path = artifact_path(
         artifact_root,
-        args.task_judgments,
-        field="--task-judgments",
+        args.task_inventory,
+        field="--task-inventory",
+        must_exist=True,
+    )
+    read_attributions_path = artifact_path(
+        artifact_root,
+        args.read_attributions,
+        field="--read-attributions",
+        must_exist=True,
+    )
+    effect_judgments_path = artifact_path(
+        artifact_root,
+        args.effect_judgments,
+        field="--effect-judgments",
         must_exist=True,
     )
     evidence_path = artifact_path(
@@ -6897,7 +7556,9 @@ def finalize_report(args: argparse.Namespace) -> None:
     )
     paths = {
         "--candidates": candidates_path,
-        "--task-judgments": task_judgments_path,
+        "--task-inventory": task_inventory_path,
+        "--read-attributions": read_attributions_path,
+        "--effect-judgments": effect_judgments_path,
         "--evidence-output": evidence_path,
         "--report-output": report_path,
     }
@@ -6912,11 +7573,43 @@ def finalize_report(args: argparse.Namespace) -> None:
         raise AuditError("No candidate records were provided.")
     if len({candidate["audit_id"] for candidate in candidates}) != len(candidates):
         raise AuditError("Candidate evidence contains duplicate Chat-Agent audit rows.")
-    tasks = load_task_judgments(task_judgments_path)
-    if not tasks:
-        raise AuditError("No Task judgments were provided.")
-    validate_task_refs(candidates, tasks)
-    evidence = build_task_evidence(tasks)
+    tasks, inventory_sha256 = load_task_inventory(
+        task_inventory_path,
+        require_frozen=True,
+    )
+    assert inventory_sha256 is not None
+    contexts = validate_task_inventory_refs(candidates, tasks)
+    reads_by_task = load_read_attributions(
+        read_attributions_path,
+        tasks=tasks,
+        inventory_sha256=inventory_sha256,
+    )
+    reads = validate_read_refs(
+        candidates,
+        tasks,
+        reads_by_task,
+        contexts,
+    )
+    effects_by_task = load_effect_judgments(
+        effect_judgments_path,
+        tasks=tasks,
+        reads_by_task=reads_by_task,
+        inventory_sha256=inventory_sha256,
+    )
+    validate_effect_refs(
+        candidates,
+        tasks,
+        reads_by_task,
+        effects_by_task,
+        contexts,
+        reads,
+    )
+    evidence = build_task_evidence(
+        tasks,
+        inventory_sha256=inventory_sha256,
+        reads_by_task=reads_by_task,
+        effects_by_task=effects_by_task,
+    )
     reviewed_baseline = (
         load_reviewed_baseline(reviewed_baseline_path)
         if reviewed_baseline_path is not None
@@ -6935,7 +7628,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Read-only Context Tree Value Audit collector with deterministic "
-            "Task-first judgment validation and reporting."
+            "Task freeze, Read attribution, Effect validation, and reporting."
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -7019,9 +7712,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     collect_parser.set_defaults(handler=collect_evidence)
 
+    task_source_parser = subparsers.add_parser(
+        "task-source",
+        help="Project message-only evidence for pure Task reconstruction.",
+    )
+    task_source_parser.add_argument(
+        "--artifact-root",
+        required=True,
+        help="Exact triggering-agent artifact directory.",
+    )
+    task_source_parser.add_argument(
+        "--agent-workspace",
+        required=True,
+        help="Exact AGENT_UUID=/absolute/workspace identity.",
+    )
+    task_source_parser.add_argument(
+        "--candidates",
+        required=True,
+        help="Candidate JSONL from collect.",
+    )
+    task_source_parser.add_argument(
+        "--output",
+        required=True,
+        help="Destination message-only Task source JSONL.",
+    )
+    task_source_parser.set_defaults(handler=project_task_source)
+
+    freeze_parser = subparsers.add_parser(
+        "freeze-tasks",
+        help="Validate and freeze a pure Task inventory before Read analysis.",
+    )
+    freeze_parser.add_argument(
+        "--artifact-root",
+        required=True,
+        help="Exact triggering-agent artifact directory.",
+    )
+    freeze_parser.add_argument(
+        "--agent-workspace",
+        required=True,
+        help="Exact AGENT_UUID=/absolute/workspace identity.",
+    )
+    freeze_parser.add_argument(
+        "--task-source",
+        required=True,
+        help="Message-only Task source JSONL.",
+    )
+    freeze_parser.add_argument(
+        "--task-inventory-draft",
+        required=True,
+        help="Pure Task inventory draft JSONL.",
+    )
+    freeze_parser.add_argument(
+        "--task-inventory-output",
+        required=True,
+        help="Destination frozen Task inventory JSONL.",
+    )
+    freeze_parser.set_defaults(handler=freeze_task_inventory)
+
     report_parser = subparsers.add_parser(
         "report",
-        help="Validate Task judgments and render final evidence/report artifacts.",
+        help="Validate frozen Task, Read, and Effect artifacts and render the report.",
     )
     report_parser.add_argument(
         "--artifact-root",
@@ -7035,9 +7785,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report_parser.add_argument("--candidates", required=True, help="Candidate JSONL from collect.")
     report_parser.add_argument(
-        "--task-judgments",
+        "--task-inventory",
         required=True,
-        help="Task-level Agent judgment JSONL.",
+        help="Frozen Task inventory JSONL from freeze-tasks.",
+    )
+    report_parser.add_argument(
+        "--read-attributions",
+        required=True,
+        help="Read attribution JSONL tied to the frozen Task inventory.",
+    )
+    report_parser.add_argument(
+        "--effect-judgments",
+        required=True,
+        help="Effect judgment JSONL tied to the frozen Task inventory.",
     )
     report_parser.add_argument(
         "--reviewed-baseline",

@@ -9,21 +9,22 @@ description: Audit how Context Tree reads affected complete work Tasks when a hu
 
 Run a manual and read-only retrospective that reconstructs single-Agent-owned
 continuous Tasks from authorized Chats, determines whether a Tree Read is
-observed or unresolved, and reports whether the Read reasonably confirmed,
-constrained, redirected, or conflicted with the later choice.
+observed or unresolved, and reports zero or more independent Effects where a
+Read reasonably confirmed, constrained, redirected, or conflicted with later
+choices.
 
-Keep three responsibilities separate:
+Keep three analysis stages strictly ordered:
 
-- `Chat UUID @ Agent UUID` controls authorization, trace mapping, and evidence
-  sourcing;
-- Task reconstruction defines the judgment and counting unit;
-- the bundled script performs deterministic collection, reference validation,
-  deduplication, conservation checks, and reporting.
+- reconstruct Task from message-only work evidence;
+- freeze the Task inventory before any Read is visible to the analyst;
+- attribute Reads, then analyze zero or more Effects without changing Task
+  boundaries.
 
-The collector establishes what records exist. The Agent reconstructs
-single-Agent-owned continuous work episodes and performs passage-to-choice
-judgment. A Read or decision receipt is evidence, not server-verified
-causality.
+`Chat UUID @ Agent UUID` remains the authorization and evidence-source unit.
+Task is the work unit. Effect is the independently counted value unit. The
+bundled script performs deterministic projection, freezing, reference
+validation, deduplication, conservation checks, and reporting. A Read or
+decision receipt is evidence, not server-verified causality.
 
 ## Gate the run
 
@@ -159,19 +160,45 @@ For message metadata:
 - omit malformed receipts and add `context_decision_invalid`;
 - never fail Chat export because analysis metadata is malformed.
 
-## Reconstruct and judge Tasks
+## Reconstruct Tasks, then attribute Reads, then judge Effects
 
 Read
-[references/task-analysis-schema.md](references/task-analysis-schema.md), then
-write exactly one `task-judgments.jsonl` row for every reconstructed Task.
+[references/task-analysis-schema.md](references/task-analysis-schema.md).
+
+First project a message-only source. This output deliberately excludes
+collector-derived Reads, passages, Tree-mention indexes, decision receipts,
+choice projections, and Effect judgments. It retains original work-message
+content verbatim, including literal Tree, Read, or Effect discussion when that
+discussion is part of the objective:
+
+```bash
+python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" task-source \
+  --artifact-root "$CTVA_ARTIFACT_DIR" \
+  --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
+  --candidates "$CTVA_ARTIFACT_DIR/candidates.jsonl" \
+  --output "$CTVA_ARTIFACT_DIR/task-source.jsonl"
+```
+
+During Task reconstruction, read only `task-source.jsonl`. Do not inspect
+`candidates.jsonl`, trace evidence, Reads, receipts, choices, or any anticipated
+Effect. Write one schema-v4 `task-inventory-draft.jsonl` row for every clear
+Task or excluded candidate, then freeze it:
+
+```bash
+python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" freeze-tasks \
+  --artifact-root "$CTVA_ARTIFACT_DIR" \
+  --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
+  --task-source "$CTVA_ARTIFACT_DIR/task-source.jsonl" \
+  --task-inventory-draft "$CTVA_ARTIFACT_DIR/task-inventory-draft.jsonl" \
+  --task-inventory-output "$CTVA_ARTIFACT_DIR/task-inventory.jsonl"
+```
 
 A clear Task is one independently judgeable continuous work episode owned by
-the audited Agent. It needs a concrete objective, material object scope,
-independently judgeable outcome or terminal state, bounded source fragments
-from objective through outcome, explicit ownership/objective/outcome anchors,
-and one primary terminal deliverable. Otherwise mark the candidate excluded
-with a structured exclusion kind. Excluded candidates carry no episode, Read,
-or Effect judgment.
+the audited Agent. It needs a concrete objective, independently judgeable
+outcome, bounded source fragments, and explicit objective/outcome sources.
+Material scope and primary deliverable help clarify boundaries but are
+optional. Otherwise mark the candidate excluded with a structured exclusion
+kind.
 
 Short continuations, status prompts, context-dependent questions, merge
 approval, repeated review/fix requests, and ordinary phase transitions are not
@@ -180,15 +207,21 @@ plus corrections to the same deliverable, into one episode. Split only when
 there is a new objective, material scope or deliverable change, independent
 outcome, and unambiguous source boundary.
 
-For a single-Agent audit, another Agent's work is context until this Agent is
-visibly assigned, transferred, or accepts an objective. A later independent
-review, takeover, verification gate, or orchestration objective may form a new
-owned episode only when it passes every clear-Task gate.
+For a single-Agent audit, another Agent's work is context until this Agent
+receives or visibly accepts an objective. A later independent review, takeover,
+verification gate, or orchestration objective may form a new episode only when
+it passes every clear-Task gate.
+Judge that acceptance from the work messages themselves. The reporter checks
+source identity, ordering, and a same-Agent outcome, but does not infer who
+arbitrary prose addresses.
 
 One Chat may contain multiple Tasks. Merge across Chats only for one PR/MR/
 Issue, a visible handoff, or the same objective and primary delivery, and
-record the explicit shared linkage. Do not copy one read or choice into
-different Tasks.
+record the explicit shared linkage.
+
+After freeze, do not edit Task rows or boundaries. Write exactly one
+schema-v4 `read-attributions.jsonl` row for every clear Task. Each row carries
+the frozen `inventory_sha256`.
 
 Read is only:
 
@@ -199,8 +232,10 @@ Read is only:
 Do not invent `not_observed`. Missing telemetry and receipt absence are
 unknown, not proof of non-use.
 
-Effect is optional and has exactly one type: `confirmed`, `constrained`,
-`redirected`, or `conflicted`. Record it only when all four conditions hold:
+Then write exactly one schema-v4 `effect-judgments.jsonl` row for every clear
+Task, carrying the same inventory digest. Each Task has zero or more Effects;
+each Effect has exactly one type: `confirmed`, `constrained`, `redirected`, or
+`conflicted`. Record one only when all four conditions hold:
 
 1. a real Read contains a relevant normal Tree decision or constraint;
 2. the Read completes before the cited choice;
@@ -209,11 +244,13 @@ Effect is optional and has exactly one type: `confirmed`, `constrained`,
 4. no more direct user instruction or other evidence fully explains the
    result.
 
-Every Effect needs Task-window Read IDs, later same-Agent choice message IDs,
-an outcome anchor, and a concise summary. If the evidence is insufficient, set
-Effect to null and record one short reason. Do not add confidence tiers,
-support levels, numeric weights, `verified`, or `probable`. A decision receipt
-may support the judgment but cannot create an Effect by itself.
+Every Effect needs attributed Read IDs, later same-Agent choice message IDs,
+a same-Agent outcome message, and a concise summary. The same Read may support
+multiple distinct choices, but one choice cannot be reused across Effects. If
+the evidence is insufficient, use an empty Effect list and record one short
+reason. Do not add confidence tiers, support levels, numeric weights,
+`verified`, or `probable`. A decision receipt may support the judgment but
+cannot create an Effect by itself.
 
 Report every available Task in the authorized acquisition bound. There is no
 minimum Task quota, task-type coverage gate, batch-expansion rule, or saturation
@@ -227,31 +264,33 @@ python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" report \
   --artifact-root "$CTVA_ARTIFACT_DIR" \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
   --candidates "$CTVA_ARTIFACT_DIR/candidates.jsonl" \
-  --task-judgments "$CTVA_ARTIFACT_DIR/task-judgments.jsonl" \
+  --task-inventory "$CTVA_ARTIFACT_DIR/task-inventory.jsonl" \
+  --read-attributions "$CTVA_ARTIFACT_DIR/read-attributions.jsonl" \
+  --effect-judgments "$CTVA_ARTIFACT_DIR/effect-judgments.jsonl" \
   --evidence-output "$CTVA_ARTIFACT_DIR/evidence.jsonl" \
   --report-output "$CTVA_ARTIFACT_DIR/REPORT.md"
 ```
 
-Optionally supply a v3 `--reviewed-baseline` when an independently reviewed
+Optionally supply a v4 `--reviewed-baseline` when an independently reviewed
 earlier case set exists. The reporter keeps its hash-anchored Task and Effect
 counts separate from the current rerun.
 
-The deterministic reporter rejects Task judgment schemas v1 and v2, weak
-fragment-only
-objectives, missing or invalid episode ownership and anchors, reused episode
-identity anchors, Reads or choices outside the established episode,
-unauthorized source messages, Task-window violations, unlinked cross-Chat
-merges, duplicated Reads/choices, invalid Effects, unbound outcome anchors,
-v0.2 judgment fields, and non-conserving aggregates.
+The deterministic pipeline rejects old combined judgment schemas, Task drafts
+that contain Read/Effect fields, weak fragment-only objectives, missing or
+invalid objective/outcome sources, reused identity sources, changed inventory
+digests, Reads or choices outside the frozen Task, unauthorized source
+messages, Task-window violations, unlinked cross-Chat merges, duplicated Reads
+across Tasks, reused choices across Effects, invalid Effects, invalid outcome
+messages, superseded judgment fields, and non-conserving aggregates.
 
 The report must include:
 
-- a complete inventory of clear Tasks with boundary rationale and excluded
-  candidates with structured exclusion reasons;
+- a complete frozen inventory of clear Tasks and excluded candidates with
+  structured exclusion reasons;
 - observed and unresolved Read Tasks;
-- Effect Tasks and observed Reads without an Effect;
-- the four-effect distribution;
-- every clear Task's Read and Effect result;
+- Effect Tasks, total Effects, and observed Reads without an Effect;
+- the four-Effect distribution over total Effects;
+- every clear Task's Read and zero-or-more Effect results;
 - every excluded Task's reason;
 - authorized Chat, message, trace, and coverage-gap counts;
 - the four-class in-window Tree-read attempt conservation table;

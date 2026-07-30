@@ -12,3 +12,8 @@ __pycache__/
 /candidates.jsonl
 /chats.jsonl
 /judgments.jsonl
+/task-source.jsonl
+/task-inventory-draft.jsonl
+/task-inventory.jsonl
+/read-attributions.jsonl
+/effect-judgments.jsonl

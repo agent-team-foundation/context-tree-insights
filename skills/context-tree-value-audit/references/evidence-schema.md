@@ -231,9 +231,15 @@ contaminate the current run's gaps. A call that starts in-window but whose
 result completes after the acquisition end remains one `unresolved_opaque`
 attempt; it does not disappear from the denominator.
 
-`visible_messages` supports Task reconstruction. `visible_choice_candidates`
-contains only later visible messages authored by the audited Agent; human or
-other-Agent messages cannot establish that Agent's effect.
+`visible_messages` is the source for the later message-only `task-source`
+projection. That projection keeps only message identity, time, sender, and
+unchanged content; it removes decision receipts and every collector-derived
+Tree-mention, Read, choice, and Effect projection before Task reconstruction.
+Literal Tree/Read/Effect discussion inside a work message remains part of that
+message and cannot by itself establish that a Read or Effect occurred.
+`visible_choice_candidates` is used only after the Task inventory is frozen and
+contains visible messages authored by the audited Agent; human or other-Agent
+messages cannot establish that Agent's Effect.
 
 `outside_candidate_set` means collection found neither a successful qualifying
 Tree read nor a visible Tree-influence signal. It is not evidence of no

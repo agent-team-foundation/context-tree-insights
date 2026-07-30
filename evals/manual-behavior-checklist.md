@@ -4,7 +4,7 @@ Use this checklist before admitting a `context-tree-value-audit` revision. Run i
 in designated First Tree Agent workspaces against disposable or sanitized
 records. Never commit generated artifacts.
 
-For a 0.4.0 upgrade, confirm the installed payload exposes only
+For a 0.5.0 upgrade, confirm the installed payload exposes only
 `$context-tree-value-audit`; the superseded `$context-tree-insights` directory
 must not remain as a second callable Skill. Exercise the README's minimal
 move/copy/compare flow and confirm the old payload is outside both Skill
@@ -170,7 +170,7 @@ Pass when:
 - malformed receipt is omitted with `context_decision_invalid`;
 - no malformed receipt blocks the message, Chat export, or audit.
 
-## 5. Continuous Task reconstruction
+## 5. Pure Task reconstruction and freeze
 
 Use one Chat containing one objective across planning, implementation, review,
 QA, correction, and final delivery, followed by a genuinely independent
@@ -184,29 +184,32 @@ one or more leading Agent mentions; and concrete objectives that contain
 
 Pass when:
 
+- `task-source.jsonl` contains authorized work messages but no
+  collector-derived Reads, passages, Tree-mention indexes, decision receipts,
+  choice projections, or Effect judgments;
+- original work-message content remains byte-for-byte intact even when the
+  work itself discusses Tree, Read, or Effect, and those literal terms are not
+  treated as audit evidence during Task reconstruction;
 - all phases and continuations for the first deliverable remain one Task;
 - it produces two Task rows with separate source messages and windows;
-- clear Tasks have audited-Agent ownership, objective, material object scope,
-  independent outcome, bounded source fragments, one primary deliverable, and
-  explicit ownership/objective/outcome anchors;
+- clear Tasks have a concrete objective, independent same-Agent outcome,
+  bounded source fragments, and explicit objective/outcome sources;
+- material scope and primary deliverable may clarify the boundary but are not
+  required for research, diagnosis, review, or decision Tasks;
 - weak prompt variants and weak normalized objectives are merged or excluded,
   while concrete `continue` objectives remain eligible;
-- a weak assignment cannot borrow another sender's concrete objective, and one
-  Agent message cannot simultaneously serve as objective and terminal outcome;
-- an earlier weak objective anchor cannot admit a Read that precedes the
-  earliest ownership-compatible concrete objective anchor;
-- an earlier ownership anchor from a sender incompatible with the ownership
-  kind cannot admit a Read before compatible ownership is established;
-- every outcome anchor is a non-empty current-Agent message, so a later human
+- one Agent message cannot simultaneously serve as objective and terminal
+  outcome;
+- every outcome source is a non-empty current-Agent message, so a later human
   follow-up cannot extend the episode or become the bound Effect outcome;
-- work owned by another Agent remains context until a visible assignment,
-  transfer, or acceptance;
+- work owned by another Agent remains context until the audited Agent receives
+  or visibly accepts an objective;
 - a candidate missing any clear-Task gate is excluded with the deterministic
   structured exclusion kind;
-- excluded candidates contain no episode, Read, or Effect judgment;
-- Reads and choices outside the established episode are rejected;
-- ownership/objective/outcome anchors copied across Tasks are rejected;
-- one Read or choice copied into both Tasks is rejected.
+- excluded candidates contain no clear-Task sources, Read, or Effect judgment;
+- `freeze-tasks` writes one normalized inventory digest to every row;
+- changing any frozen Task row invalidates the digest;
+- Read/Effect fields in a Task inventory draft are rejected.
 
 ## 6. Cross-Chat handoff merge
 
@@ -228,31 +231,36 @@ Pass when:
 
 - the first is `observed` with valid Read IDs;
 - the second is `unresolved` with a reason;
-- unresolved Read has no Read IDs and a null Effect;
+- unresolved Read has no Read IDs and an empty Effect list;
 - no `not_observed`, `unused`, or negative-value state is emitted;
-- Reads outside the established episode, Task window, or source Chats are
+- Reads outside the frozen Task window or source Chats are
   rejected;
+- one Read cannot be attributed to different Tasks;
 - unresolved Tasks appear in coverage counts, never an unused denominator.
 
-## 8. Optional Effect
+## 8. Zero-or-more Effects
 
 Prepare valid examples of `confirmed`, `constrained`, `redirected`, and
-`conflicted`, plus observed-Read Tasks with no Effect.
+`conflicted`, including one Task with two distinct Effects supported by the
+same Read, plus observed-Read Tasks with no Effect.
 
 Pass when:
 
-- unknown Effects, multiple Effects, confidence tiers, and numeric weights are
-  rejected;
+- unknown Effects, confidence tiers, and numeric weights are rejected;
+- one Task can carry multiple Effects and the report separately counts Effect
+  Tasks and total Effects;
 - every Effect has observed Task Reads, later same-Agent choices, an outcome
-  anchor bound to the episode outcome, and a summary;
-- the bound Effect outcome anchor is not earlier than any cited Read completion
+  message inside the Task, and a summary;
+- the Effect outcome message is not earlier than any cited Read completion
   or choice;
 - post-choice Reads and out-of-window choices are rejected;
-- a null Effect requires one short `effect_reason`;
+- an empty Effect list requires one short `effect_reason`;
 - a decision receipt alone does not create an Effect;
 - superseded task types, sampling fields, `verified` / `probable`, rubrics,
   and support fields are rejected;
-- there is at most one Effect per Task.
+- the same Read may support multiple distinct choices;
+- one choice cannot be reused across Effects;
+- unresolved Reads cannot have Effects.
 
 ## 9. Sample handling
 
@@ -270,13 +278,13 @@ Pass when:
 
 Pass when the report includes:
 
-- a complete clear Task inventory with ownership, objective, scope, primary
-  deliverable, outcome, Read, Effect, and evidence summary;
-- every clear Task's ownership/objective/outcome anchors and boundary rationale;
+- a complete frozen Task inventory with objective, optional scope/deliverable,
+  outcome, source IDs, Read, zero-or-more Effects, and evidence summary;
+- the Task inventory digest and every clear Task's objective/outcome sources;
 - a complete excluded-candidate inventory with exclusion kind, observed scope,
   and reason;
 - observed and unresolved Read Tasks;
-- Effect Tasks and observed Reads without an Effect;
+- Effect Tasks, total Effects, and observed Reads without an Effect;
 - the four-Effect distribution;
 - authorized Chat/message/trace coverage and gaps;
 - the four-class in-window Tree-read attempt conservation table.
@@ -284,8 +292,9 @@ Pass when the report includes:
 Verify:
 
 - observed + unresolved = clear Tasks;
-- Effect + observed Read without Effect = observed Read Tasks;
-- the four Effect counts sum to Effect Tasks;
+- Effect Tasks + observed Read without Effect = observed Read Tasks;
+- the four Effect counts sum to total Effects;
+- total Effects is greater than or equal to Effect Tasks;
 - the report does not output a global effectiveness rate;
 - Read counts, receipts, and unresolved gaps are not represented as causal
   value or non-value.
