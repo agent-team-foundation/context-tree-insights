@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build episode-based Context Tree audits from First Tree Chats and local evidence.
+"""Build task-first Context Tree audits from First Tree Chats and local runtime evidence.
 
 Collection remains deliberately conservative and read-only.  Semantic value is
 judged at Task level after authorized Chat evidence has been collected.
@@ -29,18 +29,11 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
-TASK_SCHEMA_VERSION = 2
+TASK_JUDGMENT_SCHEMA_VERSION = 3
 AUTHORIZATION_VALUES = {"explicit_agent", "explicit_chat"}
 EFFECT_VALUES = {"confirmed", "constrained", "redirected", "conflicted"}
-EXPOSURE_VALUES = {"confirmed", "unresolved"}
+READ_STATUS_VALUES = {"observed", "unresolved"}
 TASK_STATUS_VALUES = {"clear", "excluded"}
-TASK_TYPE_VALUES = {
-    "solution_design",
-    "implementation_delivery",
-    "review_qa_debugging",
-    "research_explanation",
-    "coordination_orchestration",
-}
 TASK_OWNERSHIP_VALUES = {"assigned", "transferred", "accepted"}
 TASK_EXCLUSION_VALUES = {
     "greeting_or_acknowledgement",
@@ -60,8 +53,15 @@ WEAK_TASK_OBJECTIVES = {
     "done",
     "status",
     "why",
+    "proceed",
+    "go ahead",
+    "keep going",
+    "carry on",
+    "try again",
     "what do you mean",
     "继续",
+    "继续做",
+    "接着做",
     "做了吗",
     "你在干啥",
     "进展呢",
@@ -115,29 +115,19 @@ WEAK_TASK_SUFFIX_WRAPPERS = {
     "哈",
 }
 WEAK_TASK_ANCHORED_PATTERNS = (
-    r"(?:continue\s+)?(?:fixing|working\s+on|with)\s+(?:it|this)",
-    r"(?:fix|check|review|try)\s+(?:it|this)\s+again",
-    r"continue\s+(?:it|this)",
+    r"(?:continue\s+)?(?:fixing|working\s+on|with)\s+(?:it|this|that)",
+    r"(?:fix|check|review|try)\s+(?:it|this|that)(?:\s+again)?",
+    r"continue\s+(?:(?:the\s+)?(?:work|task|job)|it|this|that)",
     r"继续(?:修|改|处理|弄)(?:一下|下)?",
-    r"(?:再)?(?:修|改|检查|看)(?:一下|下)?",
+    r"继续(?:这个|它|这项工作|该工作|任务|这个任务)",
+    r"(?:再)?(?:修|修复|改|检查|看|处理|重试)(?:一下|下)?",
+    r"(?:修|修复|改|检查|看|处理)(?:这个|它)(?:一下|下)?",
 )
 LINKAGE_VALUES = {
     "work_item",
     "explicit_handoff",
     "same_objective_delivery",
 }
-SATURATION_SIGNAL_VALUES = {
-    "new_effect_type",
-    "key_counterexample",
-    "conclusion_change",
-}
-RUBRIC_KEYS = (
-    "real_read",
-    "decision_bearing_normal_passage",
-    "task_relevant",
-    "read_before_choice",
-    "influence_visible",
-)
 TRACE_PREFLIGHT_MAX_BYTES = 512 * 1024
 TRACE_PREFLIGHT_MAX_LINES = 512
 RUNTIME_PROVIDER_VALUES = {
@@ -5210,10 +5200,7 @@ def strip_edge_decorations(value: str, *, preserve_at: bool) -> str:
         ):
             result = result[1:].lstrip()
             removed = True
-        if (
-            result
-            and unicodedata.category(result[-1])[0] in {"P", "S"}
-        ):
+        if result and unicodedata.category(result[-1])[0] in {"P", "S"}:
             result = result[:-1].rstrip()
             removed = True
         if not removed:
@@ -5328,10 +5315,6 @@ def validate_task_episode(value: Any, *, task_id: str) -> dict[str, Any]:
         ownership.get("anchor_message_ids"),
         field=f"{field}.ownership.anchor_message_ids",
     )
-    if not ownership_anchor_ids:
-        raise AuditError(
-            f"{field}.ownership.anchor_message_ids must not be empty."
-        )
     objective_anchor_ids = string_id_list(
         value.get("objective_anchor_message_ids"),
         field=f"{field}.objective_anchor_message_ids",
@@ -5344,17 +5327,30 @@ def validate_task_episode(value: Any, *, task_id: str) -> dict[str, Any]:
         value.get("continuation_message_ids", []),
         field=f"{field}.continuation_message_ids",
     )
-    if not objective_anchor_ids or not outcome_anchor_ids:
-        raise AuditError(
-            f"{field} requires objective_anchor_message_ids and "
-            "outcome_anchor_message_ids."
-        )
-    if set(continuation_ids) & (
-        set(objective_anchor_ids) | set(outcome_anchor_ids)
+    if (
+        not ownership_anchor_ids
+        or not objective_anchor_ids
+        or not outcome_anchor_ids
     ):
         raise AuditError(
-            f"{field}.continuation_message_ids must be separate from objective "
-            "and outcome anchors."
+            f"{field} requires ownership, objective, and outcome anchor IDs."
+        )
+    ownership_anchor_set = set(ownership_anchor_ids)
+    objective_anchor_set = set(objective_anchor_ids)
+    outcome_anchor_set = set(outcome_anchor_ids)
+    if outcome_anchor_set & (
+        ownership_anchor_set | objective_anchor_set
+    ):
+        raise AuditError(
+            f"{field}.outcome_anchor_message_ids must be separate from ownership "
+            "and objective anchors."
+        )
+    if set(continuation_ids) & (
+        ownership_anchor_set | objective_anchor_set | outcome_anchor_set
+    ):
+        raise AuditError(
+            f"{field}.continuation_message_ids must be separate from ownership, "
+            "objective, and outcome anchors."
         )
     return {
         "ownership": {
@@ -5373,9 +5369,6 @@ def validate_task_episode(value: Any, *, task_id: str) -> dict[str, Any]:
         "boundary_reason": require_string(
             value.get("boundary_reason"), f"{field}.boundary_reason"
         ),
-        "task_type_reason": require_string(
-            value.get("task_type_reason"), f"{field}.task_type_reason"
-        ),
     }
 
 
@@ -5390,9 +5383,10 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
     if len(rows) != 1:
         raise AuditError("--reviewed-baseline must contain exactly one JSONL row.")
     row = rows[0]
-    if row.get("schema_version") != SCHEMA_VERSION:
+    if row.get("schema_version") != TASK_JUDGMENT_SCHEMA_VERSION:
         raise AuditError(
-            f"Reviewed baseline must use schema_version {SCHEMA_VERSION}."
+            "Reviewed baseline must use schema_version "
+            f"{TASK_JUDGMENT_SCHEMA_VERSION}."
         )
     if row.get("basis") != "separately_reviewed_task_cases":
         raise AuditError(
@@ -5429,13 +5423,9 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
     effect_tasks = positive_int(
         row.get("effect_tasks"), field="reviewed_baseline.effect_tasks"
     )
-    independent_effects = positive_int(
-        row.get("independent_effects"),
-        field="reviewed_baseline.independent_effects",
-    )
-    if effect_tasks > clear_tasks or effect_tasks > independent_effects:
+    if effect_tasks > clear_tasks:
         raise AuditError(
-            "Reviewed baseline effect_tasks must not exceed clear_tasks or independent_effects."
+            "Reviewed baseline effect_tasks must not exceed clear_tasks."
         )
 
     effect_counts = row.get("effect_counts")
@@ -5451,30 +5441,9 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
                 f"reviewed_baseline.effect_counts.{effect} must be a non-negative integer."
             )
         normalized_effect_counts[effect] = value
-    if sum(normalized_effect_counts.values()) != independent_effects:
+    if sum(normalized_effect_counts.values()) != effect_tasks:
         raise AuditError(
-            "Reviewed baseline effect_counts must conserve independent_effects."
-        )
-
-    support_counts = row.get("support_counts")
-    if not isinstance(support_counts, dict) or set(support_counts) != {
-        "definite",
-        "limited",
-    }:
-        raise AuditError(
-            "Reviewed baseline support_counts must contain definite and limited."
-        )
-    normalized_support_counts: dict[str, int] = {}
-    for support in ("definite", "limited"):
-        value = support_counts[support]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise AuditError(
-                f"reviewed_baseline.support_counts.{support} must be a non-negative integer."
-            )
-        normalized_support_counts[support] = value
-    if sum(normalized_support_counts.values()) != independent_effects:
-        raise AuditError(
-            "Reviewed baseline support_counts must conserve independent_effects."
+            "Reviewed baseline effect_counts must conserve effect_tasks."
         )
     return {
         "basis": "separately_reviewed_task_cases",
@@ -5485,48 +5454,18 @@ def load_reviewed_baseline(path: Path) -> dict[str, Any]:
         },
         "clear_tasks": clear_tasks,
         "effect_tasks": effect_tasks,
-        "independent_effects": independent_effects,
         "effect_counts": normalized_effect_counts,
-        "support_counts": normalized_support_counts,
     }
-
-
-def validate_effect_rubric(
-    value: Any,
-    *,
-    field: str,
-    original_judgment: str,
-) -> dict[str, bool | None]:
-    if not isinstance(value, dict):
-        raise AuditError(f"{field} must be an object.")
-    rubric: dict[str, bool | None] = {}
-    for key in RUBRIC_KEYS:
-        item = value.get(key)
-        if item is not True and item is not False and item is not None:
-            raise AuditError(f"{field}.{key} must be true, false, or null.")
-        rubric[key] = item
-    if original_judgment == "verified":
-        if any(rubric[key] is not True for key in RUBRIC_KEYS):
-            raise AuditError(
-                f"{field} must make all five checks true for verified."
-            )
-    elif (
-        any(rubric[key] is not True for key in RUBRIC_KEYS[:4])
-        or rubric["influence_visible"] is True
-    ):
-        raise AuditError(
-            f"{field} requires the first four checks true and influence_visible false or null for probable."
-        )
-    return rubric
 
 
 def load_task_judgments(path: Path) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     task_ids: set[str] = set()
     for row in iter_jsonl(path):
-        if row.get("schema_version") != TASK_SCHEMA_VERSION:
+        if row.get("schema_version") != TASK_JUDGMENT_SCHEMA_VERSION:
             raise AuditError(
-                f"Every Task judgment must use schema_version {TASK_SCHEMA_VERSION}."
+                "Every Task judgment must use schema_version "
+                f"{TASK_JUDGMENT_SCHEMA_VERSION}."
             )
         task_id = require_string(row.get("task_id"), "task.task_id")
         if task_id in task_ids:
@@ -5536,10 +5475,6 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
         if status not in TASK_STATUS_VALUES:
             raise AuditError(
                 f"task[{task_id}].status must be one of: {', '.join(sorted(TASK_STATUS_VALUES))}."
-            )
-        if "support" in row:
-            raise AuditError(
-                f"task[{task_id}] must not persist support; the reporter derives it."
             )
         normalized = dict(row)
         normalized["task_id"] = task_id
@@ -5553,14 +5488,6 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
         normalized["outcome"] = optional_text(
             row.get("outcome"), field=f"task[{task_id}].outcome"
         )
-        task_type = row.get("task_type")
-        if task_type is not None and (
-            not isinstance(task_type, str) or task_type not in TASK_TYPE_VALUES
-        ):
-            raise AuditError(
-                f"task[{task_id}].task_type must be one of: {', '.join(sorted(TASK_TYPE_VALUES))}."
-            )
-        normalized["task_type"] = task_type
         normalized["started_at"] = isoformat(
             parse_datetime(
                 require_string(row.get("started_at"), f"task[{task_id}].started_at"),
@@ -5610,14 +5537,29 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             normalized_fragments.append(projected_fragment)
         normalized["source_fragments"] = normalized_fragments
 
-        if status == "excluded":
-            if any(field in row for field in ("exposure", "effects")):
+        for removed_field in (
+            "task_type",
+            "sampling_order",
+            "saturation_signals",
+            "exposure",
+            "effects",
+            "support",
+        ):
+            if removed_field in row:
                 raise AuditError(
-                    f"Excluded task[{task_id}] must not contain exposure or effects."
+                    f"task[{task_id}].{removed_field} belongs to the "
+                    "superseded v0.2 judgment model."
                 )
-            normalized["exclusion_reason"] = require_string(
-                row.get("exclusion_reason"), f"task[{task_id}].exclusion_reason"
-            )
+
+        if status == "excluded":
+            if any(
+                field in row
+                for field in ("episode", "read", "effect", "effect_reason")
+            ):
+                raise AuditError(
+                    f"Excluded task[{task_id}] must not contain episode, read, "
+                    "or effect judgment."
+                )
             exclusion_kind = require_string(
                 row.get("exclusion_kind"), f"task[{task_id}].exclusion_kind"
             )
@@ -5627,14 +5569,9 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
                     f"{', '.join(sorted(TASK_EXCLUSION_VALUES))}."
                 )
             normalized["exclusion_kind"] = exclusion_kind
-            if "episode" in row:
-                raise AuditError(
-                    f"Excluded task[{task_id}] must not contain an episode object."
-                )
-            if "sampling_order" in row or "saturation_signals" in row:
-                raise AuditError(
-                    f"Excluded task[{task_id}] must not participate in clear-Task sampling."
-                )
+            normalized["exclusion_reason"] = require_string(
+                row.get("exclusion_reason"), f"task[{task_id}].exclusion_reason"
+            )
             tasks.append(normalized)
             continue
 
@@ -5656,87 +5593,72 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
                 "prompt, or context-dependent fragment; merge it into its parent "
                 "episode or exclude it."
             )
-        if task_type not in TASK_TYPE_VALUES:
-            raise AuditError(f"Clear task[{task_id}] requires a valid task_type.")
         normalized["episode"] = validate_task_episode(
             row.get("episode"), task_id=task_id
         )
-        sampling_order = row.get("sampling_order")
-        if not isinstance(sampling_order, int) or isinstance(sampling_order, bool) or sampling_order <= 0:
-            raise AuditError(f"Clear task[{task_id}].sampling_order must be a positive integer.")
-        normalized["sampling_order"] = sampling_order
-        signals = row.get("saturation_signals", [])
-        if not isinstance(signals, list) or any(
-            not isinstance(signal, str) or signal not in SATURATION_SIGNAL_VALUES
-            for signal in signals
-        ):
-            raise AuditError(
-                f"task[{task_id}].saturation_signals contains an unknown signal."
-            )
-        if len(set(signals)) != len(signals):
-            raise AuditError(f"task[{task_id}].saturation_signals must not contain duplicates.")
-        normalized["saturation_signals"] = sorted(signals)
 
-        exposure = row.get("exposure")
-        if not isinstance(exposure, dict):
-            raise AuditError(f"Clear task[{task_id}] requires an exposure object.")
-        exposure_status = require_string(
-            exposure.get("status"), f"task[{task_id}].exposure.status"
+        read = row.get("read")
+        if not isinstance(read, dict):
+            raise AuditError(f"Clear task[{task_id}] requires a read object.")
+        read_status = require_string(
+            read.get("status"), f"task[{task_id}].read.status"
         )
-        if exposure_status not in EXPOSURE_VALUES:
+        if read_status not in READ_STATUS_VALUES:
             raise AuditError(
-                f"task[{task_id}].exposure.status must be confirmed or unresolved."
+                f"task[{task_id}].read.status must be observed or unresolved."
             )
-        exposure_reads = string_id_list(
-            exposure.get("read_ids", []),
-            field=f"task[{task_id}].exposure.read_ids",
+        observed_reads = string_id_list(
+            read.get("read_ids", []),
+            field=f"task[{task_id}].read.read_ids",
         )
         reason = optional_text(
-            exposure.get("reason"), field=f"task[{task_id}].exposure.reason"
+            read.get("reason"), field=f"task[{task_id}].read.reason"
         )
-        if exposure_status == "confirmed" and not exposure_reads:
-            raise AuditError(f"Confirmed exposure for task[{task_id}] requires read_ids.")
-        if exposure_status == "unresolved" and reason is None:
-            raise AuditError(f"Unresolved exposure for task[{task_id}] requires a reason.")
-        if exposure_status == "unresolved" and exposure_reads:
+        if read_status == "observed" and not observed_reads:
+            raise AuditError(f"Observed read for task[{task_id}] requires read_ids.")
+        if read_status == "observed" and reason is not None:
+            raise AuditError(f"Observed read for task[{task_id}] must not include a reason.")
+        if read_status == "unresolved" and reason is None:
+            raise AuditError(f"Unresolved read for task[{task_id}] requires a reason.")
+        if read_status == "unresolved" and observed_reads:
             raise AuditError(
-                f"Unresolved exposure for task[{task_id}] must not contain read_ids."
+                f"Unresolved read for task[{task_id}] must not contain read_ids."
             )
-        normalized["exposure"] = {
-            "status": exposure_status,
-            "read_ids": exposure_reads,
+        normalized["read"] = {
+            "status": read_status,
+            "read_ids": observed_reads,
             "reason": reason,
         }
 
-        effects = row.get("effects")
-        if not isinstance(effects, list):
-            raise AuditError(f"task[{task_id}].effects must be an array.")
-        normalized_effects: list[dict[str, Any]] = []
-        for index, effect in enumerate(effects):
-            field = f"task[{task_id}].effects[{index}]"
+        effect = row.get("effect")
+        effect_reason = optional_text(
+            row.get("effect_reason"), field=f"task[{task_id}].effect_reason"
+        )
+        if effect is None:
+            if effect_reason is None:
+                raise AuditError(
+                    f"task[{task_id}] without an effect requires effect_reason."
+                )
+            normalized["effect"] = None
+            normalized["effect_reason"] = effect_reason
+        else:
+            field = f"task[{task_id}].effect"
             if not isinstance(effect, dict):
                 raise AuditError(f"{field} must be an object.")
-            if "support" in effect:
+            if effect_reason is not None:
                 raise AuditError(
-                    f"{field} must not persist support; the reporter derives it."
+                    f"task[{task_id}] with an effect must not include effect_reason."
                 )
-            effect_value = require_string(effect.get("effect"), f"{field}.effect")
+            for removed_field in ("original_judgment", "rubric", "support"):
+                if removed_field in effect:
+                    raise AuditError(
+                        f"{field}.{removed_field} belongs to the superseded v0.2 judgment model."
+                    )
+            effect_value = require_string(effect.get("type"), f"{field}.type")
             if effect_value not in EFFECT_VALUES:
                 raise AuditError(
-                    f"{field}.effect must be one of: {', '.join(sorted(EFFECT_VALUES))}."
+                    f"{field}.type must be one of: {', '.join(sorted(EFFECT_VALUES))}."
                 )
-            original_judgment = require_string(
-                effect.get("original_judgment"), f"{field}.original_judgment"
-            )
-            if original_judgment not in {"verified", "probable"}:
-                raise AuditError(
-                    f"{field}.original_judgment must be verified or probable."
-                )
-            rubric = validate_effect_rubric(
-                effect.get("rubric"),
-                field=f"{field}.rubric",
-                original_judgment=original_judgment,
-            )
             effect_reads = string_id_list(
                 effect.get("read_ids"), field=f"{field}.read_ids"
             )
@@ -5746,23 +5668,19 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             )
             if not effect_reads or not choice_ids:
                 raise AuditError(f"{field} requires read_ids and choice_message_ids.")
-            normalized_effects.append(
-                {
-                    "effect": effect_value,
-                    "original_judgment": original_judgment,
-                    "rubric": rubric,
-                    "read_ids": effect_reads,
-                    "choice_message_ids": choice_ids,
-                    "outcome_anchor": require_string(
-                        effect.get("outcome_anchor"), f"{field}.outcome_anchor"
-                    ),
-                    "summary": require_string(effect.get("summary"), f"{field}.summary"),
-                }
-            )
-        normalized["effects"] = normalized_effects
-        if exposure_status == "unresolved" and normalized_effects:
+            normalized["effect"] = {
+                "type": effect_value,
+                "read_ids": effect_reads,
+                "choice_message_ids": choice_ids,
+                "outcome_anchor": require_string(
+                    effect.get("outcome_anchor"), f"{field}.outcome_anchor"
+                ),
+                "summary": require_string(effect.get("summary"), f"{field}.summary"),
+            }
+            normalized["effect_reason"] = None
+        if read_status == "unresolved" and normalized["effect"] is not None:
             raise AuditError(
-                f"Unresolved exposure for task[{task_id}] must not contain effects."
+                f"Unresolved read for task[{task_id}] must not contain an effect."
             )
         tasks.append(normalized)
     return tasks
@@ -5813,7 +5731,6 @@ def validate_task_refs(
     read_owners: dict[str, str] = {}
     choice_owners: dict[str, str] = {}
     episode_anchor_owners: dict[str, str] = {}
-    clear_orders: list[int] = []
     for task in tasks:
         task_id = task["task_id"]
         start = parse_datetime(task["started_at"], field=f"task {task_id} started_at")
@@ -5902,11 +5819,7 @@ def validate_task_refs(
                 f"fragments: {unknown}."
             )
         episode_messages = {
-            message_id: next(
-                messages_by_audit[audit][message_id]
-                for audit in source_audits
-                if message_id in messages_by_audit[audit]
-            )
+            message_id: source_messages[message_id]
             for message_id in episode_message_ids
         }
         source_agent_ids = {
@@ -5918,68 +5831,70 @@ def validate_task_refs(
                 f"task[{task_id}] source fragments must belong to one audited Agent."
             )
         source_agent_id = next(iter(source_agent_ids))
-        objective_anchor_messages = [
-            episode_messages[message_id]
+        objective_anchor_messages = {
+            message_id: episode_messages[message_id]
             for message_id in episode["objective_anchor_message_ids"]
-        ]
-        if not any(
-            isinstance(message.get("content"), str)
-            and not is_weak_task_fragment(message["content"])
-            for message in objective_anchor_messages
-        ):
-            raise AuditError(
-                f"task[{task_id}] requires at least one concrete objective-anchor "
-                "source message; weak continuations and context-only prompts "
-                "cannot be normalized into a clear objective."
-            )
+        }
         ownership_anchor_senders = {
             episode_messages[message_id].get("sender_id")
             for message_id in episode["ownership"]["anchor_message_ids"]
         }
-        if (
-            episode["ownership"]["kind"] == "accepted"
-            and source_agent_id not in ownership_anchor_senders
-        ):
-            raise AuditError(
-                f"Accepted ownership for task[{task_id}] requires a current-Agent "
-                "anchor."
+        objective_anchor_senders = {
+            message.get("sender_id")
+            for message in objective_anchor_messages.values()
+        }
+        if episode["ownership"]["kind"] == "accepted":
+            if source_agent_id not in ownership_anchor_senders:
+                raise AuditError(
+                    f"Accepted ownership for task[{task_id}] requires a "
+                    "current-Agent anchor."
+                )
+            if source_agent_id not in objective_anchor_senders:
+                raise AuditError(
+                    f"Accepted ownership for task[{task_id}] requires a "
+                    "current-Agent objective anchor."
+                )
+            has_concrete_compatible_objective = any(
+                message.get("sender_id") == source_agent_id
+                and isinstance(message.get("content"), str)
+                and not is_weak_task_fragment(message["content"])
+                for message in objective_anchor_messages.values()
             )
-        if (
-            episode["ownership"]["kind"] in {"assigned", "transferred"}
-            and not any(
+        else:
+            if not any(
                 isinstance(sender_id, str)
                 and bool(sender_id.strip())
                 and sender_id != source_agent_id
                 for sender_id in ownership_anchor_senders
-            )
-        ):
-            raise AuditError(
-                f"{episode['ownership']['kind'].title()} ownership for task[{task_id}] "
-                "requires a non-current-Agent anchor."
-            )
-        objective_anchor_senders = {
-            message.get("sender_id") for message in objective_anchor_messages
-        }
-        if (
-            episode["ownership"]["kind"] == "accepted"
-            and source_agent_id not in objective_anchor_senders
-        ):
-            raise AuditError(
-                f"Accepted ownership for task[{task_id}] requires a current-Agent "
-                "objective anchor."
-            )
-        if (
-            episode["ownership"]["kind"] in {"assigned", "transferred"}
-            and not any(
+            ):
+                raise AuditError(
+                    f"{episode['ownership']['kind'].title()} ownership for "
+                    f"task[{task_id}] requires a non-current-Agent anchor."
+                )
+            if not any(
                 isinstance(sender_id, str)
                 and bool(sender_id.strip())
                 and sender_id != source_agent_id
                 for sender_id in objective_anchor_senders
+            ):
+                raise AuditError(
+                    f"{episode['ownership']['kind'].title()} ownership for "
+                    f"task[{task_id}] requires a non-current-Agent objective anchor."
+                )
+            has_concrete_compatible_objective = any(
+                isinstance(message.get("sender_id"), str)
+                and bool(message["sender_id"].strip())
+                and message["sender_id"] != source_agent_id
+                and isinstance(message.get("content"), str)
+                and not is_weak_task_fragment(message["content"])
+                for message in objective_anchor_messages.values()
             )
-        ):
+        if not has_concrete_compatible_objective:
             raise AuditError(
-                f"{episode['ownership']['kind'].title()} ownership for "
-                f"task[{task_id}] requires a non-current-Agent objective anchor."
+                f"task[{task_id}] requires at least one ownership-compatible "
+                "concrete objective-anchor source message; weak continuations, "
+                "context-only prompts, and another sender's objective cannot be "
+                "normalized into a clear objective."
             )
         if not any(
             episode_messages[message_id].get("sender_id") == source_agent_id
@@ -5990,8 +5905,7 @@ def validate_task_refs(
             for message_id in episode["outcome_anchor_message_ids"]
         ):
             raise AuditError(
-                f"task[{task_id}] requires a non-empty current-Agent outcome "
-                "anchor."
+                f"task[{task_id}] requires a non-empty current-Agent outcome anchor."
             )
         ownership_times = [
             parse_datetime(
@@ -6007,8 +5921,11 @@ def validate_task_refs(
             )
             for message_id in episode["objective_anchor_message_ids"]
         ]
-        episode_started_at = max(
+        evidence_started_at = max(
             min(ownership_times), min(objective_anchor_times)
+        )
+        episode_started_at = min(
+            [*ownership_times, *objective_anchor_times]
         )
         objective_times = [*ownership_times, *objective_anchor_times]
         outcome_times = [
@@ -6019,10 +5936,10 @@ def validate_task_refs(
             for message_id in episode["outcome_anchor_message_ids"]
         ]
         episode_ended_at = max(outcome_times)
-        if min(outcome_times) < max(objective_times):
+        if min(outcome_times) <= max(objective_times):
             raise AuditError(
-                f"task[{task_id}] outcome anchors must not precede ownership or "
-                "objective anchors."
+                f"task[{task_id}] outcome anchors must strictly follow ownership "
+                "and objective anchors."
             )
         for message_id, message in source_messages.items():
             message_time = parse_datetime(
@@ -6034,9 +5951,9 @@ def validate_task_refs(
                     f"task[{task_id}] source message {message_id} is outside its "
                     "established episode."
                 )
-        clear_orders.append(task["sampling_order"])
-        exposure_reads = set(task["exposure"]["read_ids"])
-        for read_id in exposure_reads:
+
+        observed_reads = set(task["read"]["read_ids"])
+        for read_id in observed_reads:
             item = reads.get(read_id)
             if item is None:
                 raise AuditError(f"task[{task_id}] references unknown read {read_id}.")
@@ -6058,8 +5975,8 @@ def validate_task_refs(
                 field=f"task {task_id} read {read_id} completion",
             )
             if (
-                read_started_at < episode_started_at
-                or read_completed_at < episode_started_at
+                read_started_at < evidence_started_at
+                or read_completed_at < evidence_started_at
             ):
                 raise AuditError(
                     f"task[{task_id}] read {read_id} precedes established "
@@ -6079,10 +5996,11 @@ def validate_task_refs(
                     f"Read {read_id} is copied across incompatible Tasks {previous} and {task_id}."
                 )
 
-        for effect in task["effects"]:
-            if not set(effect["read_ids"]).issubset(exposure_reads):
+        effect = task["effect"]
+        if effect is not None:
+            if not set(effect["read_ids"]).issubset(observed_reads):
                 raise AuditError(
-                    f"Effect in task[{task_id}] references reads outside its exposure."
+                    f"Effect in task[{task_id}] references reads outside its observed reads."
                 )
             if effect["outcome_anchor"] not in set(
                 episode["outcome_anchor_message_ids"]
@@ -6091,25 +6009,6 @@ def validate_task_refs(
                     f"Effect in task[{task_id}] must bind outcome_anchor to one "
                     "of the episode outcome anchors."
                 )
-            tree_source_status = (
-                "default_branch_match"
-                if all(
-                    reads[read_id][1].get("tree_source", {}).get("status")
-                    == "default_branch_match"
-                    for read_id in effect["read_ids"]
-                )
-                else "unverified_source"
-            )
-            if (
-                effect["original_judgment"] == "verified"
-                and tree_source_status != "default_branch_match"
-            ):
-                raise AuditError(
-                    f"Verified effect in task[{task_id}] requires every cited "
-                    "read passage to match the bound Tree's local default-branch "
-                    "snapshot; use probable otherwise."
-                )
-            effect["tree_source_status"] = tree_source_status
             read_times = [
                 parse_datetime(
                     reads[read_id][1]["completed_at"],
@@ -6117,6 +6016,13 @@ def validate_task_refs(
                 )
                 for read_id in effect["read_ids"]
             ]
+            outcome_anchor_time = parse_datetime(
+                episode_messages[effect["outcome_anchor"]]["created_at"],
+                field=(
+                    f"task {task_id} effect outcome anchor "
+                    f"{effect['outcome_anchor']}"
+                ),
+            )
             choice_times: list[datetime] = []
             for message_id in effect["choice_message_ids"]:
                 if message_id not in source_message_ids:
@@ -6140,7 +6046,7 @@ def validate_task_refs(
                     end=end,
                     field=f"task {task_id} choice {message_id}",
                 )
-                if not episode_started_at <= choice_time <= episode_ended_at:
+                if not evidence_started_at <= choice_time <= episode_ended_at:
                     raise AuditError(
                         f"task[{task_id}] choice {message_id} is outside its "
                         "established episode."
@@ -6155,12 +6061,11 @@ def validate_task_refs(
                 raise AuditError(
                     f"Effect in task[{task_id}] cites a read completed after its earliest choice."
                 )
-
-    if sorted(clear_orders) != list(range(1, len(clear_orders) + 1)):
-        raise AuditError(
-            "Clear Task sampling_order values must be unique and contiguous from 1."
-        )
-    sampling_summary(tasks)
+            if outcome_anchor_time < max([*read_times, *choice_times]):
+                raise AuditError(
+                    f"Effect in task[{task_id}] binds an outcome anchor that "
+                    "precedes a cited Read completion or choice."
+                )
 
 
 def table_row(columns: Sequence[Any]) -> str:
@@ -6175,7 +6080,7 @@ def report_cell(value: Any) -> str:
 
 def independent_effect_id(effect: Mapping[str, Any]) -> str:
     identity = {
-        "effect": effect["effect"],
+        "effect": effect["type"],
         "read_ids": sorted(effect["read_ids"]),
         "choice_message_ids": sorted(effect["choice_message_ids"]),
         "outcome_anchor": effect["outcome_anchor"],
@@ -6192,131 +6097,17 @@ def build_task_evidence(tasks: Sequence[Mapping[str, Any]]) -> list[dict[str, An
         tasks,
         key=lambda item: (
             item["status"] != "clear",
-            int(item.get("sampling_order") or 0),
+            item["started_at"],
             item["task_id"],
         ),
     ):
         row = dict(task)
-        if task["status"] == "clear":
-            effects = []
-            for effect in task["effects"]:
-                projected = dict(effect)
-                projected["independent_effect_id"] = independent_effect_id(effect)
-                projected["derived_support"] = (
-                    "definite"
-                    if task["exposure"]["status"] == "confirmed"
-                    and effect["original_judgment"] == "verified"
-                    else "limited"
-                )
-                effects.append(projected)
-            row["effects"] = effects
+        if task["status"] == "clear" and task["effect"] is not None:
+            projected = dict(task["effect"])
+            projected["effect_id"] = independent_effect_id(task["effect"])
+            row["effect"] = projected
         evidence.append(row)
     return evidence
-
-
-def sampling_summary(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    clear = sorted(
-        (task for task in tasks if task["status"] == "clear"),
-        key=lambda task: task["sampling_order"],
-    )
-    confirmed_exposure = sum(
-        1 for task in clear if task["exposure"]["status"] == "confirmed"
-    )
-    unresolved_exposure = sum(
-        1 for task in clear if task["exposure"]["status"] == "unresolved"
-    )
-    if not clear:
-        effect_analysis_status = "not_applicable"
-    elif confirmed_exposure == 0:
-        effect_analysis_status = "pending"
-    elif unresolved_exposure:
-        effect_analysis_status = "partial"
-    else:
-        effect_analysis_status = "ready"
-    expansions: list[dict[str, Any]] = []
-    initial_task_types = {task["task_type"] for task in clear[:100]}
-    missing_task_types = sorted(TASK_TYPE_VALUES - initial_task_types)
-    type_coverage_complete = not missing_task_types and len(clear) >= 100
-    cumulative_effect_types = {
-        effect["effect"]
-        for task in clear[:100]
-        for effect in task["effects"]
-    }
-    consecutive_empty = 0
-    saturated_at: int | None = None
-    for offset in range(100, len(clear), 20):
-        batch = clear[offset : offset + 20]
-        if len(batch) < 20:
-            break
-        signals = sorted(
-            {
-                signal
-                for task in batch
-                for signal in task.get("saturation_signals", [])
-            }
-        )
-        batch_effect_types = {
-            effect["effect"] for task in batch for effect in task["effects"]
-        }
-        new_effect_types = sorted(batch_effect_types - cumulative_effect_types)
-        declares_new_effect_type = "new_effect_type" in signals
-        if bool(new_effect_types) != declares_new_effect_type:
-            expectation = (
-                "must declare new_effect_type"
-                if new_effect_types
-                else "must not declare new_effect_type"
-            )
-            raise AuditError(
-                f"Sampling expansion {offset + 1}-{offset + 20} {expectation}; "
-                "the annotation disagrees with observed effect types."
-            )
-        cumulative_effect_types.update(batch_effect_types)
-        non_effect_signals = {
-            signal for signal in signals if signal != "new_effect_type"
-        }
-        batch_has_novelty = bool(new_effect_types or non_effect_signals)
-        consecutive_empty = 0 if batch_has_novelty else consecutive_empty + 1
-        expansions.append(
-            {
-                "start": offset + 1,
-                "end": offset + 20,
-                "signals": signals,
-                "new_effect_types": new_effect_types,
-            }
-        )
-        if (
-            consecutive_empty == 2
-            and type_coverage_complete
-            and effect_analysis_status == "ready"
-        ):
-            saturated_at = offset + 20
-            break
-    if effect_analysis_status == "pending":
-        status = "effect_analysis_pending"
-    elif effect_analysis_status == "partial":
-        status = "effect_analysis_partial"
-    elif len(clear) < 100:
-        status = "minimum_not_met"
-    elif not type_coverage_complete:
-        status = "task_type_coverage_not_met"
-    elif saturated_at is not None:
-        status = "saturated"
-    else:
-        status = "continue_sampling"
-    if saturated_at is not None and len(clear) > saturated_at:
-        raise AuditError(
-            f"Task sample continued past reproducible saturation at {saturated_at} clear Tasks."
-        )
-    return {
-        "clear_tasks": len(clear),
-        "status": status,
-        "saturated_at": saturated_at,
-        "expansions": expansions,
-        "missing_task_types": missing_task_types,
-        "effect_analysis_status": effect_analysis_status,
-        "confirmed_exposure_tasks": confirmed_exposure,
-        "unresolved_exposure_tasks": unresolved_exposure,
-    }
 
 
 def render_report(
@@ -6332,47 +6123,40 @@ def render_report(
     provider_note = (
         f"This audit uses the existing local `{runtime_provider}` evidence adapter."
         if runtime_provider in SUPPORTED_EVIDENCE_PROVIDERS
-        else f"Historical `{runtime_provider}` evidence is not supported; affected Tasks remain pending."
+        else f"Historical `{runtime_provider}` evidence is not supported; affected Tasks remain unresolved."
     )
+
     clear_tasks = [task for task in tasks if task["status"] == "clear"]
     excluded_tasks = [task for task in tasks if task["status"] == "excluded"]
-    confirmed_exposure_tasks = [
-        task for task in clear_tasks if task["exposure"]["status"] == "confirmed"
+    observed_read_tasks = [
+        task for task in clear_tasks if task["read"]["status"] == "observed"
     ]
-    unresolved_exposure_tasks = [
-        task for task in clear_tasks if task["exposure"]["status"] == "unresolved"
+    unresolved_read_tasks = [
+        task for task in clear_tasks if task["read"]["status"] == "unresolved"
     ]
-    effect_tasks = [task for task in clear_tasks if task["effects"]]
-    independent_effects: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
-    for task in clear_tasks:
-        for effect in task["effects"]:
-            independent_effects.setdefault(
-                effect["independent_effect_id"],
-                (task, effect),
-            )
-    effect_counts = Counter(
-        effect["effect"] for _, effect in independent_effects.values()
-    )
-    task_type_effect = Counter(
-        (task["task_type"], effect["effect"])
-        for task, effect in independent_effects.values()
-    )
-    support_counts = Counter(
-        effect["derived_support"] for _, effect in independent_effects.values()
-    )
-    tree_source_counts = Counter(
-        effect["tree_source_status"]
-        for _, effect in independent_effects.values()
-    )
+    effect_tasks = [task for task in clear_tasks if task["effect"] is not None]
+    observed_without_effect_tasks = [
+        task
+        for task in observed_read_tasks
+        if task["effect"] is None
+    ]
+    effect_counts = Counter(task["effect"]["type"] for task in effect_tasks)
     exclusion_counts = Counter(
         task["exclusion_kind"] for task in excluded_tasks
     )
-    if len(confirmed_exposure_tasks) + len(unresolved_exposure_tasks) != len(clear_tasks):
-        raise AuditError("Task exposure counts do not conserve clear Tasks.")
-    if sum(task_type_effect.values()) != len(independent_effects):
-        raise AuditError("Task type × effect counts do not conserve independent effects.")
-    if len(effect_tasks) > len(clear_tasks):
-        raise AuditError("Effect Task count cannot exceed clear Task count.")
+
+    if len(observed_read_tasks) + len(unresolved_read_tasks) != len(clear_tasks):
+        raise AuditError("Task read counts do not conserve clear Tasks.")
+    if len(effect_tasks) > len(observed_read_tasks):
+        raise AuditError("Effect Task count cannot exceed observed Read Task count.")
+    if len(effect_tasks) + len(observed_without_effect_tasks) != len(
+        observed_read_tasks
+    ):
+        raise AuditError(
+            "Effect and no-Effect counts do not conserve observed Read Tasks."
+        )
+    if sum(effect_counts.values()) != len(effect_tasks):
+        raise AuditError("Effect distribution does not conserve Effect Tasks.")
 
     mapped_audits = sum(1 for row in candidates if row["mapped_trace_files"])
     chat_message_counts: dict[str, int] = {}
@@ -6416,14 +6200,9 @@ def render_report(
     }
     window_start = min(bounded_starts) if bounded_starts else "unbounded"
     window_end = max(row["window"]["end"] for row in candidates)
-    sampling = sampling_summary(tasks)
-    effect_metrics_available = sampling["effect_analysis_status"] in {
-        "partial",
-        "ready",
-    }
 
     lines = [
-        "# Context Tree Value Audit: Exploratory Task-First Scan",
+        "# Context Tree Value Audit",
         "",
         f"Generated: {isoformat(generated_at)}",
         f"Acquisition bound: {window_start} – {window_end}",
@@ -6434,48 +6213,37 @@ def render_report(
         table_row(["---", "---:"]),
         table_row(["Clear Tasks", len(clear_tasks)]),
         table_row(["Excluded Tasks", len(excluded_tasks)]),
-        table_row(["Confirmed exposure Tasks", len(confirmed_exposure_tasks)]),
-        table_row(["Unresolved exposure Tasks", len(unresolved_exposure_tasks)]),
-        table_row(["Effect Tasks", len(effect_tasks) if effect_metrics_available else "N/A"]),
+        table_row(["Read observed Tasks", len(observed_read_tasks)]),
+        table_row(["Read unresolved Tasks", len(unresolved_read_tasks)]),
+        table_row(["Effect Tasks", len(effect_tasks)]),
         table_row(
             [
-                "Independent effects",
-                len(independent_effects) if effect_metrics_available else "N/A",
+                "Observed Read without Effect",
+                len(observed_without_effect_tasks),
             ]
         ),
         "",
-        "This is an exploratory evidence scan, not causal proof, ROI, or a global effectiveness rate.",
+        "This is a sampled evidence report, not causal proof, ROI, or a global effectiveness rate.",
         "",
-        "Unresolved exposure is unknown coverage, not an unused/no-value denominator. Receipt absence is also unknown.",
+        "An unresolved Read is unknown evidence coverage, not proof that the Tree was unused or had no value. Receipt absence is also unknown.",
         "",
-        (
-            "Effect analysis is `pending`: no clear Task has evidence-ready exposure, "
-            "so effect count, distribution, support, and saturation are N/A rather "
-            "than zero."
-            if sampling["effect_analysis_status"] == "pending"
-            else "Observed effect counts are auditable evidence, not a global "
-            "effectiveness rate. A read, selector call, or decision receipt is "
-            "evidence, not causal proof by itself."
-        ),
+        "Every available clear Task in the authorized acquisition bound is reported. There is no minimum Task quota or saturation gate; sample size limits the scope of the conclusion rather than whether the report may exist.",
         "",
-        "## Sampling",
+        "## Effect Distribution",
         "",
-        f"Status: `{sampling['status']}`; clear Tasks: **{sampling['clear_tasks']}**"
-        + (
-            f"; saturation reached at **{sampling['saturated_at']}**."
-            if sampling["saturated_at"] is not None
-            else "."
-        ),
-        "",
-        "The default judgment quota is 100 clear Tasks, followed by 20-Task expansions until two consecutive complete batches add no new effect type, key counterexample, or conclusion change.",
-        "",
+        table_row(["Effect", "Tasks"]),
+        table_row(["---", "---:"]),
     ]
+    for effect_type in ("confirmed", "constrained", "redirected", "conflicted"):
+        lines.append(table_row([effect_type, effect_counts[effect_type]]))
+
     if excluded_tasks:
         lines.extend(
             [
+                "",
                 "## Exclusion Distribution",
                 "",
-                table_row(["Exclusion kind", "Tasks"]),
+                table_row(["Exclusion kind", "Candidates"]),
                 table_row(["---", "---:"]),
             ]
         )
@@ -6486,129 +6254,86 @@ def render_report(
                         [exclusion_kind, exclusion_counts[exclusion_kind]]
                     )
                 )
-        lines.append("")
-    if sampling["effect_analysis_status"] == "pending":
-        lines.extend(
-            [
-                "Effect saturation: **N/A / pending** until at least one clear "
-                "Task has evidence-ready exposure. Empty unresolved batches do "
-                "not establish saturation.",
-                "",
-            ]
-        )
-    elif sampling["effect_analysis_status"] == "partial":
-        lines.extend(
-            [
-                "Effect saturation: **N/A / pending** while some clear Tasks "
-                "still have unresolved exposure. Observed positive effects may "
-                "be reported, but empty unresolved Tasks cannot support a "
-                "saturation conclusion.",
-                "",
-            ]
-        )
-    if sampling["missing_task_types"]:
-        lines.extend(
-            [
-                "Task-type coverage still missing from the initial cohort: "
-                + ", ".join(f"`{item}`" for item in sampling["missing_task_types"])
-                + ".",
-                "",
-            ]
-        )
-    if (
-        sampling["effect_analysis_status"] == "ready"
-        and sampling["expansions"]
+
+    lines.extend(
+        [
+            "",
+            "## Task Results",
+            "",
+            table_row(
+                [
+                    "Task ID",
+                    "Ownership",
+                    "Objective",
+                    "Object scope",
+                    "Primary deliverable",
+                    "Outcome",
+                    "Read",
+                    "Effect",
+                    "Evidence summary",
+                ]
+            ),
+            table_row(
+                [
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                ]
+            ),
+        ]
+    )
+    for task in sorted(
+        clear_tasks, key=lambda item: (item["started_at"], item["task_id"])
     ):
-        lines.extend(
-            [
-                table_row(["Expansion", "Saturation signals"]),
-                table_row(["---", "---"]),
-            ]
+        effect = task["effect"]
+        effect_label = (
+            effect["type"]
+            if effect is not None
+            else "not judged"
+            if task["read"]["status"] == "unresolved"
+            else "none"
         )
-        for batch in sampling["expansions"]:
-            lines.append(
-                table_row(
-                    [
-                        f"{batch['start']}–{batch['end']}",
-                        ", ".join(batch["signals"]) if batch["signals"] else "none",
-                    ]
-                )
+        lines.append(
+            table_row(
+                [
+                    f"`{task['task_id']}`",
+                    f"`{task['episode']['ownership']['kind']}`",
+                    report_cell(task["objective"]),
+                    report_cell(task["object_scope"]),
+                    report_cell(task["episode"]["primary_deliverable"]),
+                    report_cell(task["outcome"]),
+                    task["read"]["status"],
+                    effect_label,
+                    effect["summary"] if effect is not None else task["effect_reason"],
+                ]
             )
-        lines.append("")
-
-    lines.extend(["## Clear Task Inventory", ""])
+        )
     if not clear_tasks:
-        lines.extend(["No clear Tasks.", ""])
-    else:
-        lines.extend(
-            [
-                table_row(
-                    [
-                        "Order",
-                        "Task ID",
-                        "Type",
-                        "Ownership",
-                        "Objective",
-                        "Object scope",
-                        "Primary deliverable",
-                        "Outcome",
-                        "Exposure",
-                        "Effects / support",
-                    ]
-                ),
-                table_row(
-                    [
-                        "---:",
-                        "---",
-                        "---",
-                        "---",
-                        "---",
-                        "---",
-                        "---",
-                        "---",
-                        "---",
-                        "---",
-                    ]
-                ),
-            ]
+        lines.append(
+            table_row(["None", "—", "—", "—", "—", "—", "—", "—", "—"])
         )
-        for task in sorted(
-            clear_tasks, key=lambda item: item["sampling_order"]
-        ):
-            lines.append(
-                table_row(
-                    [
-                        task["sampling_order"],
-                        f"`{task['task_id']}`",
-                        f"`{task['task_type']}`",
-                        f"`{task['episode']['ownership']['kind']}`",
-                        report_cell(task["objective"]),
-                        report_cell(task["object_scope"]),
-                        report_cell(task["episode"]["primary_deliverable"]),
-                        report_cell(task["outcome"]),
-                        f"`{task['exposure']['status']}`",
-                        (
-                            "; ".join(
-                                f"`{effect['effect']}` / "
-                                f"`{effect['derived_support']}`"
-                                for effect in task["effects"]
-                            )
-                            or "none"
-                        ),
-                    ]
-                )
-            )
-        lines.append("")
+    lines.append("")
 
+    if clear_tasks:
         lines.extend(["## Clear Task Boundary Rationale", ""])
-        for task in sorted(
-            clear_tasks, key=lambda item: item["sampling_order"]
+        for index, task in enumerate(
+            sorted(
+                clear_tasks,
+                key=lambda item: (item["started_at"], item["task_id"]),
+            ),
+            start=1,
         ):
             episode = task["episode"]
             ownership = episode["ownership"]
             lines.extend(
                 [
-                    f"### {task['sampling_order']}. `{task['task_id']}`",
+                    f"### {index}. `{task['task_id']}`",
                     "",
                     f"- Ownership: `{ownership['kind']}` — "
                     f"{report_cell(ownership['reason'])}",
@@ -6628,29 +6353,22 @@ def render_report(
                         for message_id in episode["outcome_anchor_message_ids"]
                     ),
                     f"- Boundary: {report_cell(episode['boundary_reason'])}",
-                    f"- Type rationale: {report_cell(episode['task_type_reason'])}",
                     "",
                 ]
             )
 
-    lines.extend(["## Excluded Candidate Inventory", ""])
-    if not excluded_tasks:
-        lines.extend(["No excluded candidates.", ""])
-    else:
+    if excluded_tasks:
         lines.extend(
             [
-                table_row(
-                    [
-                        "Candidate ID",
-                        "Exclusion kind",
-                        "Observed scope",
-                        "Reason",
-                    ]
-                ),
+                "## Excluded Tasks",
+                "",
+                table_row(["Candidate", "Exclusion kind", "Observed scope", "Reason"]),
                 table_row(["---", "---", "---", "---"]),
             ]
         )
-        for task in sorted(excluded_tasks, key=lambda item: item["task_id"]):
+        for task in sorted(
+            excluded_tasks, key=lambda item: (item["started_at"], item["task_id"])
+        ):
             lines.append(
                 table_row(
                     [
@@ -6663,125 +6381,33 @@ def render_report(
             )
         lines.append("")
 
-    if effect_metrics_available:
-        lines.extend(
-            [
-                "## Effect Distribution",
-                "",
-                table_row(["Effect", "Independent effects"]),
-                table_row(["---", "---:"]),
-            ]
-        )
-        for effect in ("confirmed", "constrained", "redirected", "conflicted"):
-            lines.append(table_row([effect, effect_counts[effect]]))
-        lines.extend(
-            [
-                "",
-                f"Derived support: definite **{support_counts['definite']}**, limited **{support_counts['limited']}**. Support is derived during reporting and is never accepted from task-judgments input.",
-                (
-                    "Tree source: local default-branch match "
-                    f"**{tree_source_counts['default_branch_match']}**, "
-                    "unverified source "
-                    f"**{tree_source_counts['unverified_source']}**."
-                ),
-                "",
-                "## Task Type × Effect",
-                "",
-                table_row(["Task type", "confirmed", "constrained", "redirected", "conflicted", "Total"]),
-                table_row(["---", "---:", "---:", "---:", "---:", "---:"]),
-            ]
-        )
-        for task_type in sorted(TASK_TYPE_VALUES):
-            counts = [task_type_effect[(task_type, effect)] for effect in (
-                "confirmed", "constrained", "redirected", "conflicted"
-            )]
-            lines.append(table_row([task_type, *counts, sum(counts)]))
-
-        lines.extend(
-            [
-                "",
-                "## Representative Cases",
-                "",
-            ]
-        )
-        representatives = effect_tasks[:5]
-        if not representatives:
-            lines.append("No representative effect Task was selected.")
-            lines.append("")
-        for task in representatives:
-            effects = task["effects"]
-            effect_labels = ", ".join(f"`{effect['effect']}`" for effect in effects)
-            source_labels = ", ".join(
-                f"`{effect['tree_source_status']}`" for effect in effects
-            )
-            lines.extend(
-                [
-                    f"### {task['objective']} (`{task['task_id']}`)",
-                    "",
-                    f"- Task type: `{task['task_type']}`",
-                    f"- Primary deliverable: {task['episode']['primary_deliverable']}",
-                    f"- Ownership: `{task['episode']['ownership']['kind']}` — "
-                    f"{task['episode']['ownership']['reason']}",
-                    f"- Exposure: `{task['exposure']['status']}`",
-                    f"- Effects: {effect_labels}",
-                    f"- Tree source: {source_labels}",
-                    f"- Outcome: {task['outcome']}",
-                    f"- Influence: {'; '.join(effect['summary'] for effect in effects)}",
-                    "",
-                ]
-            )
-    else:
-        lines.extend(
-            [
-                "## Effect Analysis",
-                "",
-                "Status: **N/A / pending**. The collector did not recover "
-                "evidence-ready Task exposure, so this report intentionally "
-                "does not render effect totals, distributions, support, "
-                "representative effects, or effect saturation.",
-                "",
-            ]
-        )
-
     if reviewed_baseline is not None:
         baseline_effects = reviewed_baseline["effect_counts"]
-        baseline_support = reviewed_baseline["support_counts"]
         anchor = reviewed_baseline["evidence_anchor"]
         lines.extend(
             [
                 "## Separately Reviewed Historical Baseline",
                 "",
-                "This baseline was reviewed before the current rerun and is "
-                "reported separately. Current collector gaps cannot turn these "
-                "positive cases into zero, and these counts are not merged into "
-                "the current sample or its saturation result.",
+                "This hash-anchored baseline is shown separately and is not merged into the current rerun.",
                 "",
                 table_row(["Measure", "Count"]),
                 table_row(["---", "---:"]),
                 table_row(["Reviewed clear Tasks", reviewed_baseline["clear_tasks"]]),
                 table_row(["Reviewed effect Tasks", reviewed_baseline["effect_tasks"]]),
-                table_row(
-                    [
-                        "Reviewed independent effects",
-                        reviewed_baseline["independent_effects"],
-                    ]
-                ),
                 "",
-                table_row(["Effect", "Reviewed effects"]),
+                table_row(["Effect", "Reviewed Tasks"]),
                 table_row(["---", "---:"]),
-                *[
-                    table_row([effect, baseline_effects[effect]])
-                    for effect in (
-                        "confirmed",
-                        "constrained",
-                        "redirected",
-                        "conflicted",
-                    )
-                ],
-                "",
-                "Reviewed support: definite "
-                f"**{baseline_support['definite']}**, limited "
-                f"**{baseline_support['limited']}**.",
+            ]
+        )
+        for effect_type in (
+            "confirmed",
+            "constrained",
+            "redirected",
+            "conflicted",
+        ):
+            lines.append(table_row([effect_type, baseline_effects[effect_type]]))
+        lines.extend(
+            [
                 "",
                 f"Evidence anchor: `{anchor['artifact_id']}` / "
                 f"`sha256:{anchor['sha256']}`; reviewed at "
@@ -6803,7 +6429,6 @@ def render_report(
             table_row(["Chats mapped to local runtime evidence", len(mapped_chat_ids)]),
             table_row(["Audit units mapped to local runtime evidence", mapped_audits]),
             table_row(["In-window Tree-read attempts", attempt_total]),
-            table_row(["Chat-Agent evidence rows", len(candidates)]),
             table_row(["Task judgments", len(tasks)]),
             "",
             "### Tree-read grammar conservation",
@@ -6816,9 +6441,9 @@ def render_report(
             ],
             table_row(["Total", attempt_total]),
             "",
-            "The four attempt classes conserve every in-window call whose payload referenced the bound Tree. Accepted classes describe command-shape recovery; unresolved and rejected attempts remain coverage gaps and never become negative exposure.",
+            "The four attempt classes conserve every in-window call whose payload referenced the bound Tree. Accepted classes describe command-shape recovery; unresolved and rejected attempts remain coverage gaps and never become a negative Read.",
             "",
-            "Historical collection is best-effort. Missing reads, absent receipts, and unresolved exposure do not establish that a Task did not use Context Tree.",
+            "Historical collection is best-effort. Missing reads and absent receipts do not establish that a Task did not use Context Tree.",
             "",
             "### Coverage gaps",
             "",
@@ -6845,11 +6470,15 @@ def render_report(
     lines.extend(
         [
             "",
-            "## Rubric and Boundaries",
+            "## Rule and Boundaries",
             "",
-            "A clear Task is one single-Agent-owned continuous work episode. It requires a concrete objective, material object scope, independently judgeable outcome or terminal state, bounded source fragments, explicit ownership/objective/outcome anchors, one primary terminal deliverable, and one of the five task types. Short continuations, status prompts, context-dependent questions, and phases or corrections of one delivery stay inside their parent episode. Excluded Tasks carry a structured exclusion kind and no episode, exposure, or effects.",
+            "A clear Task is one single-Agent-owned continuous work episode. It requires a concrete objective, material object scope, independently judgeable outcome or terminal state, bounded source fragments, explicit ownership/objective/outcome anchors, and one primary terminal deliverable. Short continuations, status prompts, context-dependent questions, and phases or corrections of one delivery stay inside their parent episode. Excluded candidates carry a structured exclusion kind and no episode, Read, or Effect.",
             "",
-            "Effects retain the four strict values `confirmed`, `constrained`, `redirected`, and `conflicted`. `verified` additionally requires the recorded passage to match the bound Tree's local default-branch snapshot; an unverified source may support only `probable`. This local match is not remote provenance or server-verified causality.",
+            "Read is `observed` only when the recovered Task-window evidence contains attributable Tree content; otherwise it is `unresolved` with a reason.",
+            "",
+            "An Effect exists only when a real relevant normal-content read precedes the choice, the later choice or outcome reasonably shows `confirmed`, `constrained`, `redirected`, or `conflicted` influence, and no more direct evidence fully explains the result. Otherwise the Effect is blank with a short reason.",
+            "",
+            "A decision receipt may support this judgment but cannot create an Effect by itself.",
             "",
             f"{provider_note} The audit remains read-only and limited to one explicitly authorized Agent, one workspace, and one bound Tree.",
             "",
@@ -6860,7 +6489,6 @@ def render_report(
 
 def validate_tree_source_snapshot(
     value: Any,
-    workspace_identity: WorkspaceIdentity,
     *,
     field: str,
 ) -> dict[str, Any]:
@@ -6883,19 +6511,47 @@ def validate_tree_source_snapshot(
     commit = require_string(value.get("commit"), f"{field}.commit").lower()
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise AuditError(f"{field} has an invalid commit.")
-    current = resolve_tree_source_snapshot(workspace_identity.bound_tree_root)
+    return {
+        "status": status,
+        "branch": branch,
+        "commit": commit,
+    }
+
+
+def validate_read_tree_source(
+    value: Any,
+    snapshot: Mapping[str, Any],
+    read: Mapping[str, Any],
+    *,
+    field: str,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise AuditError(f"{field} must be an object.")
+    status = value.get("status")
+    if status == "unverified_source":
+        return {"status": status}
+    if status != "default_branch_match":
+        raise AuditError(f"{field}.status is invalid.")
+    if snapshot.get("status") != "local_default_branch":
+        raise AuditError(
+            f"{field} cannot claim a default-branch match without a recorded snapshot."
+        )
+    branch = require_string(value.get("branch"), f"{field}.branch")
+    commit = require_string(value.get("commit"), f"{field}.commit").lower()
+    node_path = require_string(value.get("node_path"), f"{field}.node_path")
     if (
-        current.get("status") != "local_default_branch"
-        or current.get("branch") != branch
-        or current.get("commit") != commit
+        branch != snapshot.get("branch")
+        or commit != snapshot.get("commit")
+        or node_path not in read.get("node_paths", [])
     ):
         raise AuditError(
-            f"{field} no longer matches the bound Tree's local default branch."
+            f"{field} does not match the candidate's collection-time Tree snapshot."
         )
     return {
         "status": status,
         "branch": branch,
         "commit": commit,
+        "node_path": node_path,
     }
 
 
@@ -6958,7 +6614,6 @@ def validate_report_candidate(
         )
     tree_source_snapshot = validate_tree_source_snapshot(
         value.get("tree_source_snapshot"),
-        workspace_identity,
         field=f"candidate[{expected_audit_id}].tree_source_snapshot",
     )
     window = value.get("window")
@@ -7135,16 +6790,21 @@ def validate_report_candidate(
                 f"Candidate {expected_audit_id} contains an invalid decision receipt."
             )
     for read in reads:
-        expected_source = read_tree_source(
-            read,
-            workspace_identity.bound_tree_root,
-            tree_source_snapshot,
-        )
         if read.get("tree_source") is None:
-            read["tree_source"] = expected_source
-        elif read.get("tree_source") != expected_source:
-            raise AuditError(
-                f"Candidate {expected_audit_id} contains invalid Tree source provenance."
+            read["tree_source"] = read_tree_source(
+                read,
+                workspace_identity.bound_tree_root,
+                tree_source_snapshot,
+            )
+        else:
+            read["tree_source"] = validate_read_tree_source(
+                read["tree_source"],
+                tree_source_snapshot,
+                read,
+                field=(
+                    f"candidate[{expected_audit_id}].read[{read['read_id']}]."
+                    "tree_source"
+                ),
             )
     choice_ids: set[str] = set()
     for message in choices:
@@ -7241,7 +6901,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Read-only Context Tree Value Audit collector with deterministic "
-            "episode-based Task judgment validation and reporting."
+            "Task-first judgment validation and reporting."
         )
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -7261,7 +6921,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument(
         "--days",
         type=int,
-        help="Optional acquisition lookback bound in days; Task quota controls sample size.",
+        help="Optional acquisition lookback bound in days; every available Task in the bound is reported.",
     )
     export_parser.add_argument("--now", help="Fixed RFC 3339 window end for reproducible runs.")
     export_parser.add_argument(
@@ -7292,7 +6952,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument(
         "--days",
         type=int,
-        help="Optional acquisition lookback bound in days; Task quota controls sample size.",
+        help="Optional acquisition lookback bound in days; every available Task in the bound is reported.",
     )
     collect_parser.add_argument("--now", help="Fixed RFC 3339 window end for reproducible runs.")
     collect_parser.add_argument(

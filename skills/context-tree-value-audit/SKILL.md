@@ -1,15 +1,16 @@
 ---
 name: context-tree-value-audit
-description: Audit Context Tree decision value at Task level when a human explicitly invokes $context-tree-value-audit in Codex or /context-tree-value-audit in Claude. The audit is evidence-first, manual, read-only, limited to explicitly authorized Chats for the current First Tree Agent, and uses Task quotas plus saturation rather than Chat counts or a default time window. Do not use for ordinary task reads, stored-tree audits, Tree writes, generic Chat analytics, monitoring, or another Agent.
+description: Audit how Context Tree reads affected complete work Tasks when a human explicitly invokes $context-tree-value-audit in Codex or /context-tree-value-audit in Claude. The audit is evidence-first, manual, read-only, limited to explicitly authorized Chats for the current First Tree Agent, and reports the available sample without a minimum Task quota. Do not use for ordinary task reads, stored-tree audits, Tree writes, generic Chat analytics, monitoring, or another Agent.
 ---
 
 # Context Tree Value Audit
 
 ## Capability
 
-Run a manual and read-only retrospective that reconstructs Tasks from
-authorized Chats, establishes confirmed or unresolved Context Tree exposure
-inside each Task window, judges visible effects, and reports Task-level value.
+Run a manual and read-only retrospective that reconstructs single-Agent-owned
+continuous Tasks from authorized Chats, determines whether a Tree Read is
+observed or unresolved, and reports whether the Read reasonably confirmed,
+constrained, redirected, or conflicted with the later choice.
 
 Keep three responsibilities separate:
 
@@ -21,7 +22,7 @@ Keep three responsibilities separate:
 
 The collector establishes what records exist. The Agent reconstructs
 single-Agent-owned continuous work episodes and performs passage-to-choice
-judgment. A read or decision receipt is evidence, not server-verified
+judgment. A Read or decision receipt is evidence, not server-verified
 causality.
 
 ## Gate the run
@@ -130,7 +131,7 @@ python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" collect \
 
 There is no default lookback. Use `--days N` only when the human explicitly
 wants a time-based acquisition ceiling. It limits data fetching; it does not
-determine sample size or the stopping rule. Use `--now` for reproducible reruns.
+create a minimum sample requirement. Use `--now` for reproducible reruns.
 Normally let the collector resolve the local evidence root from
 `FIRST_TREE_PROVIDER`; use `--trace-root` only for an explicitly resolved root
 for that same Runtime.
@@ -168,8 +169,9 @@ A clear Task is one independently judgeable continuous work episode owned by
 the audited Agent. It needs a concrete objective, material object scope,
 independently judgeable outcome or terminal state, bounded source fragments
 from objective through outcome, explicit ownership/objective/outcome anchors,
-and one primary terminal deliverable. Otherwise mark it excluded with a
-structured exclusion kind. Excluded Tasks carry no exposure or effects.
+and one primary terminal deliverable. Otherwise mark the candidate excluded
+with a structured exclusion kind. Excluded candidates carry no episode, Read,
+or Effect judgment.
 
 Short continuations, status prompts, context-dependent questions, merge
 approval, repeated review/fix requests, and ordinary phase transitions are not
@@ -179,56 +181,44 @@ there is a new objective, material scope or deliverable change, independent
 outcome, and unambiguous source boundary.
 
 For a single-Agent audit, another Agent's work is context until this Agent is
-visibly assigned, transferred, or accepts an objective. Type each clear Task
-from its primary terminal deliverable. Coordination is a Task only when
-dispatch, handoff, gate, or terminal routing is itself the objective and
-outcome.
+visibly assigned, transferred, or accepts an objective. A later independent
+review, takeover, verification gate, or orchestration objective may form a new
+owned episode only when it passes every clear-Task gate.
 
-One Chat may still contain multiple qualifying episodes. Merge across Chats
-only for one PR/MR/Issue, a visible handoff, or the same objective and primary
-delivery, and record the explicit shared linkage. Do not copy one read or
-choice into different Tasks.
+One Chat may contain multiple Tasks. Merge across Chats only for one PR/MR/
+Issue, a visible handoff, or the same objective and primary delivery, and
+record the explicit shared linkage. Do not copy one read or choice into
+different Tasks.
 
-Exposure is only:
+Read is only:
 
-- `confirmed`, with attributable Task-window reads;
+- `observed`, with attributable Task-window reads;
 - `unresolved`, with a reason explaining the evidence gap, no reads, and no
-  effects.
+  Effect.
 
 Do not invent `not_observed`. Missing telemetry and receipt absence are
 unknown, not proof of non-use.
 
-Effects are only `confirmed`, `constrained`, `redirected`, or `conflicted`.
-Keep the original passage-level confidence as `verified` or `probable`, and
-persist its five checks: real read, decision-bearing normal passage, Task
-relevance, read before choice, and visible influence. `verified` requires all
-five and requires every cited passage to match the bound Tree's local
-`origin/HEAD` snapshot. `probable` requires the first four while visible
-influence is false or unknown, and is the strongest allowed classification for
-an unverified source. Do not use
-`informed`, `none`, or numeric weights. Every effect needs Task-window reads,
-later same-Agent choice messages, and an outcome anchor.
+Effect is optional and has exactly one type: `confirmed`, `constrained`,
+`redirected`, or `conflicted`. Record it only when all four conditions hold:
 
-Do not write `support`. The reporter derives definite support from confirmed
-exposure plus verified judgment; every other valid positive effect is limited
-support.
+1. a real Read contains a relevant normal Tree decision or constraint;
+2. the Read completes before the cited choice;
+3. the later same-Agent choice or outcome reasonably shows one of the four
+   effects;
+4. no more direct user instruction or other evidence fully explains the
+   result.
 
-## Apply Task quota and saturation
+Every Effect needs Task-window Read IDs, later same-Agent choice message IDs,
+an outcome anchor, and a concise summary. If the evidence is insufficient, set
+Effect to null and record one short reason. Do not add confidence tiers,
+support levels, numeric weights, `verified`, or `probable`. A decision receipt
+may support the judgment but cannot create an Effect by itself.
 
-Acquire and judge at least 100 clear Tasks, with all five task types represented
-in that initial cohort. Then expand by 20 clear Tasks per batch. Stop only after
-two consecutive complete expansion batches add no new effect type, key
-counterexample, or conclusion change.
-
-Record `sampling_order` and any `saturation_signals` on each clear Task so the
-stop is reproducible. The reporter derives effect-type novelty from actual
-effects and rejects a missing or spurious `new_effect_type` annotation before
-counting an empty batch. A partial run remains incomplete or continuing. Do
-not turn a time bound or Chat count into a sample-size rule. Never retain,
-split, or invent a weak Task to meet the quota or type coverage. If the
-authorized corpus has fewer clear Tasks or genuinely lacks a type, preserve
-the applicable partial status. When exposure analysis is ready, use
-`minimum_not_met` or `task_type_coverage_not_met`.
+Report every available Task in the authorized acquisition bound. There is no
+minimum Task quota, task-type coverage gate, batch-expansion rule, or saturation
+state. State the sample size and evidence gaps so readers can limit the
+conclusion to the sampled scope.
 
 ## Validate and report
 
@@ -238,47 +228,41 @@ python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" report \
   --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
   --candidates "$CTVA_ARTIFACT_DIR/candidates.jsonl" \
   --task-judgments "$CTVA_ARTIFACT_DIR/task-judgments.jsonl" \
-  --reviewed-baseline "$CTVA_ARTIFACT_DIR/reviewed-baseline.jsonl" \
   --evidence-output "$CTVA_ARTIFACT_DIR/evidence.jsonl" \
   --report-output "$CTVA_ARTIFACT_DIR/REPORT.md"
 ```
 
-Omit `--reviewed-baseline` when no independently reviewed earlier case set
-exists. When supplied, it must be a one-row, hash-anchored aggregate that
-conserves its reviewed Task, effect, and support counts. The reporter renders
-it in a separate historical-baseline section; it never imports those effects
-into unresolved current Tasks or into current saturation.
+Optionally supply a v3 `--reviewed-baseline` when an independently reviewed
+earlier case set exists. The reporter keeps its hash-anchored Task and Effect
+counts separate from the current rerun.
 
-The deterministic reporter rejects Task judgment schema v1, weak fragment-only
-source objectives, missing or invalid episode ownership and anchors, reused
-episode identity anchors, reads or choices outside the established episode,
+The deterministic reporter rejects Task judgment schemas v1 and v2, weak
+fragment-only
+objectives, missing or invalid episode ownership and anchors, reused episode
+identity anchors, Reads or choices outside the established episode,
 unauthorized source messages, Task-window violations, unlinked cross-Chat
-merges, duplicated reads/choices, invalid effects or confidence, unbound
-outcome anchors, persisted support, and non-conserving aggregates.
+merges, duplicated Reads/choices, invalid Effects, unbound outcome anchors,
+v0.2 judgment fields, and non-conserving aggregates.
 
 The report must include:
 
-- a complete inventory of all submitted/adjudicated sample rows: clear Tasks
-  with boundary rationale and exposure/effects, plus excluded candidates;
-- confirmed and unresolved exposure Tasks;
-- effect Tasks and deduplicated independent effects;
+- a complete inventory of clear Tasks with boundary rationale and excluded
+  candidates with structured exclusion reasons;
+- observed and unresolved Read Tasks;
+- Effect Tasks and observed Reads without an Effect;
 - the four-effect distribution;
-- task type × effect;
-- derived definite/limited support;
-- quota and saturation status;
+- every clear Task's Read and Effect result;
+- every excluded Task's reason;
 - authorized Chat, message, trace, and coverage-gap counts;
 - the four-class in-window Tree-read attempt conservation table;
-- local-default-branch-match versus unverified-source counts;
 - explicit language that unresolved and receipt absence are unknown;
-- `N/A / pending`, without effect totals or saturation, when no clear Task has
-  evidence-ready exposure;
 - a separately labeled, evidence-anchored historical baseline when supplied,
   without merging it into the current rerun;
 - no global effectiveness rate.
 
 Because all authorized Chats are not an eligible value denominator, return local links
 to `REPORT.md` and `evidence.jsonl`, the acquisition bound if one was supplied,
-authorization mode, sample status, and any material coverage gap. Keep
+authorization mode, sample size, and any material coverage gap. Keep
 artifacts private in the invoking Agent workspace and never commit them.
-Describe the result as an exploratory evidence scan, not causal proof, ROI, or
-an effectiveness rate.
+Describe the result as a sampled evidence report, not causal proof, ROI, or an
+effectiveness rate.

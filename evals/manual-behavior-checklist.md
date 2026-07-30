@@ -4,7 +4,7 @@ Use this checklist before admitting a `context-tree-value-audit` revision. Run i
 in designated First Tree Agent workspaces against disposable or sanitized
 records. Never commit generated artifacts.
 
-For a 0.3.0 upgrade, confirm the installed payload exposes only
+For a 0.4.0 upgrade, confirm the installed payload exposes only
 `$context-tree-value-audit`; the superseded `$context-tree-insights` directory
 must not remain as a second callable Skill. Exercise the README's minimal
 move/copy/compare flow and confirm the old payload is outside both Skill
@@ -21,7 +21,7 @@ Record in a private note:
 - exact Chat UUIDs when using `explicit_chat`;
 - optional acquisition bound;
 - artifact directory;
-- clear Task quota and expansion batches.
+- clear Task count and acquisition bound;
 - current Runtime and evidence-adapter version.
 
 Capture the Tree HEAD, `git status --short`, and initial artifact directory
@@ -77,7 +77,7 @@ Pass when:
 - Claude sidechain/subagent rows, tool-result echoes, and later session/Chat
   drift do not become root evidence;
 - Cursor and Kimi Code produce explicit
-  `historical_evidence_not_supported` gaps, no read IDs, and pending Tasks;
+  `historical_evidence_not_supported` gaps, no read IDs, and unresolved Reads;
 - no First Tree Runtime handler, local state schema, server, database, or Web
   surface is changed for the audit;
 - equal-timestamp results appended before their calls remain unresolved;
@@ -170,59 +170,37 @@ Pass when:
 - malformed receipt is omitted with `context_decision_invalid`;
 - no malformed receipt blocks the message, Chat export, or audit.
 
-## 5. Continuous episode reconstruction and ownership
+## 5. Continuous Task reconstruction
 
-Use sanitized Chats containing:
-
-- one objective progressing through plan, implementation, review, QA,
-  correction, and final delivery;
-- short continuations and status/context prompts such as `continue`, `why`,
-  `继续`, `你在干啥`, `进展呢`, and `你这个修复什么`, including polite
-  wrappers such as `please continue`, `status please`, `请继续`, and
-  `修一下吧`, plus deictic whole-command variants such as
-  `please continue fixing it`, `继续修一下`, and `帮忙修下`, and edge-decorated
-  forms such as `“please continue”`, `please continue 🙏`, `请继续吧～`, and
-  `请继续（谢谢）`, including one or more punctuation-adjacent First Tree
-  mentions;
-- concrete objectives containing a continuation verb, such as
-  `Please continue the state-source design and deliver the authority
-  decision`;
-- two genuinely independent objectives with material scope changes and
-  separate outcomes;
-- work first assigned to another Agent, followed by a visible transfer,
-  acceptance, or independent review assignment to the audited Agent.
+Use one Chat containing one objective across planning, implementation, review,
+QA, correction, and final delivery, followed by a genuinely independent
+objective and outcome. Include short continuation/status prompts; polite or
+deictic variants such as `please continue`, `status please`, `修一下吧`,
+`please continue fixing it`, `please fix it`, `continue the work`,
+`继续修一下`, `修复一下`, `修这个`, and `帮忙修下`; edge-decorated forms
+such as `“please continue”`, `please continue 🙏`, and `请继续（谢谢）`;
+one or more leading Agent mentions; and concrete objectives that contain
+`continue` while naming an independent scope and deliverable.
 
 Pass when:
 
-- the single-deliverable phases, corrections, continuations, status prompts,
-  and clarification messages remain one parent Task;
-- each genuinely new objective produces one Task with a separate material
-  scope, independent outcome, and unambiguous source boundary;
-- clear Tasks use schema v2 and carry ownership, objective, and outcome
-  anchors plus primary-deliverable, boundary, and type reasons;
-- assigned/transferred ownership has a non-current-Agent anchor and accepted
-  ownership has a current-Agent anchor, with matching objective-anchor sender;
-- at least one objective-anchor source message is concrete, so synthesized
-  judgment prose cannot upgrade a weak source fragment;
-- every clear Task has a current-Agent outcome anchor;
-- another Agent's work remains context before the audited Agent's visible
-  assignment, transfer, or acceptance;
-- an outcome anchor before ownership/objective, or any episode anchor outside
-  the Task source fragments, is rejected;
-- source messages, reads, and choices outside the derived episode
-  ownership/objective-to-outcome interval are rejected;
-- ownership/objective/outcome identity anchors reused across clear Tasks are
-  rejected;
-- fragment-only objectives are rejected as clear Tasks rather than expanded by
-  guesswork;
-- closed polite/modal wrapper stripping catches equivalent weak prompts without
-  rejecting continuation wording that also names a concrete objective and
-  deliverable;
-- a Task missing a gate is marked excluded with a structured exclusion kind;
-- excluded Tasks contain no episode, exposure, or effects;
-- Task type follows the primary terminal deliverable, and ordinary progress is
-  not mislabeled as `coordination_orchestration`;
-- one read or choice copied into both Tasks is rejected.
+- all phases and continuations for the first deliverable remain one Task;
+- it produces two Task rows with separate source messages and windows;
+- clear Tasks have audited-Agent ownership, objective, material object scope,
+  independent outcome, bounded source fragments, one primary deliverable, and
+  explicit ownership/objective/outcome anchors;
+- weak prompt variants and weak normalized objectives are merged or excluded,
+  while concrete `continue` objectives remain eligible;
+- a weak assignment cannot borrow another sender's concrete objective, and one
+  Agent message cannot simultaneously serve as objective and terminal outcome;
+- work owned by another Agent remains context until a visible assignment,
+  transfer, or acceptance;
+- a candidate missing any clear-Task gate is excluded with the deterministic
+  structured exclusion kind;
+- excluded candidates contain no episode, Read, or Effect judgment;
+- Reads and choices outside the established episode are rejected;
+- ownership/objective/outcome anchors copied across Tasks are rejected;
+- one Read or choice copied into both Tasks is rejected.
 
 ## 6. Cross-Chat handoff merge
 
@@ -235,68 +213,50 @@ Pass when:
 - the same fragments without linkage are rejected;
 - unrelated Chats cannot be merged by topical similarity alone.
 
-## 7. Confirmed and unresolved exposure
+## 7. Observed and unresolved Read
 
 Create one Task with attributable Task-window reads and one historical Task
-whose trace coverage cannot resolve exposure.
+whose trace coverage cannot resolve the Read.
 
 Pass when:
 
-- the first is `confirmed` with valid read IDs;
+- the first is `observed` with valid Read IDs;
 - the second is `unresolved` with a reason;
-- unresolved exposure has no reads and no effects;
+- unresolved Read has no Read IDs and a null Effect;
 - no `not_observed`, `unused`, or negative-value state is emitted;
-- reads outside the Task window or source Chats are rejected;
+- Reads outside the established episode, Task window, or source Chats are
+  rejected;
 - unresolved Tasks appear in coverage counts, never an unused denominator.
 
-## 8. Four effects, anchors, and deduplication
+## 8. Optional Effect
 
 Prepare valid examples of `confirmed`, `constrained`, `redirected`, and
-`conflicted`, with `verified` or `probable` original judgments.
+`conflicted`, plus observed-Read Tasks with no Effect.
 
 Pass when:
 
-- `informed`, `none`, unknown effects, and numeric weights are rejected;
-- every effect has Task exposure reads, later same-Agent choices from the Task
-  source fragments, an outcome anchor bound to the episode outcome IDs, and a
-  summary;
-- every effect persists the five passage-to-choice rubric checks; `verified`
-  requires all five while `probable` requires the first four and no visible
-  influence;
-- `verified` additionally requires every cited passage to match the same node
-  in the bound Tree's local `origin/HEAD` snapshot; an unverified source may
-  support only `probable`;
-- post-choice reads and out-of-window choices are rejected;
-- duplicate effect evidence does not inflate independent-effect totals;
-- input `support` is rejected;
-- reporter-derived support is definite only for confirmed + verified and
-  limited otherwise.
+- unknown Effects, multiple Effects, confidence tiers, and numeric weights are
+  rejected;
+- every Effect has observed Task Reads, later same-Agent choices, an outcome
+  anchor bound to the episode outcome, and a summary;
+- the bound Effect outcome anchor is not earlier than any cited Read completion
+  or choice;
+- post-choice Reads and out-of-window choices are rejected;
+- a null Effect requires one short `effect_reason`;
+- a decision receipt alone does not create an Effect;
+- superseded task types, sampling fields, `verified` / `probable`, rubrics,
+  and support fields are rejected;
+- there is at most one Effect per Task.
 
-## 9. Task quota and saturation
+## 9. Sample handling
 
-Run a sanitized sequence with:
-
-- 100 clear Tasks;
-- a 20-Task expansion with no saturation signals;
-- a second 20-Task expansion with no saturation signals.
+Run sanitized reports with 1, 16, and 44 clear Tasks.
 
 Pass when:
 
-- `sampling_order` is contiguous and reproducible;
-- all five task types are represented in the initial 100 clear Tasks;
-- the report records 100 + 20 + 20 and saturation at 140;
-- a new effect type, key counterexample, or conclusion change resets the
-  consecutive-empty counter;
-- unresolved exposure never counts as an empty effect batch or establishes
-  saturation;
-- missing or spurious `new_effect_type` annotations are rejected against the
-  actual cumulative effect-type set;
-- rows beyond an already established saturation point are rejected;
-- an incomplete sample is reported as incomplete/continuing rather than a
-  stable rate;
-- a small corpus or genuinely absent type stays partial; no weak Task is
-  retained, split, or invented to meet quota/type coverage;
-- `--days`, when supplied, remains only an acquisition bound.
+- every available clear Task is reported without a minimum quota;
+- no task-type coverage, batch expansion, or saturation state is emitted;
+- `--days`, when supplied, remains only an acquisition bound;
 - a Chat with messages inside the bound but later activity after `window.end`
   is fetched and filtered rather than omitted.
 
@@ -304,30 +264,29 @@ Pass when:
 
 Pass when the report includes:
 
-- clear and excluded Tasks;
-- confirmed and unresolved exposure Tasks;
-- effect Tasks and independent effects;
-- effect distribution and task type × effect;
-- derived support and sampling status;
-- authorized Chat/message/trace coverage and gaps.
+- a complete clear Task inventory with ownership, objective, scope, primary
+  deliverable, outcome, Read, Effect, and evidence summary;
+- every clear Task's ownership/objective/outcome anchors and boundary rationale;
+- a complete excluded-candidate inventory with exclusion kind, observed scope,
+  and reason;
+- observed and unresolved Read Tasks;
+- Effect Tasks and observed Reads without an Effect;
+- the four-Effect distribution;
+- authorized Chat/message/trace coverage and gaps;
 - the four-class in-window Tree-read attempt conservation table.
 
 Verify:
 
-- confirmed + unresolved = clear Tasks;
-- effect Tasks ≤ clear Tasks;
-- task type × effect cells sum to independent effects;
+- observed + unresolved = clear Tasks;
+- Effect + observed Read without Effect = observed Read Tasks;
+- the four Effect counts sum to Effect Tasks;
 - the report does not output a global effectiveness rate;
-- read counts, receipts, and unresolved gaps are not represented as causal
+- Read counts, receipts, and unresolved gaps are not represented as causal
   value or non-value.
-- the report labels itself exploratory, separates local default-branch matches
-  from unverified sources, and does not imply remote provenance, causal proof,
-  or ROI.
-- zero evidence-ready Tasks render effect totals, distribution, support,
-  representatives, and saturation as `N/A / pending`, never numeric zero.
+- the report labels itself sampled and does not imply remote provenance,
+  causal proof, or ROI;
 - an optional reviewed baseline is hash-anchored, internally conserving, and
-  rendered separately; it does not alter current exposure, effects, or
-  saturation.
+  rendered separately; it does not alter current Reads or Effects.
 
 For the 0.2.1 historical pilot rerun, the 210 in-window calls must all remain
 accounted for. Compare the new result with the grammar-only overlay
@@ -335,8 +294,8 @@ accounted for. Compare the new result with the grammar-only overlay
 delta must name the command-shape class and the stricter attribution or safety
 reason. Do not tune the parser merely to reproduce the target counts.
 
-After collection, redo Task-level exposure and effect judgment. Never reuse
-the old blanket `unresolved` / empty-effects rows as negative cases, and never
+After collection, redo Task-level Read and Effect judgment. Never reuse
+the old blanket `unresolved` / empty-Effect rows as negative cases, and never
 let the current rerun erase the separately reviewed 37 positive effect Tasks.
 
 ## 11. No product or source mutation
@@ -360,6 +319,6 @@ Pass when:
 
 Record pass/fail and the observable artifact or transcript location for every
 section. A failure in explicit routing, authorization, trace preflight,
-Agent/workspace/Tree isolation, Task reconstruction, exposure semantics,
-effect validation, quota/saturation, conservation, or no-mutation behavior
+Agent/workspace/Tree isolation, Task reconstruction, Read semantics,
+Effect validation, conservation, or no-mutation behavior
 blocks the revision.
