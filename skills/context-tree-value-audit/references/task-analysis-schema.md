@@ -97,6 +97,21 @@ A short continuation, status prompt, or context-dependent question is not a
 clear Task by itself. Examples include `continue`, `status`, `why`, `继续`,
 `做了吗`, `你在干啥`, `进展呢`, `地址呢`, `为什么`, `什么意思`,
 `你这个修复什么`, `那这个呢`, `再检查`, `修一下`, and `重新看`.
+Polite or modal wrappers do not make those fragments concrete:
+`please continue`, `status please`, `请继续`, and `修一下吧` remain weak.
+The anchored context-dependent command set also keeps deictic variants such as
+`please continue fixing it`, `继续修一下`, and `帮忙修下` weak.
+Edge-only Unicode punctuation/symbol decoration and closed high-frequency
+modifiers do not change that result, so `“please continue”`,
+`please just continue`, `请继续吧～`, and `请继续（谢谢）` remain weak.
+One or more leading First Tree Agent mentions use the exact slug grammar and
+stop before punctuation or adjacent prose: `@agent-one @agent-two，请继续`
+remains weak, while
+`@agent-one @agent-two，请继续完成状态源方案并交付独立决定` remains
+concrete.
+Strip only those closed decorations and wrappers; a message such as
+`Please continue the state-source design and deliver the authority decision`
+remains concrete because the residual text names an objective and deliverable.
 Merge it into its parent episode when that parent is visible; otherwise exclude
 it. Never invent the missing objective from surrounding work performed by
 another Agent.

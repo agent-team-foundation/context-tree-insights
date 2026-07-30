@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -75,6 +76,51 @@ WEAK_TASK_OBJECTIVES = {
     "重新看",
     "按刚才说的改",
 }
+WEAK_TASK_PREFIX_WRAPPERS = {
+    "please",
+    "kindly",
+    "could you",
+    "can you",
+    "would you",
+    "just",
+    "simply",
+    "请",
+    "请你",
+    "麻烦",
+    "麻烦你",
+    "劳烦",
+    "劳烦你",
+    "帮忙",
+    "帮我",
+    "能否",
+    "可以",
+}
+WEAK_TASK_SUFFIX_WRAPPERS = {
+    "please",
+    "thanks",
+    "thank you",
+    "谢谢",
+    "辛苦了",
+    "可以吗",
+    "好吗",
+    "行吗",
+    "一下",
+    "下",
+    "吧",
+    "呢",
+    "呀",
+    "啊",
+    "嘛",
+    "吗",
+    "哈",
+}
+WEAK_TASK_ANCHORED_PATTERNS = (
+    r"(?:continue\s+)?(?:fixing|working\s+on|with)\s+(?:it|this)",
+    r"(?:fix|check|review|try)\s+(?:it|this)\s+again",
+    r"continue\s+(?:it|this)",
+    r"继续(?:修|改|处理|弄)(?:一下|下)?",
+    r"(?:再)?(?:修|改|检查|看)(?:一下|下)?",
+)
 LINKAGE_VALUES = {
     "work_item",
     "explicit_handoff",
@@ -5153,17 +5199,105 @@ def optional_text(value: Any, *, field: str) -> str | None:
     return value.strip() or None
 
 
+def strip_edge_decorations(value: str, *, preserve_at: bool) -> str:
+    result = value.strip()
+    while result:
+        removed = False
+        if (
+            result
+            and (not preserve_at or result[0] != "@")
+            and unicodedata.category(result[0])[0] in {"P", "S"}
+        ):
+            result = result[1:].lstrip()
+            removed = True
+        if (
+            result
+            and unicodedata.category(result[-1])[0] in {"P", "S"}
+        ):
+            result = result[:-1].rstrip()
+            removed = True
+        if not removed:
+            break
+    return result
+
+
 def normalized_task_fragment(value: str) -> str:
     normalized = re.sub(r"\s+", " ", value.strip().casefold())
-    normalized = re.sub(r"^@\S+\s*", "", normalized)
-    return normalized.rstrip(" \t\r\n.!?。！？")
+    normalized = strip_edge_decorations(normalized, preserve_at=True)
+    while normalized.startswith("@"):
+        without_mention = re.sub(
+            r"^@[a-z0-9_-]{1,100}(?=[^a-z0-9_-]|$)\s*",
+            "",
+            normalized,
+            count=1,
+        )
+        if without_mention == normalized:
+            break
+        normalized = strip_edge_decorations(
+            without_mention,
+            preserve_at=True,
+        )
+    return strip_edge_decorations(normalized, preserve_at=False)
+
+
+def strip_task_wrapper(
+    value: str,
+    wrapper: str,
+    *,
+    prefix: bool,
+) -> str | None:
+    if value == wrapper:
+        return ""
+    if prefix:
+        if not value.startswith(wrapper):
+            return None
+        remainder = value[len(wrapper) :]
+        if wrapper.isascii() and not remainder.startswith(" "):
+            return None
+        return normalized_task_fragment(remainder)
+    if not value.endswith(wrapper):
+        return None
+    remainder = value[: -len(wrapper)]
+    if wrapper.isascii() and not remainder.endswith(" "):
+        return None
+    return normalized_task_fragment(remainder)
+
+
+def is_weak_task_clause(value: str) -> bool:
+    pending = [normalized_task_fragment(value)]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if (
+            not current
+            or current in WEAK_TASK_OBJECTIVES
+            or any(
+                re.fullmatch(pattern, current)
+                for pattern in WEAK_TASK_ANCHORED_PATTERNS
+            )
+        ):
+            return True
+        for prefix in WEAK_TASK_PREFIX_WRAPPERS:
+            stripped = strip_task_wrapper(
+                current, prefix, prefix=True
+            )
+            if stripped is not None and stripped not in seen:
+                pending.append(stripped)
+        for suffix in WEAK_TASK_SUFFIX_WRAPPERS:
+            stripped = strip_task_wrapper(
+                current, suffix, prefix=False
+            )
+            if stripped is not None and stripped not in seen:
+                pending.append(stripped)
+    return False
 
 
 def is_weak_task_fragment(value: str) -> bool:
     normalized = normalized_task_fragment(value)
     if not normalized:
-        return True
-    if normalized in WEAK_TASK_OBJECTIVES:
         return True
     clauses = [
         normalized_task_fragment(clause)
@@ -5171,7 +5305,7 @@ def is_weak_task_fragment(value: str) -> bool:
         if normalized_task_fragment(clause)
     ]
     return bool(clauses) and all(
-        clause in WEAK_TASK_OBJECTIVES for clause in clauses
+        is_weak_task_clause(clause) for clause in clauses
     )
 
 

@@ -177,7 +177,16 @@ Use sanitized Chats containing:
 - one objective progressing through plan, implementation, review, QA,
   correction, and final delivery;
 - short continuations and status/context prompts such as `continue`, `why`,
-  `继续`, `你在干啥`, `进展呢`, and `你这个修复什么`;
+  `继续`, `你在干啥`, `进展呢`, and `你这个修复什么`, including polite
+  wrappers such as `please continue`, `status please`, `请继续`, and
+  `修一下吧`, plus deictic whole-command variants such as
+  `please continue fixing it`, `继续修一下`, and `帮忙修下`, and edge-decorated
+  forms such as `“please continue”`, `please continue 🙏`, `请继续吧～`, and
+  `请继续（谢谢）`, including one or more punctuation-adjacent First Tree
+  mentions;
+- concrete objectives containing a continuation verb, such as
+  `Please continue the state-source design and deliver the authority
+  decision`;
 - two genuinely independent objectives with material scope changes and
   separate outcomes;
 - work first assigned to another Agent, followed by a visible transfer,
@@ -206,6 +215,9 @@ Pass when:
   rejected;
 - fragment-only objectives are rejected as clear Tasks rather than expanded by
   guesswork;
+- closed polite/modal wrapper stripping catches equivalent weak prompts without
+  rejecting continuation wording that also names a concrete objective and
+  deliverable;
 - a Task missing a gate is marked excluded with a structured exclusion kind;
 - excluded Tasks contain no episode, exposure, or effects;
 - Task type follows the primary terminal deliverable, and ordinary progress is

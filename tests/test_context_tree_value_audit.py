@@ -4477,7 +4477,29 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(0, accepted.returncode, accepted.stderr)
 
         for index, source_content in enumerate(
-            ("你在干啥，继续", "", "   ", "@fixture-agent")
+            (
+                "你在干啥，继续",
+                "",
+                "   ",
+                "@fixture-agent",
+                "please continue",
+                "请继续",
+                "修一下吧",
+                "status please",
+                "please continue fixing it",
+                "继续修一下",
+                "帮忙修下",
+                "“please continue”",
+                "please continue…",
+                "please continue 🙏",
+                "please just continue",
+                "请继续吧～",
+                "请继续哈",
+                "帮我继续",
+                "请继续（谢谢）",
+                "@fixture-agent，请继续",
+                "@agent-one @agent-two，请继续",
+            )
         ):
             weak_source_candidate = json.loads(json.dumps(candidate))
             next(
@@ -4496,6 +4518,40 @@ print(json.dumps({{"ok": True, "data": data}}))
             self.assertEqual(2, weak_source.returncode)
             self.assertIn(
                 "concrete objective-anchor source", weak_source.stderr
+            )
+        for index, source_content in enumerate(
+            (
+                "Please continue the state-source design and deliver the "
+                "independent authority decision.",
+                "请继续完成状态源方案并交付独立的 authority decision。",
+                "“Please continue the state-source design and deliver the "
+                "independent authority decision.” 🙏",
+                "@fixture-agent，请继续完成状态源方案并交付独立决定",
+                "@fixture-agent，修复任务定义验证器并提交补丁",
+                "@agent-one @agent-two，请继续完成状态源方案并交付独立决定",
+            )
+        ):
+            concrete_continue_candidate = json.loads(json.dumps(candidate))
+            next(
+                message
+                for message in concrete_continue_candidate["visible_messages"]
+                if message["message_id"] == assignment_id
+            )["content"] = source_content
+            write_jsonl(
+                self.artifacts / "candidates.jsonl",
+                [concrete_continue_candidate],
+            )
+            concrete_continue = self.report(
+                [valid],
+                evidence_name=(
+                    f"episode-concrete-continue-{index}-evidence.jsonl"
+                ),
+                report_name=(
+                    f"episode-concrete-continue-{index}-REPORT.md"
+                ),
+            )
+            self.assertEqual(
+                0, concrete_continue.returncode, concrete_continue.stderr
             )
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
 
@@ -4722,7 +4778,30 @@ print(json.dumps({{"ok": True, "data": data}}))
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
 
         for index, objective in enumerate(
-            ("continue", "继续", "你在干啥", "为什么", "你这个修复什么")
+            (
+                "continue",
+                "继续",
+                "你在干啥",
+                "为什么",
+                "你这个修复什么",
+                "please continue",
+                "请继续",
+                "修一下吧",
+                "status please",
+                "please continue fixing it",
+                "继续修一下",
+                "帮忙修下",
+                "“please continue”",
+                "please continue…",
+                "please continue 🙏",
+                "please just continue",
+                "请继续吧～",
+                "请继续哈",
+                "帮我继续",
+                "请继续（谢谢）",
+                "@fixture-agent，请继续",
+                "@agent-one @agent-two，请继续",
+            )
         ):
             weak = json.loads(json.dumps(valid))
             weak["objective"] = objective
