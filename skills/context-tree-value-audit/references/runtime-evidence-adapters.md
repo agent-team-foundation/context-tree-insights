@@ -17,8 +17,8 @@ persist the same transcript family.
 | Codex | Root session JSONL in the local Codex sessions directory | Supported |
 | Claude Code | Root project transcript JSONL with complete `tool_use` / `tool_result` blocks (`CLAUDE_CONFIG_DIR` when set) | Supported |
 | Claude Code TUI | Claude project transcript JSONL (`CLAUDE_CONFIG_DIR` when set) | Supported through the Claude adapter |
-| Cursor | Existing native records do not retain complete attributable tool output | Historical audit pending / unsupported |
-| Kimi Code | Native wire lacks a durable First Tree Chat/Agent binding boundary | Historical audit pending / unsupported |
+| Cursor | Existing native records do not retain complete attributable tool output | Unsupported; affected Reads unresolved |
+| Kimi Code | Native wire lacks a durable First Tree Chat/Agent binding boundary | Unsupported; affected Reads unresolved |
 
 Supported adapters consume evidence already produced by each Runtime. This
 Skill does not modify Runtime handlers or introduce a shared Tree-read CLI,

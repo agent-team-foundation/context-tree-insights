@@ -77,7 +77,7 @@ Pass when:
 - Claude sidechain/subagent rows, tool-result echoes, and later session/Chat
   drift do not become root evidence;
 - Cursor and Kimi Code produce explicit
-  `historical_evidence_not_supported` gaps, no read IDs, and pending Tasks;
+  `historical_evidence_not_supported` gaps, no read IDs, and unresolved Reads;
 - no First Tree Runtime handler, local state schema, server, database, or Web
   surface is changed for the audit;
 - equal-timestamp results appended before their calls remain unresolved;

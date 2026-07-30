@@ -13,8 +13,9 @@ explicit audit capability, not two independent workflows.
 
 The audit core remains separate from First Tree core. Codex, Claude Code, and
 Claude Code TUI use their existing native local transcripts. Cursor and Kimi
-Code remain pending for historical value audits because their existing local
-records cannot yet prove complete, Chat-bound Tree reads.
+Code remain unsupported for historical value audits because their existing
+local records cannot yet prove complete, Chat-bound Tree reads; affected Reads
+are unresolved.
 There is no shared Tree-read CLI, generic tool abstraction, runtime event,
 database table, schedule, Context Tree write, or Web surface. Each run covers
 one First Tree Agent, one managed workspace, one current Runtime, and one bound
@@ -180,7 +181,7 @@ The Skill orchestrates four stages:
    classifies every in-window Tree-read attempt into a conserving four-state
    grammar, reconstructs exact or read-only-composite evidence plus visible
    choices, and distinguishes local default-branch matches from unverified
-   sources. Unsupported Runtime history stays pending.
+   sources. Unsupported Runtime history produces unresolved Reads.
 3. The Agent reconstructs complete Tasks and writes one observed/unresolved
    Read plus at most one Effect in schema-v2 `task-judgments.jsonl`.
 4. `report` validates source ownership, windows, cross-Chat linkage,
