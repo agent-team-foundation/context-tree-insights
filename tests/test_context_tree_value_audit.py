@@ -26,6 +26,8 @@ SECOND_CHAT_ID = "22222222-2222-4222-8222-222222222222"
 UNAUTHORIZED_CHAT_ID = "88888888-8888-4888-8888-888888888888"
 MESSAGE_ID = "33333333-3333-4333-8333-333333333333"
 SECOND_MESSAGE_ID = "44444444-4444-4444-8444-444444444444"
+SECOND_OBJECTIVE_MESSAGE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+ACCEPTANCE_MESSAGE_ID = "66666666-6666-4666-8666-666666666666"
 ORG_ID = "77777777-7777-4777-8777-777777777777"
 NOW = "2026-07-24T00:00:00Z"
 
@@ -181,7 +183,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("explicit_agent", reference)
         self.assertIn("explicit_chat", reference)
         self.assertIn("Task, Read, and Effect Schema", task_reference)
-        self.assertIn('"schema_version": 2', task_reference)
+        self.assertIn('"schema_version": 3', task_reference)
         self.assertIn('"status": "observed"', task_reference)
         self.assertIn('"effect": null', task_reference)
         self.assertIn("no more direct user instruction", task_reference)
@@ -191,7 +193,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("original_judgment", task_reference)
         self.assertNotIn("sampling_order", task_reference)
         self.assertIn("sampled evidence report", skill)
-        self.assertEqual("0.3.0", version)
+        self.assertEqual("0.4.0", version)
         self.assertIn(".skill-quarantine/", readme)
         self.assertIn("diff -qr", readme)
         self.assertIn("rollback", readme)
@@ -923,6 +925,15 @@ print(json.dumps({{"ok": True, "data": data}}))
                     "source_agent_id": AGENT_ID,
                     "messages": [
                         {
+                            "message_id": ACCEPTANCE_MESSAGE_ID,
+                            "created_at": "2026-07-22T10:01:00Z",
+                            "sender_id": AGENT_ID,
+                            "content": (
+                                "I will choose the authoritative state source "
+                                "and document the decision."
+                            ),
+                        },
+                        {
                             "message_id": MESSAGE_ID,
                             "created_at": "2026-07-22T10:05:00Z",
                             "sender_id": AGENT_ID,
@@ -1218,6 +1229,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         *,
         task_id: str = "task-1",
         message_id: str = MESSAGE_ID,
+        objective_message_id: str | None = None,
         read_status: str = "observed",
         read_ids: list[str] | None = None,
         effect: dict[str, Any] | None | object = ...,
@@ -1241,8 +1253,26 @@ print(json.dumps({{"ok": True, "data": data}}))
                 if selected_reads and read_status == "observed"
                 else None
             )
+        visible_message_ids = {
+            message["message_id"]
+            for message in candidate.get("visible_messages", [])
+            if isinstance(message, dict)
+            and isinstance(message.get("message_id"), str)
+        }
+        objective_anchor_id = (
+            objective_message_id
+            or (
+                ACCEPTANCE_MESSAGE_ID
+                if ACCEPTANCE_MESSAGE_ID in visible_message_ids
+                and message_id != ACCEPTANCE_MESSAGE_ID
+                else message_id
+            )
+        )
+        source_message_ids = list(
+            dict.fromkeys([objective_anchor_id, message_id])
+        )
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "task_id": task_id,
             "status": "clear",
             "objective": "Choose one state source",
@@ -1253,9 +1283,23 @@ print(json.dumps({{"ok": True, "data": data}}))
             "source_fragments": [
                 {
                     "audit_id": candidate["audit_id"],
-                    "message_ids": [message_id],
+                    "message_ids": source_message_ids,
                 }
             ],
+            "episode": {
+                "ownership": {
+                    "kind": "accepted",
+                    "anchor_message_ids": [objective_anchor_id],
+                    "reason": "The audited Agent visibly accepted the objective.",
+                },
+                "objective_anchor_message_ids": [objective_anchor_id],
+                "outcome_anchor_message_ids": [message_id],
+                "continuation_message_ids": [],
+                "primary_deliverable": "A decision selecting one state source.",
+                "boundary_reason": (
+                    "One accepted objective produced one terminal decision."
+                ),
+            },
             "read": {
                 "status": read_status,
                 "read_ids": selected_reads,
@@ -4021,7 +4065,7 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertEqual(0, collected.returncode, collected.stderr)
         candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
         excluded = {
-            "schema_version": 2,
+            "schema_version": 3,
             "task_id": "excluded-1",
             "status": "excluded",
             "objective": None,
@@ -4035,6 +4079,7 @@ print(json.dumps({{"ok": True, "data": data}}))
                     "message_ids": [MESSAGE_ID],
                 }
             ],
+            "exclusion_kind": "missing_objective",
             "exclusion_reason": "No clear objective and outcome boundary.",
         }
         result = self.report(
@@ -4050,6 +4095,21 @@ print(json.dumps({{"ok": True, "data": data}}))
         self.assertIn("## Excluded Tasks", report)
         self.assertIn("No clear objective and outcome boundary.", report)
 
+        for legacy_field, legacy_value in (
+            ("task_type", "solution_design"),
+            ("sampling_order", 1),
+            ("saturation_signals", []),
+        ):
+            legacy = json.loads(json.dumps(excluded))
+            legacy[legacy_field] = legacy_value
+            rejected = self.report(
+                [legacy],
+                evidence_name=f"excluded-legacy-{legacy_field}-evidence.jsonl",
+                report_name=f"excluded-legacy-{legacy_field}-REPORT.md",
+            )
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("superseded v0.2", rejected.stderr)
+
     def test_one_chat_splits_into_two_tasks_and_duplicate_read_is_rejected(
         self,
     ) -> None:
@@ -4058,15 +4118,25 @@ print(json.dumps({{"ok": True, "data": data}}))
         collected = self.collect("candidates.jsonl")
         self.assertEqual(0, collected.returncode, collected.stderr)
         candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
-        second_message = {
-            "message_id": SECOND_MESSAGE_ID,
-            "created_at": "2026-07-22T10:05:30Z",
-            "sender_id": AGENT_ID,
-            "sender_kind": None,
-            "content": "A separate task completed.",
-        }
-        candidate["visible_messages"].append(second_message)
-        candidate["chat"]["message_count"] += 1
+        candidate["visible_messages"].extend(
+            [
+                {
+                    "message_id": SECOND_OBJECTIVE_MESSAGE_ID,
+                    "created_at": "2026-07-22T10:05:10Z",
+                    "sender_id": AGENT_ID,
+                    "sender_kind": None,
+                    "content": "I will explain a separate result.",
+                },
+                {
+                    "message_id": SECOND_MESSAGE_ID,
+                    "created_at": "2026-07-22T10:05:30Z",
+                    "sender_id": AGENT_ID,
+                    "sender_kind": None,
+                    "content": "A separate task completed.",
+                },
+            ]
+        )
+        candidate["chat"]["message_count"] += 2
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
 
         first_task = self.task_judgment(candidate)
@@ -4074,6 +4144,7 @@ print(json.dumps({{"ok": True, "data": data}}))
             candidate,
             task_id="task-2",
             message_id=SECOND_MESSAGE_ID,
+            objective_message_id=SECOND_OBJECTIVE_MESSAGE_ID,
             read_status="unresolved",
             read_ids=[],
             effect=None,
@@ -4111,6 +4182,7 @@ print(json.dumps({{"ok": True, "data": data}}))
             candidate,
             task_id="task-2",
             message_id=SECOND_MESSAGE_ID,
+            objective_message_id=SECOND_OBJECTIVE_MESSAGE_ID,
             read_ids=[candidate["reads"][0]["read_id"]],
             effect=None,
         )
@@ -4120,7 +4192,398 @@ print(json.dumps({{"ok": True, "data": data}}))
             report_name="minimal-duplicate-REPORT.md",
         )
         self.assertEqual(2, duplicate_result.returncode)
-        self.assertIn("copied across incompatible Tasks", duplicate_result.stderr)
+        self.assertIn("precedes established episode", duplicate_result.stderr)
+
+    def test_task_episode_ownership_anchors_and_weak_fragments_are_enforced(
+        self,
+    ) -> None:
+        self.write_chat_export()
+        self.write_trace_fixtures()
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
+        candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        assignment_id = "assignment-message"
+        objective_id = "objective-message"
+        continuation_id = "continuation-message"
+        candidate["visible_messages"].extend(
+            [
+                {
+                    "message_id": assignment_id,
+                    "created_at": "2026-07-22T10:00:00Z",
+                    "sender_id": OTHER_AGENT_ID,
+                    "sender_kind": "human",
+                    "content": (
+                        "Choose the authoritative state source and deliver the "
+                        "decision."
+                    ),
+                },
+                {
+                    "message_id": objective_id,
+                    "created_at": "2026-07-22T10:01:00Z",
+                    "sender_id": OTHER_AGENT_ID,
+                    "sender_kind": "human",
+                    "content": (
+                        "Use state persistence as the scope and deliver the "
+                        "authoritative state-source decision."
+                    ),
+                },
+                {
+                    "message_id": continuation_id,
+                    "created_at": "2026-07-22T10:04:00Z",
+                    "sender_id": OTHER_AGENT_ID,
+                    "sender_kind": "human",
+                    "content": "Please continue.",
+                },
+            ]
+        )
+        candidate["chat"]["message_count"] += 3
+        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
+
+        valid = self.task_judgment(candidate)
+        valid["source_fragments"][0]["message_ids"] = [
+            assignment_id,
+            objective_id,
+            continuation_id,
+            MESSAGE_ID,
+        ]
+        valid["episode"] = {
+            "ownership": {
+                "kind": "assigned",
+                "anchor_message_ids": [assignment_id],
+                "reason": "A human assigned the objective to the audited Agent.",
+            },
+            "objective_anchor_message_ids": [objective_id],
+            "outcome_anchor_message_ids": [MESSAGE_ID],
+            "continuation_message_ids": [continuation_id],
+            "primary_deliverable": "A decision selecting one state source.",
+            "boundary_reason": "One assignment led to one terminal decision.",
+        }
+        accepted = self.report(
+            [valid],
+            evidence_name="episode-valid-evidence.jsonl",
+            report_name="episode-valid-REPORT.md",
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        report = (self.artifacts / "episode-valid-REPORT.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("## Clear Task Boundary Rationale", report)
+        self.assertIn("Ownership anchors", report)
+        self.assertIn("Primary deliverable", report)
+
+        weak_variants = (
+            "please continue",
+            "请继续",
+            "修一下吧",
+            "status please",
+            "please continue fixing it",
+            "please fix it",
+            "continue the work",
+            "proceed",
+            "please proceed",
+            "go ahead",
+            "keep going",
+            "carry on",
+            "fix that",
+            "continue with that",
+            "try again",
+            "继续修一下",
+            "继续做",
+            "接着做",
+            "修复一下",
+            "修这个",
+            "重试一下",
+            "处理一下吧",
+            "帮忙修下",
+            "“please continue”",
+            "please continue 🙏",
+            "请继续（谢谢）",
+            "@fixture-agent，请继续",
+            "@agent-one @agent-two，请继续",
+        )
+        for index, source_content in enumerate(weak_variants):
+            weak_candidate = json.loads(json.dumps(candidate))
+            next(
+                message
+                for message in weak_candidate["visible_messages"]
+                if message["message_id"] == objective_id
+            )["content"] = source_content
+            write_jsonl(self.artifacts / "candidates.jsonl", [weak_candidate])
+            result = self.report(
+                [valid],
+                evidence_name=f"episode-weak-{index}-evidence.jsonl",
+                report_name=f"episode-weak-{index}-REPORT.md",
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("concrete objective-anchor source", result.stderr)
+
+        concrete_variants = (
+            "Please continue the state-source design and deliver the decision.",
+            "Proceed with the schema-v3 validator and deliver PR #7.",
+            "请继续完成状态源方案并交付独立决定",
+            "继续做 schema v3 validator 并提交 PR #7",
+            "@agent-one @agent-two，请继续完成状态源方案并交付独立决定",
+        )
+        for index, source_content in enumerate(concrete_variants):
+            concrete_candidate = json.loads(json.dumps(candidate))
+            next(
+                message
+                for message in concrete_candidate["visible_messages"]
+                if message["message_id"] == objective_id
+            )["content"] = source_content
+            write_jsonl(
+                self.artifacts / "candidates.jsonl",
+                [concrete_candidate],
+            )
+            result = self.report(
+                [valid],
+                evidence_name=f"episode-concrete-{index}-evidence.jsonl",
+                report_name=f"episode-concrete-{index}-REPORT.md",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        mixed_candidate = json.loads(json.dumps(candidate))
+        next(
+            message
+            for message in mixed_candidate["visible_messages"]
+            if message["message_id"] == objective_id
+        )["content"] = "Please continue."
+        write_jsonl(self.artifacts / "candidates.jsonl", [mixed_candidate])
+        mixed_sender_objective = json.loads(json.dumps(valid))
+        mixed_sender_objective["source_fragments"][0]["message_ids"].insert(
+            2, ACCEPTANCE_MESSAGE_ID
+        )
+        mixed_sender_objective["episode"][
+            "objective_anchor_message_ids"
+        ].append(ACCEPTANCE_MESSAGE_ID)
+        mixed_sender_result = self.report(
+            [mixed_sender_objective],
+            evidence_name="episode-mixed-sender-evidence.jsonl",
+            report_name="episode-mixed-sender-REPORT.md",
+        )
+        self.assertEqual(2, mixed_sender_result.returncode)
+        self.assertIn(
+            "ownership-compatible concrete objective-anchor",
+            mixed_sender_result.stderr,
+        )
+
+        late_objective_id = "late-concrete-objective-message"
+        late_objective_candidate = json.loads(json.dumps(candidate))
+        next(
+            message
+            for message in late_objective_candidate["visible_messages"]
+            if message["message_id"] == objective_id
+        )["content"] = "Please continue."
+        late_objective_candidate["visible_messages"].append(
+            {
+                "message_id": late_objective_id,
+                "created_at": "2026-07-22T10:03:00Z",
+                "sender_id": OTHER_AGENT_ID,
+                "sender_kind": "human",
+                "content": (
+                    "Deliver the independent authoritative state-source "
+                    "decision."
+                ),
+            }
+        )
+        late_objective_candidate["chat"]["message_count"] += 1
+        write_jsonl(
+            self.artifacts / "candidates.jsonl",
+            [late_objective_candidate],
+        )
+        read_before_concrete_objective = json.loads(json.dumps(valid))
+        read_before_concrete_objective["source_fragments"][0][
+            "message_ids"
+        ].insert(2, late_objective_id)
+        read_before_concrete_objective["episode"][
+            "objective_anchor_message_ids"
+        ].append(late_objective_id)
+        read_before_concrete_result = self.report(
+            [read_before_concrete_objective],
+            evidence_name="episode-read-before-concrete-evidence.jsonl",
+            report_name="episode-read-before-concrete-REPORT.md",
+        )
+        self.assertEqual(2, read_before_concrete_result.returncode)
+        self.assertIn(
+            "precedes established episode ownership/objective",
+            read_before_concrete_result.stderr,
+        )
+
+        late_ownership_id = "late-compatible-ownership-message"
+        late_ownership_candidate = json.loads(json.dumps(candidate))
+        next(
+            message
+            for message in late_ownership_candidate["visible_messages"]
+            if message["message_id"] == objective_id
+        )["sender_id"] = AGENT_ID
+        late_ownership_candidate["visible_messages"].append(
+            {
+                "message_id": late_ownership_id,
+                "created_at": "2026-07-22T10:03:00Z",
+                "sender_id": AGENT_ID,
+                "sender_kind": "agent",
+                "content": (
+                    "I accept ownership of the authoritative state-source "
+                    "decision."
+                ),
+            }
+        )
+        late_ownership_candidate["chat"]["message_count"] += 1
+        write_jsonl(
+            self.artifacts / "candidates.jsonl",
+            [late_ownership_candidate],
+        )
+        read_before_compatible_ownership = json.loads(json.dumps(valid))
+        read_before_compatible_ownership["source_fragments"][0][
+            "message_ids"
+        ].insert(2, late_ownership_id)
+        read_before_compatible_ownership["episode"]["ownership"] = {
+            "kind": "accepted",
+            "anchor_message_ids": [assignment_id, late_ownership_id],
+            "reason": (
+                "The audited Agent visibly accepted the assigned objective."
+            ),
+        }
+        read_before_ownership_result = self.report(
+            [read_before_compatible_ownership],
+            evidence_name="episode-read-before-ownership-evidence.jsonl",
+            report_name="episode-read-before-ownership-REPORT.md",
+        )
+        self.assertEqual(2, read_before_ownership_result.returncode)
+        self.assertIn(
+            "precedes established episode ownership/objective",
+            read_before_ownership_result.stderr,
+        )
+
+        human_outcome_id = "human-outcome-message"
+        mixed_outcome_candidate = json.loads(json.dumps(candidate))
+        mixed_outcome_candidate["visible_messages"].append(
+            {
+                "message_id": human_outcome_id,
+                "created_at": "2026-07-22T10:05:30Z",
+                "sender_id": OTHER_AGENT_ID,
+                "sender_kind": "human",
+                "content": "Thanks, this delivery is complete.",
+            }
+        )
+        mixed_outcome_candidate["chat"]["message_count"] += 1
+        write_jsonl(
+            self.artifacts / "candidates.jsonl",
+            [mixed_outcome_candidate],
+        )
+        mixed_outcome = json.loads(json.dumps(valid))
+        mixed_outcome["source_fragments"][0]["message_ids"].append(
+            human_outcome_id
+        )
+        mixed_outcome["episode"]["outcome_anchor_message_ids"].append(
+            human_outcome_id
+        )
+        mixed_outcome["effect"]["outcome_anchor"] = human_outcome_id
+        mixed_outcome_result = self.report(
+            [mixed_outcome],
+            evidence_name="episode-mixed-outcome-evidence.jsonl",
+            report_name="episode-mixed-outcome-REPORT.md",
+        )
+        self.assertEqual(2, mixed_outcome_result.returncode)
+        self.assertIn(
+            "every outcome anchor to be a non-empty current-Agent message",
+            mixed_outcome_result.stderr,
+        )
+
+        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
+        weak_objective = json.loads(json.dumps(valid))
+        weak_objective["objective"] = "修一下吧"
+        weak_objective_result = self.report(
+            [weak_objective],
+            evidence_name="episode-weak-objective-evidence.jsonl",
+            report_name="episode-weak-objective-REPORT.md",
+        )
+        self.assertEqual(2, weak_objective_result.returncode)
+        self.assertIn("only a continuation", weak_objective_result.stderr)
+
+        missing_episode = json.loads(json.dumps(valid))
+        missing_episode.pop("episode")
+        missing_episode_result = self.report(
+            [missing_episode],
+            evidence_name="episode-missing-evidence.jsonl",
+            report_name="episode-missing-REPORT.md",
+        )
+        self.assertEqual(2, missing_episode_result.returncode)
+        self.assertIn(".episode must be an object", missing_episode_result.stderr)
+
+        schema_v2 = json.loads(json.dumps(valid))
+        schema_v2["schema_version"] = 2
+        schema_v2_result = self.report(
+            [schema_v2],
+            evidence_name="episode-schema-v2-evidence.jsonl",
+            report_name="episode-schema-v2-REPORT.md",
+        )
+        self.assertEqual(2, schema_v2_result.returncode)
+        self.assertIn("schema_version 3", schema_v2_result.stderr)
+
+        collapsed = self.task_judgment(
+            candidate,
+            message_id=ACCEPTANCE_MESSAGE_ID,
+            objective_message_id=ACCEPTANCE_MESSAGE_ID,
+            read_status="unresolved",
+            read_ids=[],
+            effect=None,
+        )
+        collapsed_result = self.report(
+            [collapsed],
+            evidence_name="episode-collapsed-evidence.jsonl",
+            report_name="episode-collapsed-REPORT.md",
+        )
+        self.assertEqual(2, collapsed_result.returncode)
+        self.assertIn(
+            "must be separate from ownership and objective anchors",
+            collapsed_result.stderr,
+        )
+
+        unbound_effect = json.loads(json.dumps(valid))
+        unbound_effect["effect"]["outcome_anchor"] = "arbitrary-anchor"
+        unbound_effect_result = self.report(
+            [unbound_effect],
+            evidence_name="episode-unbound-effect-evidence.jsonl",
+            report_name="episode-unbound-effect-REPORT.md",
+        )
+        self.assertEqual(2, unbound_effect_result.returncode)
+        self.assertIn("bind outcome_anchor", unbound_effect_result.stderr)
+
+        early_outcome_id = "early-outcome-message"
+        early_outcome_candidate = json.loads(json.dumps(candidate))
+        early_outcome_candidate["visible_messages"].append(
+            {
+                "message_id": early_outcome_id,
+                "created_at": "2026-07-22T10:01:30Z",
+                "sender_id": AGENT_ID,
+                "sender_kind": "agent",
+                "content": "An early intermediate state was recorded.",
+            }
+        )
+        early_outcome_candidate["chat"]["message_count"] += 1
+        write_jsonl(
+            self.artifacts / "candidates.jsonl",
+            [early_outcome_candidate],
+        )
+        early_outcome = json.loads(json.dumps(valid))
+        early_outcome["source_fragments"][0]["message_ids"].insert(
+            -1, early_outcome_id
+        )
+        early_outcome["episode"]["outcome_anchor_message_ids"].insert(
+            0, early_outcome_id
+        )
+        early_outcome["effect"]["outcome_anchor"] = early_outcome_id
+        early_outcome_result = self.report(
+            [early_outcome],
+            evidence_name="episode-early-outcome-evidence.jsonl",
+            report_name="episode-early-outcome-REPORT.md",
+        )
+        self.assertEqual(2, early_outcome_result.returncode)
+        self.assertIn(
+            "precedes a cited Read completion or choice",
+            early_outcome_result.stderr,
+        )
 
     def test_cross_chat_task_requires_explicit_linkage(self) -> None:
         self.write_chat_export()
@@ -4155,6 +4618,9 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "message_ids": [SECOND_MESSAGE_ID],
             }
         )
+        task["episode"]["outcome_anchor_message_ids"].append(
+            SECOND_MESSAGE_ID
+        )
         no_linkage = self.report(
             [task],
             evidence_name="no-linkage-evidence.jsonl",
@@ -4188,22 +4654,33 @@ print(json.dumps({{"ok": True, "data": data}}))
         candidate["visible_choice_candidates"] = []
         candidate["visible_tree_mentions"] = []
         candidate["visible_messages"] = [
-            {
-                "message_id": f"sample-message-{index:03d}",
-                "created_at": "2026-07-22T10:05:00Z",
-                "sender_id": AGENT_ID,
-                "sender_kind": None,
-                "content": f"Sample task {index}",
-            }
+            message
             for index in range(1, 45)
+            for message in (
+                {
+                    "message_id": f"sample-objective-{index:03d}",
+                    "created_at": "2026-07-22T10:04:00Z",
+                    "sender_id": AGENT_ID,
+                    "sender_kind": None,
+                    "content": f"I will complete sample task {index}.",
+                },
+                {
+                    "message_id": f"sample-message-{index:03d}",
+                    "created_at": "2026-07-22T10:05:00Z",
+                    "sender_id": AGENT_ID,
+                    "sender_kind": None,
+                    "content": f"Sample task {index} completed.",
+                },
+            )
         ]
-        candidate["chat"]["message_count"] = 44
+        candidate["chat"]["message_count"] = 88
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
         tasks = [
             self.task_judgment(
                 candidate,
                 task_id=f"sample-task-{index:03d}",
                 message_id=f"sample-message-{index:03d}",
+                objective_message_id=f"sample-objective-{index:03d}",
                 read_status="unresolved",
                 read_ids=[],
                 effect=None,
@@ -4233,7 +4710,7 @@ print(json.dumps({{"ok": True, "data": data}}))
             self.artifacts / "reviewed-baseline.jsonl",
             [
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "basis": "separately_reviewed_task_cases",
                     "reviewed_at": "2026-07-22T12:00:00Z",
                     "evidence_anchor": {

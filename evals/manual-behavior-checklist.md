@@ -4,7 +4,7 @@ Use this checklist before admitting a `context-tree-value-audit` revision. Run i
 in designated First Tree Agent workspaces against disposable or sanitized
 records. Never commit generated artifacts.
 
-For a 0.3.0 upgrade, confirm the installed payload exposes only
+For a 0.4.0 upgrade, confirm the installed payload exposes only
 `$context-tree-value-audit`; the superseded `$context-tree-insights` directory
 must not remain as a second callable Skill. Exercise the README's minimal
 move/copy/compare flow and confirm the old payload is outside both Skill
@@ -170,19 +170,42 @@ Pass when:
 - malformed receipt is omitted with `context_decision_invalid`;
 - no malformed receipt blocks the message, Chat export, or audit.
 
-## 5. Complete Task reconstruction
+## 5. Continuous Task reconstruction
 
 Use one Chat containing one objective across planning, implementation, review,
 QA, correction, and final delivery, followed by a genuinely independent
-objective and outcome.
+objective and outcome. Include short continuation/status prompts; polite or
+deictic variants such as `please continue`, `status please`, `修一下吧`,
+`please continue fixing it`, `please fix it`, `continue the work`,
+`继续修一下`, `修复一下`, `修这个`, and `帮忙修下`; edge-decorated forms
+such as `“please continue”`, `please continue 🙏`, and `请继续（谢谢）`;
+one or more leading Agent mentions; and concrete objectives that contain
+`continue` while naming an independent scope and deliverable.
 
 Pass when:
 
 - all phases and continuations for the first deliverable remain one Task;
 - it produces two Task rows with separate source messages and windows;
-- clear Tasks have objective, object scope, and outcome;
-- a Task missing those boundaries is marked excluded;
-- excluded Tasks contain no Read or Effect judgment;
+- clear Tasks have audited-Agent ownership, objective, material object scope,
+  independent outcome, bounded source fragments, one primary deliverable, and
+  explicit ownership/objective/outcome anchors;
+- weak prompt variants and weak normalized objectives are merged or excluded,
+  while concrete `continue` objectives remain eligible;
+- a weak assignment cannot borrow another sender's concrete objective, and one
+  Agent message cannot simultaneously serve as objective and terminal outcome;
+- an earlier weak objective anchor cannot admit a Read that precedes the
+  earliest ownership-compatible concrete objective anchor;
+- an earlier ownership anchor from a sender incompatible with the ownership
+  kind cannot admit a Read before compatible ownership is established;
+- every outcome anchor is a non-empty current-Agent message, so a later human
+  follow-up cannot extend the episode or become the bound Effect outcome;
+- work owned by another Agent remains context until a visible assignment,
+  transfer, or acceptance;
+- a candidate missing any clear-Task gate is excluded with the deterministic
+  structured exclusion kind;
+- excluded candidates contain no episode, Read, or Effect judgment;
+- Reads and choices outside the established episode are rejected;
+- ownership/objective/outcome anchors copied across Tasks are rejected;
 - one Read or choice copied into both Tasks is rejected.
 
 ## 6. Cross-Chat handoff merge
@@ -207,7 +230,8 @@ Pass when:
 - the second is `unresolved` with a reason;
 - unresolved Read has no Read IDs and a null Effect;
 - no `not_observed`, `unused`, or negative-value state is emitted;
-- Reads outside the Task window or source Chats are rejected;
+- Reads outside the established episode, Task window, or source Chats are
+  rejected;
 - unresolved Tasks appear in coverage counts, never an unused denominator.
 
 ## 8. Optional Effect
@@ -220,12 +244,14 @@ Pass when:
 - unknown Effects, multiple Effects, confidence tiers, and numeric weights are
   rejected;
 - every Effect has observed Task Reads, later same-Agent choices, an outcome
-  anchor, and a summary;
+  anchor bound to the episode outcome, and a summary;
+- the bound Effect outcome anchor is not earlier than any cited Read completion
+  or choice;
 - post-choice Reads and out-of-window choices are rejected;
 - a null Effect requires one short `effect_reason`;
 - a decision receipt alone does not create an Effect;
-- schema-v1 task types, sampling fields, `verified` / `probable`, rubrics, and
-  support fields are rejected;
+- superseded task types, sampling fields, `verified` / `probable`, rubrics,
+  and support fields are rejected;
 - there is at most one Effect per Task.
 
 ## 9. Sample handling
@@ -244,13 +270,15 @@ Pass when:
 
 Pass when the report includes:
 
-- clear and excluded Tasks;
+- a complete clear Task inventory with ownership, objective, scope, primary
+  deliverable, outcome, Read, Effect, and evidence summary;
+- every clear Task's ownership/objective/outcome anchors and boundary rationale;
+- a complete excluded-candidate inventory with exclusion kind, observed scope,
+  and reason;
 - observed and unresolved Read Tasks;
 - Effect Tasks and observed Reads without an Effect;
 - the four-Effect distribution;
-- every clear Task's Read and Effect result;
-- every excluded Task's reason;
-- authorized Chat/message/trace coverage and gaps.
+- authorized Chat/message/trace coverage and gaps;
 - the four-class in-window Tree-read attempt conservation table.
 
 Verify:

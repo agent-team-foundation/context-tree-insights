@@ -7,10 +7,10 @@ description: Audit how Context Tree reads affected complete work Tasks when a hu
 
 ## Capability
 
-Run a manual and read-only retrospective that reconstructs complete Tasks from
-authorized Chats, determines whether a Tree Read is observed or unresolved,
-and reports whether the Read reasonably confirmed, constrained, redirected, or
-conflicted with the later choice.
+Run a manual and read-only retrospective that reconstructs single-Agent-owned
+continuous Tasks from authorized Chats, determines whether a Tree Read is
+observed or unresolved, and reports whether the Read reasonably confirmed,
+constrained, redirected, or conflicted with the later choice.
 
 Keep three responsibilities separate:
 
@@ -20,9 +20,10 @@ Keep three responsibilities separate:
 - the bundled script performs deterministic collection, reference validation,
   deduplication, conservation checks, and reporting.
 
-The collector establishes what records exist. The Agent performs semantic Task
-reconstruction and passage-to-choice judgment. A Read or decision receipt is
-evidence, not server-verified causality.
+The collector establishes what records exist. The Agent reconstructs
+single-Agent-owned continuous work episodes and performs passage-to-choice
+judgment. A Read or decision receipt is evidence, not server-verified
+causality.
 
 ## Gate the run
 
@@ -164,13 +165,25 @@ Read
 [references/task-analysis-schema.md](references/task-analysis-schema.md), then
 write exactly one `task-judgments.jsonl` row for every reconstructed Task.
 
-A clear Task needs a concrete objective, object scope, outcome, Task window,
-and source fragments. Treat the whole objective-to-outcome work item as one
-Task: planning, implementation, review, QA, corrections, status questions, and
-short continuations for the same deliverable stay together. Split only when a
-new objective has a materially different scope and an independently judgeable
-outcome. Otherwise mark the candidate excluded. Excluded Tasks carry no Read
+A clear Task is one independently judgeable continuous work episode owned by
+the audited Agent. It needs a concrete objective, material object scope,
+independently judgeable outcome or terminal state, bounded source fragments
+from objective through outcome, explicit ownership/objective/outcome anchors,
+and one primary terminal deliverable. Otherwise mark the candidate excluded
+with a structured exclusion kind. Excluded candidates carry no episode, Read,
 or Effect judgment.
+
+Short continuations, status prompts, context-dependent questions, merge
+approval, repeated review/fix requests, and ordinary phase transitions are not
+separate Tasks. Merge plan → implementation → review → QA → final delivery,
+plus corrections to the same deliverable, into one episode. Split only when
+there is a new objective, material scope or deliverable change, independent
+outcome, and unambiguous source boundary.
+
+For a single-Agent audit, another Agent's work is context until this Agent is
+visibly assigned, transferred, or accepts an objective. A later independent
+review, takeover, verification gate, or orchestration objective may form a new
+owned episode only when it passes every clear-Task gate.
 
 One Chat may contain multiple Tasks. Merge across Chats only for one PR/MR/
 Issue, a visible handoff, or the same objective and primary delivery, and
@@ -219,18 +232,22 @@ python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" report \
   --report-output "$CTVA_ARTIFACT_DIR/REPORT.md"
 ```
 
-Optionally supply a v2 `--reviewed-baseline` when an independently reviewed
+Optionally supply a v3 `--reviewed-baseline` when an independently reviewed
 earlier case set exists. The reporter keeps its hash-anchored Task and Effect
 counts separate from the current rerun.
 
-The deterministic reporter rejects v0.2 judgment fields, unauthorized source
-messages, Task-window violations, unlinked cross-Chat merges, duplicated
-Reads/choices, invalid Effects, missing outcome anchors, and non-conserving
-aggregates.
+The deterministic reporter rejects Task judgment schemas v1 and v2, weak
+fragment-only
+objectives, missing or invalid episode ownership and anchors, reused episode
+identity anchors, Reads or choices outside the established episode,
+unauthorized source messages, Task-window violations, unlinked cross-Chat
+merges, duplicated Reads/choices, invalid Effects, unbound outcome anchors,
+v0.2 judgment fields, and non-conserving aggregates.
 
 The report must include:
 
-- clear and excluded Tasks;
+- a complete inventory of clear Tasks with boundary rationale and excluded
+  candidates with structured exclusion reasons;
 - observed and unresolved Read Tasks;
 - Effect Tasks and observed Reads without an Effect;
 - the four-effect distribution;

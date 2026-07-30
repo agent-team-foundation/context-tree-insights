@@ -1,15 +1,22 @@
 # Context Tree Value Audit
 
-`context-tree-value-audit` 0.3.0 is an explicit-only Skill for task-first,
+`context-tree-value-audit` 0.4.0 is an explicit-only Skill for task-first,
 evidence-first analysis of Context Tree decision value for the current First
 Tree Runtime when its native historical evidence is supported. It reconstructs
-complete Tasks from authorized Chats, records whether a Tree Read is observed
-or unresolved, and judges one optional Effect without a minimum sample gate.
+single-Agent-owned continuous Tasks from authorized Chats, records whether a
+Tree Read is observed or unresolved, and judges one optional Effect without a
+minimum sample gate.
 
 The 0.2 series renamed the installable Skill from
 `context-tree-insights` to `context-tree-value-audit`. Replace the old Skill
 directory during upgrade; do not install both names because they represent one
 explicit audit capability, not two independent workflows.
+
+Version 0.4 replaces the 0.3 Task judgment schema v2 with continuous episode
+schema v3. Do not reuse schema-v1 or schema-v2 `task-judgments.jsonl`:
+reconstruct the episodes and their ownership/objective/outcome anchors, then
+rerun the deterministic reporter. No migration or compatibility reader is
+provided.
 
 The audit core remains separate from First Tree core. Codex, Claude Code, and
 Claude Code TUI use their existing native local transcripts. Cursor and Kimi
@@ -29,10 +36,13 @@ Tree.
   Chats visible to this one current Agent. The Skill trusts that explicit
   scope and never broadens it or crosses to another Agent.
 - `Chat UUID @ Agent UUID` remains the authorization and trace-mapping unit;
-  Task is the judgment and counting unit.
-- Task means one complete objective-to-outcome work item. Planning,
-  implementation, review, QA, corrections, and continuations for the same
-  deliverable remain one Task.
+  a single-Agent-owned continuous work episode is the Task judgment and
+  counting unit.
+- Short continuations, status prompts, context-dependent questions, repeated
+  review/fix requests, and phases of one delivery do not become separate Tasks.
+- Clear Tasks carry source-backed ownership, objective, and outcome anchors;
+  work owned by another Agent remains context until the audited Agent visibly
+  receives, accepts, or takes over an objective.
 - Local Runtime evidence is preflighted against authorized Chat and Agent IDs
   before complete recorded output is scanned.
 - Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
@@ -182,10 +192,12 @@ The Skill orchestrates four stages:
    grammar, reconstructs exact or read-only-composite evidence plus visible
    choices, and distinguishes local default-branch matches from unverified
    sources. Unsupported Runtime history produces unresolved Reads.
-3. The Agent reconstructs complete Tasks and writes one observed/unresolved
-   Read plus at most one Effect in schema-v2 `task-judgments.jsonl`.
-4. `report` validates source ownership, windows, cross-Chat linkage,
-   Read/choice timing, deduplication, and aggregate conservation, then creates
+3. The Agent reconstructs continuous Task episodes with explicit
+   ownership/objective/outcome anchors and writes one observed/unresolved Read
+   plus at most one Effect in schema-v3 `task-judgments.jsonl`.
+4. `report` validates episode ownership and anchors, weak fragment-only
+   objectives, source ownership, windows, cross-Chat linkage, Read/choice
+   timing, deduplication, and aggregate conservation, then creates
    `evidence.jsonl` and `REPORT.md`. An optional hash-anchored reviewed
    baseline is shown separately, so a current collector gap cannot erase
    previously reviewed positive cases or silently import them into the rerun.

@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,11 +29,100 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
-TASK_JUDGMENT_SCHEMA_VERSION = 2
+TASK_JUDGMENT_SCHEMA_VERSION = 3
 AUTHORIZATION_VALUES = {"explicit_agent", "explicit_chat"}
 EFFECT_VALUES = {"confirmed", "constrained", "redirected", "conflicted"}
 READ_STATUS_VALUES = {"observed", "unresolved"}
 TASK_STATUS_VALUES = {"clear", "excluded"}
+TASK_OWNERSHIP_VALUES = {"assigned", "transferred", "accepted"}
+TASK_EXCLUSION_VALUES = {
+    "greeting_or_acknowledgement",
+    "status_ping_or_continuation",
+    "context_dependent_clarification",
+    "missing_objective",
+    "missing_scope",
+    "missing_outcome",
+    "ownership_not_established",
+    "automatic_or_provider_only",
+    "ambiguous_boundary",
+    "non_independent_subphase",
+}
+WEAK_TASK_OBJECTIVES = {
+    "continue",
+    "do",
+    "done",
+    "status",
+    "why",
+    "proceed",
+    "go ahead",
+    "keep going",
+    "carry on",
+    "try again",
+    "what do you mean",
+    "继续",
+    "继续做",
+    "接着做",
+    "做了吗",
+    "你在干啥",
+    "进展呢",
+    "地址呢",
+    "为什么",
+    "什么意思",
+    "你这个修复什么",
+    "你这个在修复什么",
+    "那这个呢",
+    "再检查",
+    "修一下",
+    "重新看",
+    "按刚才说的改",
+}
+WEAK_TASK_PREFIX_WRAPPERS = {
+    "please",
+    "kindly",
+    "could you",
+    "can you",
+    "would you",
+    "just",
+    "simply",
+    "请",
+    "请你",
+    "麻烦",
+    "麻烦你",
+    "劳烦",
+    "劳烦你",
+    "帮忙",
+    "帮我",
+    "能否",
+    "可以",
+}
+WEAK_TASK_SUFFIX_WRAPPERS = {
+    "please",
+    "thanks",
+    "thank you",
+    "谢谢",
+    "辛苦了",
+    "可以吗",
+    "好吗",
+    "行吗",
+    "一下",
+    "下",
+    "吧",
+    "呢",
+    "呀",
+    "啊",
+    "嘛",
+    "吗",
+    "哈",
+}
+WEAK_TASK_ANCHORED_PATTERNS = (
+    r"(?:continue\s+)?(?:fixing|working\s+on|with)\s+(?:it|this|that)",
+    r"(?:fix|check|review|try)\s+(?:it|this|that)(?:\s+again)?",
+    r"continue\s+(?:(?:the\s+)?(?:work|task|job)|it|this|that)",
+    r"继续(?:修|改|处理|弄)(?:一下|下)?",
+    r"继续(?:这个|它|这项工作|该工作|任务|这个任务)",
+    r"(?:再)?(?:修|修复|改|检查|看|处理|重试)(?:一下|下)?",
+    r"(?:修|修复|改|检查|看|处理)(?:这个|它)(?:一下|下)?",
+)
 LINKAGE_VALUES = {
     "work_item",
     "explicit_handoff",
@@ -5099,6 +5189,189 @@ def optional_text(value: Any, *, field: str) -> str | None:
     return value.strip() or None
 
 
+def strip_edge_decorations(value: str, *, preserve_at: bool) -> str:
+    result = value.strip()
+    while result:
+        removed = False
+        if (
+            result
+            and (not preserve_at or result[0] != "@")
+            and unicodedata.category(result[0])[0] in {"P", "S"}
+        ):
+            result = result[1:].lstrip()
+            removed = True
+        if result and unicodedata.category(result[-1])[0] in {"P", "S"}:
+            result = result[:-1].rstrip()
+            removed = True
+        if not removed:
+            break
+    return result
+
+
+def normalized_task_fragment(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip().casefold())
+    normalized = strip_edge_decorations(normalized, preserve_at=True)
+    while normalized.startswith("@"):
+        without_mention = re.sub(
+            r"^@[a-z0-9_-]{1,100}(?=[^a-z0-9_-]|$)\s*",
+            "",
+            normalized,
+            count=1,
+        )
+        if without_mention == normalized:
+            break
+        normalized = strip_edge_decorations(
+            without_mention,
+            preserve_at=True,
+        )
+    return strip_edge_decorations(normalized, preserve_at=False)
+
+
+def strip_task_wrapper(
+    value: str,
+    wrapper: str,
+    *,
+    prefix: bool,
+) -> str | None:
+    if value == wrapper:
+        return ""
+    if prefix:
+        if not value.startswith(wrapper):
+            return None
+        remainder = value[len(wrapper) :]
+        if wrapper.isascii() and not remainder.startswith(" "):
+            return None
+        return normalized_task_fragment(remainder)
+    if not value.endswith(wrapper):
+        return None
+    remainder = value[: -len(wrapper)]
+    if wrapper.isascii() and not remainder.endswith(" "):
+        return None
+    return normalized_task_fragment(remainder)
+
+
+def is_weak_task_clause(value: str) -> bool:
+    pending = [normalized_task_fragment(value)]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if (
+            not current
+            or current in WEAK_TASK_OBJECTIVES
+            or any(
+                re.fullmatch(pattern, current)
+                for pattern in WEAK_TASK_ANCHORED_PATTERNS
+            )
+        ):
+            return True
+        for prefix in WEAK_TASK_PREFIX_WRAPPERS:
+            stripped = strip_task_wrapper(
+                current, prefix, prefix=True
+            )
+            if stripped is not None and stripped not in seen:
+                pending.append(stripped)
+        for suffix in WEAK_TASK_SUFFIX_WRAPPERS:
+            stripped = strip_task_wrapper(
+                current, suffix, prefix=False
+            )
+            if stripped is not None and stripped not in seen:
+                pending.append(stripped)
+    return False
+
+
+def is_weak_task_fragment(value: str) -> bool:
+    normalized = normalized_task_fragment(value)
+    if not normalized:
+        return True
+    clauses = [
+        normalized_task_fragment(clause)
+        for clause in re.split(r"[,，;；:：/、.!?。！？]+", normalized)
+        if normalized_task_fragment(clause)
+    ]
+    return bool(clauses) and all(
+        is_weak_task_clause(clause) for clause in clauses
+    )
+
+
+def validate_task_episode(value: Any, *, task_id: str) -> dict[str, Any]:
+    field = f"task[{task_id}].episode"
+    if not isinstance(value, dict):
+        raise AuditError(f"{field} must be an object.")
+    ownership = value.get("ownership")
+    if not isinstance(ownership, dict):
+        raise AuditError(f"{field}.ownership must be an object.")
+    ownership_kind = require_string(
+        ownership.get("kind"), f"{field}.ownership.kind"
+    )
+    if ownership_kind not in TASK_OWNERSHIP_VALUES:
+        raise AuditError(
+            f"{field}.ownership.kind must be one of: "
+            f"{', '.join(sorted(TASK_OWNERSHIP_VALUES))}."
+        )
+    ownership_anchor_ids = string_id_list(
+        ownership.get("anchor_message_ids"),
+        field=f"{field}.ownership.anchor_message_ids",
+    )
+    objective_anchor_ids = string_id_list(
+        value.get("objective_anchor_message_ids"),
+        field=f"{field}.objective_anchor_message_ids",
+    )
+    outcome_anchor_ids = string_id_list(
+        value.get("outcome_anchor_message_ids"),
+        field=f"{field}.outcome_anchor_message_ids",
+    )
+    continuation_ids = string_id_list(
+        value.get("continuation_message_ids", []),
+        field=f"{field}.continuation_message_ids",
+    )
+    if (
+        not ownership_anchor_ids
+        or not objective_anchor_ids
+        or not outcome_anchor_ids
+    ):
+        raise AuditError(
+            f"{field} requires ownership, objective, and outcome anchor IDs."
+        )
+    ownership_anchor_set = set(ownership_anchor_ids)
+    objective_anchor_set = set(objective_anchor_ids)
+    outcome_anchor_set = set(outcome_anchor_ids)
+    if outcome_anchor_set & (
+        ownership_anchor_set | objective_anchor_set
+    ):
+        raise AuditError(
+            f"{field}.outcome_anchor_message_ids must be separate from ownership "
+            "and objective anchors."
+        )
+    if set(continuation_ids) & (
+        ownership_anchor_set | objective_anchor_set | outcome_anchor_set
+    ):
+        raise AuditError(
+            f"{field}.continuation_message_ids must be separate from ownership, "
+            "objective, and outcome anchors."
+        )
+    return {
+        "ownership": {
+            "kind": ownership_kind,
+            "anchor_message_ids": ownership_anchor_ids,
+            "reason": require_string(
+                ownership.get("reason"), f"{field}.ownership.reason"
+            ),
+        },
+        "objective_anchor_message_ids": objective_anchor_ids,
+        "outcome_anchor_message_ids": outcome_anchor_ids,
+        "continuation_message_ids": continuation_ids,
+        "primary_deliverable": require_string(
+            value.get("primary_deliverable"), f"{field}.primary_deliverable"
+        ),
+        "boundary_reason": require_string(
+            value.get("boundary_reason"), f"{field}.boundary_reason"
+        ),
+    }
+
+
 def positive_int(value: Any, *, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise AuditError(f"{field} must be a positive integer.")
@@ -5264,11 +5537,38 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             normalized_fragments.append(projected_fragment)
         normalized["source_fragments"] = normalized_fragments
 
-        if status == "excluded":
-            if any(field in row for field in ("read", "effect", "effect_reason")):
+        for removed_field in (
+            "task_type",
+            "sampling_order",
+            "saturation_signals",
+            "exposure",
+            "effects",
+            "support",
+        ):
+            if removed_field in row:
                 raise AuditError(
-                    f"Excluded task[{task_id}] must not contain read or effect judgment."
+                    f"task[{task_id}].{removed_field} belongs to the "
+                    "superseded v0.2 judgment model."
                 )
+
+        if status == "excluded":
+            if any(
+                field in row
+                for field in ("episode", "read", "effect", "effect_reason")
+            ):
+                raise AuditError(
+                    f"Excluded task[{task_id}] must not contain episode, read, "
+                    "or effect judgment."
+                )
+            exclusion_kind = require_string(
+                row.get("exclusion_kind"), f"task[{task_id}].exclusion_kind"
+            )
+            if exclusion_kind not in TASK_EXCLUSION_VALUES:
+                raise AuditError(
+                    f"task[{task_id}].exclusion_kind must be one of: "
+                    f"{', '.join(sorted(TASK_EXCLUSION_VALUES))}."
+                )
+            normalized["exclusion_kind"] = exclusion_kind
             normalized["exclusion_reason"] = require_string(
                 row.get("exclusion_reason"), f"task[{task_id}].exclusion_reason"
             )
@@ -5282,18 +5582,20 @@ def load_task_judgments(path: Path) -> list[dict[str, Any]]:
             raise AuditError(
                 f"Clear task[{task_id}] requires objective, object_scope, and outcome."
             )
-        for removed_field in (
-            "task_type",
-            "sampling_order",
-            "saturation_signals",
-            "exposure",
-            "effects",
-            "support",
-        ):
-            if removed_field in row:
-                raise AuditError(
-                    f"task[{task_id}].{removed_field} belongs to the superseded v0.2 judgment model."
-                )
+        if "exclusion_kind" in row or "exclusion_reason" in row:
+            raise AuditError(
+                f"Clear task[{task_id}] must not contain exclusion fields."
+            )
+        assert normalized["objective"] is not None
+        if is_weak_task_fragment(normalized["objective"]):
+            raise AuditError(
+                f"Clear task[{task_id}].objective is only a continuation, status "
+                "prompt, or context-dependent fragment; merge it into its parent "
+                "episode or exclude it."
+            )
+        normalized["episode"] = validate_task_episode(
+            row.get("episode"), task_id=task_id
+        )
 
         read = row.get("read")
         if not isinstance(read, dict):
@@ -5428,12 +5730,14 @@ def validate_task_refs(
 
     read_owners: dict[str, str] = {}
     choice_owners: dict[str, str] = {}
+    episode_anchor_owners: dict[str, str] = {}
     for task in tasks:
         task_id = task["task_id"]
         start = parse_datetime(task["started_at"], field=f"task {task_id} started_at")
         end = parse_datetime(task["ended_at"], field=f"task {task_id} ended_at")
         source_audits: set[str] = set()
         source_message_ids: set[str] = set()
+        source_messages: dict[str, Mapping[str, Any]] = {}
         linkages: set[tuple[str, str]] = set()
         for index, fragment in enumerate(task["source_fragments"]):
             field = f"task[{task_id}].source_fragments[{index}]"
@@ -5467,6 +5771,7 @@ def validate_task_refs(
                     raise AuditError(
                         f"{field} references message {message_id} outside its authorized Chat."
                     )
+                source_messages[message_id] = message
                 timestamp_in_task(
                     message.get("created_at"),
                     start=start,
@@ -5490,6 +5795,197 @@ def validate_task_refs(
 
         if task["status"] == "excluded":
             continue
+        episode = task["episode"]
+        identity_anchor_ids = {
+            *episode["ownership"]["anchor_message_ids"],
+            *episode["objective_anchor_message_ids"],
+            *episode["outcome_anchor_message_ids"],
+        }
+        for message_id in identity_anchor_ids:
+            previous = episode_anchor_owners.setdefault(message_id, task_id)
+            if previous != task_id:
+                raise AuditError(
+                    f"Episode anchor {message_id} is copied across incompatible "
+                    f"Tasks {previous} and {task_id}."
+                )
+        episode_message_ids = {
+            *identity_anchor_ids,
+            *episode["continuation_message_ids"],
+        }
+        if not episode_message_ids.issubset(source_message_ids):
+            unknown = ", ".join(sorted(episode_message_ids - source_message_ids))
+            raise AuditError(
+                f"task[{task_id}].episode references messages outside its source "
+                f"fragments: {unknown}."
+            )
+        episode_messages = {
+            message_id: source_messages[message_id]
+            for message_id in episode_message_ids
+        }
+        source_agent_ids = {
+            candidates_by_id[audit]["chat"]["source_agent_id"]
+            for audit in source_audits
+        }
+        if len(source_agent_ids) != 1:
+            raise AuditError(
+                f"task[{task_id}] source fragments must belong to one audited Agent."
+            )
+        source_agent_id = next(iter(source_agent_ids))
+        objective_anchor_messages = {
+            message_id: episode_messages[message_id]
+            for message_id in episode["objective_anchor_message_ids"]
+        }
+        objective_anchor_senders = {
+            message.get("sender_id")
+            for message in objective_anchor_messages.values()
+        }
+        if episode["ownership"]["kind"] == "accepted":
+            compatible_ownership_anchor_ids = [
+                message_id
+                for message_id in episode["ownership"]["anchor_message_ids"]
+                if episode_messages[message_id].get("sender_id")
+                == source_agent_id
+            ]
+            if not compatible_ownership_anchor_ids:
+                raise AuditError(
+                    f"Accepted ownership for task[{task_id}] requires a "
+                    "current-Agent anchor."
+                )
+            if source_agent_id not in objective_anchor_senders:
+                raise AuditError(
+                    f"Accepted ownership for task[{task_id}] requires a "
+                    "current-Agent objective anchor."
+                )
+            concrete_compatible_objective_ids = [
+                message_id
+                for message_id, message in objective_anchor_messages.items()
+                if message.get("sender_id") == source_agent_id
+                and isinstance(message.get("content"), str)
+                and not is_weak_task_fragment(message["content"])
+            ]
+        else:
+            compatible_ownership_anchor_ids = [
+                message_id
+                for message_id in episode["ownership"]["anchor_message_ids"]
+                if isinstance(
+                    episode_messages[message_id].get("sender_id"), str
+                )
+                and bool(
+                    episode_messages[message_id]["sender_id"].strip()
+                )
+                and episode_messages[message_id]["sender_id"]
+                != source_agent_id
+            ]
+            if not compatible_ownership_anchor_ids:
+                raise AuditError(
+                    f"{episode['ownership']['kind'].title()} ownership for "
+                    f"task[{task_id}] requires a non-current-Agent anchor."
+                )
+            if not any(
+                isinstance(sender_id, str)
+                and bool(sender_id.strip())
+                and sender_id != source_agent_id
+                for sender_id in objective_anchor_senders
+            ):
+                raise AuditError(
+                    f"{episode['ownership']['kind'].title()} ownership for "
+                    f"task[{task_id}] requires a non-current-Agent objective anchor."
+                )
+            concrete_compatible_objective_ids = [
+                message_id
+                for message_id, message in objective_anchor_messages.items()
+                if isinstance(message.get("sender_id"), str)
+                and bool(message["sender_id"].strip())
+                and message["sender_id"] != source_agent_id
+                and isinstance(message.get("content"), str)
+                and not is_weak_task_fragment(message["content"])
+            ]
+        if not concrete_compatible_objective_ids:
+            raise AuditError(
+                f"task[{task_id}] requires at least one ownership-compatible "
+                "concrete objective-anchor source message; weak continuations, "
+                "context-only prompts, and another sender's objective cannot be "
+                "normalized into a clear objective."
+            )
+        invalid_outcome_anchor_ids = [
+            message_id
+            for message_id in episode["outcome_anchor_message_ids"]
+            if episode_messages[message_id].get("sender_id") != source_agent_id
+            or not isinstance(
+                episode_messages[message_id].get("content"), str
+            )
+            or not episode_messages[message_id]["content"].strip()
+        ]
+        if invalid_outcome_anchor_ids:
+            raise AuditError(
+                f"task[{task_id}] requires every outcome anchor to be a "
+                "non-empty current-Agent message."
+            )
+        ownership_times = [
+            parse_datetime(
+                episode_messages[message_id]["created_at"],
+                field=f"task {task_id} ownership anchor {message_id}",
+            )
+            for message_id in episode["ownership"]["anchor_message_ids"]
+        ]
+        compatible_ownership_times = [
+            parse_datetime(
+                episode_messages[message_id]["created_at"],
+                field=(
+                    f"task {task_id} compatible ownership anchor "
+                    f"{message_id}"
+                ),
+            )
+            for message_id in compatible_ownership_anchor_ids
+        ]
+        objective_anchor_times = [
+            parse_datetime(
+                episode_messages[message_id]["created_at"],
+                field=f"task {task_id} objective anchor {message_id}",
+            )
+            for message_id in episode["objective_anchor_message_ids"]
+        ]
+        concrete_objective_times = [
+            parse_datetime(
+                episode_messages[message_id]["created_at"],
+                field=(
+                    f"task {task_id} concrete objective anchor "
+                    f"{message_id}"
+                ),
+            )
+            for message_id in concrete_compatible_objective_ids
+        ]
+        evidence_started_at = max(
+            min(compatible_ownership_times), min(concrete_objective_times)
+        )
+        episode_started_at = min(
+            [*ownership_times, *objective_anchor_times]
+        )
+        objective_times = [*ownership_times, *objective_anchor_times]
+        outcome_times = [
+            parse_datetime(
+                episode_messages[message_id]["created_at"],
+                field=f"task {task_id} outcome anchor {message_id}",
+            )
+            for message_id in episode["outcome_anchor_message_ids"]
+        ]
+        episode_ended_at = max(outcome_times)
+        if min(outcome_times) <= max(objective_times):
+            raise AuditError(
+                f"task[{task_id}] outcome anchors must strictly follow ownership "
+                "and objective anchors."
+            )
+        for message_id, message in source_messages.items():
+            message_time = parse_datetime(
+                message["created_at"],
+                field=f"task {task_id} source message {message_id}",
+            )
+            if not episode_started_at <= message_time <= episode_ended_at:
+                raise AuditError(
+                    f"task[{task_id}] source message {message_id} is outside its "
+                    "established episode."
+                )
+
         observed_reads = set(task["read"]["read_ids"])
         for read_id in observed_reads:
             item = reads.get(read_id)
@@ -5500,18 +5996,34 @@ def validate_task_refs(
                 raise AuditError(
                     f"task[{task_id}] read {read_id} is outside its source Chat fragments."
                 )
-            timestamp_in_task(
+            read_started_at = timestamp_in_task(
                 read.get("timestamp"),
                 start=start,
                 end=end,
                 field=f"task {task_id} read {read_id} timestamp",
             )
-            timestamp_in_task(
+            read_completed_at = timestamp_in_task(
                 read.get("completed_at"),
                 start=start,
                 end=end,
                 field=f"task {task_id} read {read_id} completion",
             )
+            if (
+                read_started_at < evidence_started_at
+                or read_completed_at < evidence_started_at
+            ):
+                raise AuditError(
+                    f"task[{task_id}] read {read_id} precedes established "
+                    "episode ownership/objective."
+                )
+            if (
+                read_started_at > episode_ended_at
+                or read_completed_at > episode_ended_at
+            ):
+                raise AuditError(
+                    f"task[{task_id}] read {read_id} occurs after the episode "
+                    "outcome."
+                )
             previous = read_owners.setdefault(read_id, task_id)
             if previous != task_id:
                 raise AuditError(
@@ -5524,6 +6036,13 @@ def validate_task_refs(
                 raise AuditError(
                     f"Effect in task[{task_id}] references reads outside its observed reads."
                 )
+            if effect["outcome_anchor"] not in set(
+                episode["outcome_anchor_message_ids"]
+            ):
+                raise AuditError(
+                    f"Effect in task[{task_id}] must bind outcome_anchor to one "
+                    "of the episode outcome anchors."
+                )
             read_times = [
                 parse_datetime(
                     reads[read_id][1]["completed_at"],
@@ -5531,8 +6050,20 @@ def validate_task_refs(
                 )
                 for read_id in effect["read_ids"]
             ]
+            outcome_anchor_time = parse_datetime(
+                episode_messages[effect["outcome_anchor"]]["created_at"],
+                field=(
+                    f"task {task_id} effect outcome anchor "
+                    f"{effect['outcome_anchor']}"
+                ),
+            )
             choice_times: list[datetime] = []
             for message_id in effect["choice_message_ids"]:
+                if message_id not in source_message_ids:
+                    raise AuditError(
+                        f"Effect in task[{task_id}] choice {message_id} is outside "
+                        "its source fragments."
+                    )
                 item = choices.get(message_id)
                 if item is None:
                     raise AuditError(
@@ -5543,14 +6074,18 @@ def validate_task_refs(
                     raise AuditError(
                         f"task[{task_id}] choice {message_id} is outside its source Chat fragments."
                     )
-                choice_times.append(
-                    timestamp_in_task(
-                        choice.get("created_at"),
-                        start=start,
-                        end=end,
-                        field=f"task {task_id} choice {message_id}",
-                    )
+                choice_time = timestamp_in_task(
+                    choice.get("created_at"),
+                    start=start,
+                    end=end,
+                    field=f"task {task_id} choice {message_id}",
                 )
+                if not evidence_started_at <= choice_time <= episode_ended_at:
+                    raise AuditError(
+                        f"task[{task_id}] choice {message_id} is outside its "
+                        "established episode."
+                    )
+                choice_times.append(choice_time)
                 previous = choice_owners.setdefault(message_id, task_id)
                 if previous != task_id:
                     raise AuditError(
@@ -5560,10 +6095,21 @@ def validate_task_refs(
                 raise AuditError(
                     f"Effect in task[{task_id}] cites a read completed after its earliest choice."
                 )
+            if outcome_anchor_time < max([*read_times, *choice_times]):
+                raise AuditError(
+                    f"Effect in task[{task_id}] binds an outcome anchor that "
+                    "precedes a cited Read completion or choice."
+                )
 
 
 def table_row(columns: Sequence[Any]) -> str:
     return "| " + " | ".join(str(column).replace("|", "\\|") for column in columns) + " |"
+
+
+def report_cell(value: Any) -> str:
+    if value is None:
+        return "—"
+    return re.sub(r"\s+", " ", str(value)).strip() or "—"
 
 
 def independent_effect_id(effect: Mapping[str, Any]) -> str:
@@ -5629,6 +6175,9 @@ def render_report(
         if task["effect"] is None
     ]
     effect_counts = Counter(task["effect"]["type"] for task in effect_tasks)
+    exclusion_counts = Counter(
+        task["exclusion_kind"] for task in excluded_tasks
+    )
 
     if len(observed_read_tasks) + len(unresolved_read_tasks) != len(clear_tasks):
         raise AuditError("Task read counts do not conserve clear Tasks.")
@@ -5722,13 +6271,55 @@ def render_report(
     for effect_type in ("confirmed", "constrained", "redirected", "conflicted"):
         lines.append(table_row([effect_type, effect_counts[effect_type]]))
 
+    if excluded_tasks:
+        lines.extend(
+            [
+                "",
+                "## Exclusion Distribution",
+                "",
+                table_row(["Exclusion kind", "Candidates"]),
+                table_row(["---", "---:"]),
+            ]
+        )
+        for exclusion_kind in sorted(TASK_EXCLUSION_VALUES):
+            if exclusion_counts[exclusion_kind]:
+                lines.append(
+                    table_row(
+                        [exclusion_kind, exclusion_counts[exclusion_kind]]
+                    )
+                )
+
     lines.extend(
         [
             "",
             "## Task Results",
             "",
-            table_row(["Task", "Read", "Effect", "Evidence summary"]),
-            table_row(["---", "---", "---", "---"]),
+            table_row(
+                [
+                    "Task ID",
+                    "Ownership",
+                    "Objective",
+                    "Object scope",
+                    "Primary deliverable",
+                    "Outcome",
+                    "Read",
+                    "Effect",
+                    "Evidence summary",
+                ]
+            ),
+            table_row(
+                [
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                    "---",
+                ]
+            ),
         ]
     )
     for task in sorted(
@@ -5745,7 +6336,12 @@ def render_report(
         lines.append(
             table_row(
                 [
-                    f"{task['objective']} (`{task['task_id']}`)",
+                    f"`{task['task_id']}`",
+                    f"`{task['episode']['ownership']['kind']}`",
+                    report_cell(task["objective"]),
+                    report_cell(task["object_scope"]),
+                    report_cell(task["episode"]["primary_deliverable"]),
+                    report_cell(task["outcome"]),
                     task["read"]["status"],
                     effect_label,
                     effect["summary"] if effect is not None else task["effect_reason"],
@@ -5753,23 +6349,69 @@ def render_report(
             )
         )
     if not clear_tasks:
-        lines.append(table_row(["None", "—", "—", "—"]))
+        lines.append(
+            table_row(["None", "—", "—", "—", "—", "—", "—", "—", "—"])
+        )
     lines.append("")
+
+    if clear_tasks:
+        lines.extend(["## Clear Task Boundary Rationale", ""])
+        for index, task in enumerate(
+            sorted(
+                clear_tasks,
+                key=lambda item: (item["started_at"], item["task_id"]),
+            ),
+            start=1,
+        ):
+            episode = task["episode"]
+            ownership = episode["ownership"]
+            lines.extend(
+                [
+                    f"### {index}. `{task['task_id']}`",
+                    "",
+                    f"- Ownership: `{ownership['kind']}` — "
+                    f"{report_cell(ownership['reason'])}",
+                    "- Ownership anchors: "
+                    + ", ".join(
+                        f"`{message_id}`"
+                        for message_id in ownership["anchor_message_ids"]
+                    ),
+                    "- Objective anchors: "
+                    + ", ".join(
+                        f"`{message_id}`"
+                        for message_id in episode["objective_anchor_message_ids"]
+                    ),
+                    "- Outcome anchors: "
+                    + ", ".join(
+                        f"`{message_id}`"
+                        for message_id in episode["outcome_anchor_message_ids"]
+                    ),
+                    f"- Boundary: {report_cell(episode['boundary_reason'])}",
+                    "",
+                ]
+            )
 
     if excluded_tasks:
         lines.extend(
             [
                 "## Excluded Tasks",
                 "",
-                table_row(["Task", "Reason"]),
-                table_row(["---", "---"]),
+                table_row(["Candidate", "Exclusion kind", "Observed scope", "Reason"]),
+                table_row(["---", "---", "---", "---"]),
             ]
         )
         for task in sorted(
             excluded_tasks, key=lambda item: (item["started_at"], item["task_id"])
         ):
             lines.append(
-                table_row([f"`{task['task_id']}`", task["exclusion_reason"]])
+                table_row(
+                    [
+                        f"`{task['task_id']}`",
+                        f"`{task['exclusion_kind']}`",
+                        report_cell(task["object_scope"]),
+                        report_cell(task["exclusion_reason"]),
+                    ]
+                )
             )
         lines.append("")
 
@@ -5864,7 +6506,7 @@ def render_report(
             "",
             "## Rule and Boundaries",
             "",
-            "A Task is one complete work item from objective to independently judgeable outcome. Continuations, corrections, review, and QA for the same deliverable remain in that Task; a new Task needs a new objective and independent outcome.",
+            "A clear Task is one single-Agent-owned continuous work episode. It requires a concrete objective, material object scope, independently judgeable outcome or terminal state, bounded source fragments, explicit ownership/objective/outcome anchors, and one primary terminal deliverable. Short continuations, status prompts, context-dependent questions, and phases or corrections of one delivery stay inside their parent episode. Excluded candidates carry a structured exclusion kind and no episode, Read, or Effect.",
             "",
             "Read is `observed` only when the recovered Task-window evidence contains attributable Tree content; otherwise it is `unresolved` with a reason.",
             "",
