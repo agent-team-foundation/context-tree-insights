@@ -5835,16 +5835,18 @@ def validate_task_refs(
             message_id: episode_messages[message_id]
             for message_id in episode["objective_anchor_message_ids"]
         }
-        ownership_anchor_senders = {
-            episode_messages[message_id].get("sender_id")
-            for message_id in episode["ownership"]["anchor_message_ids"]
-        }
         objective_anchor_senders = {
             message.get("sender_id")
             for message in objective_anchor_messages.values()
         }
         if episode["ownership"]["kind"] == "accepted":
-            if source_agent_id not in ownership_anchor_senders:
+            compatible_ownership_anchor_ids = [
+                message_id
+                for message_id in episode["ownership"]["anchor_message_ids"]
+                if episode_messages[message_id].get("sender_id")
+                == source_agent_id
+            ]
+            if not compatible_ownership_anchor_ids:
                 raise AuditError(
                     f"Accepted ownership for task[{task_id}] requires a "
                     "current-Agent anchor."
@@ -5854,19 +5856,27 @@ def validate_task_refs(
                     f"Accepted ownership for task[{task_id}] requires a "
                     "current-Agent objective anchor."
                 )
-            has_concrete_compatible_objective = any(
-                message.get("sender_id") == source_agent_id
+            concrete_compatible_objective_ids = [
+                message_id
+                for message_id, message in objective_anchor_messages.items()
+                if message.get("sender_id") == source_agent_id
                 and isinstance(message.get("content"), str)
                 and not is_weak_task_fragment(message["content"])
-                for message in objective_anchor_messages.values()
-            )
+            ]
         else:
-            if not any(
-                isinstance(sender_id, str)
-                and bool(sender_id.strip())
-                and sender_id != source_agent_id
-                for sender_id in ownership_anchor_senders
-            ):
+            compatible_ownership_anchor_ids = [
+                message_id
+                for message_id in episode["ownership"]["anchor_message_ids"]
+                if isinstance(
+                    episode_messages[message_id].get("sender_id"), str
+                )
+                and bool(
+                    episode_messages[message_id]["sender_id"].strip()
+                )
+                and episode_messages[message_id]["sender_id"]
+                != source_agent_id
+            ]
+            if not compatible_ownership_anchor_ids:
                 raise AuditError(
                     f"{episode['ownership']['kind'].title()} ownership for "
                     f"task[{task_id}] requires a non-current-Agent anchor."
@@ -5881,31 +5891,35 @@ def validate_task_refs(
                     f"{episode['ownership']['kind'].title()} ownership for "
                     f"task[{task_id}] requires a non-current-Agent objective anchor."
                 )
-            has_concrete_compatible_objective = any(
-                isinstance(message.get("sender_id"), str)
+            concrete_compatible_objective_ids = [
+                message_id
+                for message_id, message in objective_anchor_messages.items()
+                if isinstance(message.get("sender_id"), str)
                 and bool(message["sender_id"].strip())
                 and message["sender_id"] != source_agent_id
                 and isinstance(message.get("content"), str)
                 and not is_weak_task_fragment(message["content"])
-                for message in objective_anchor_messages.values()
-            )
-        if not has_concrete_compatible_objective:
+            ]
+        if not concrete_compatible_objective_ids:
             raise AuditError(
                 f"task[{task_id}] requires at least one ownership-compatible "
                 "concrete objective-anchor source message; weak continuations, "
                 "context-only prompts, and another sender's objective cannot be "
                 "normalized into a clear objective."
             )
-        if not any(
-            episode_messages[message_id].get("sender_id") == source_agent_id
-            and isinstance(
+        invalid_outcome_anchor_ids = [
+            message_id
+            for message_id in episode["outcome_anchor_message_ids"]
+            if episode_messages[message_id].get("sender_id") != source_agent_id
+            or not isinstance(
                 episode_messages[message_id].get("content"), str
             )
-            and bool(episode_messages[message_id]["content"].strip())
-            for message_id in episode["outcome_anchor_message_ids"]
-        ):
+            or not episode_messages[message_id]["content"].strip()
+        ]
+        if invalid_outcome_anchor_ids:
             raise AuditError(
-                f"task[{task_id}] requires a non-empty current-Agent outcome anchor."
+                f"task[{task_id}] requires every outcome anchor to be a "
+                "non-empty current-Agent message."
             )
         ownership_times = [
             parse_datetime(
@@ -5914,6 +5928,16 @@ def validate_task_refs(
             )
             for message_id in episode["ownership"]["anchor_message_ids"]
         ]
+        compatible_ownership_times = [
+            parse_datetime(
+                episode_messages[message_id]["created_at"],
+                field=(
+                    f"task {task_id} compatible ownership anchor "
+                    f"{message_id}"
+                ),
+            )
+            for message_id in compatible_ownership_anchor_ids
+        ]
         objective_anchor_times = [
             parse_datetime(
                 episode_messages[message_id]["created_at"],
@@ -5921,8 +5945,18 @@ def validate_task_refs(
             )
             for message_id in episode["objective_anchor_message_ids"]
         ]
+        concrete_objective_times = [
+            parse_datetime(
+                episode_messages[message_id]["created_at"],
+                field=(
+                    f"task {task_id} concrete objective anchor "
+                    f"{message_id}"
+                ),
+            )
+            for message_id in concrete_compatible_objective_ids
+        ]
         evidence_started_at = max(
-            min(ownership_times), min(objective_anchor_times)
+            min(compatible_ownership_times), min(concrete_objective_times)
         )
         episode_started_at = min(
             [*ownership_times, *objective_anchor_times]

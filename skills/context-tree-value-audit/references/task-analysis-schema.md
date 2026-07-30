@@ -75,10 +75,15 @@ anchor must come from that ownership-compatible sender: non-current for
 `assigned`/`transferred`, current for `accepted`. A weak assignment plus another
 sender's later concrete message cannot be combined into a clear objective.
 Synthesized judgment prose cannot turn a weak prompt into one. Every Task needs
-a distinct, strictly later current-Agent outcome anchor. Every episode anchor
-must be one of the Task's authorized source messages. Ownership and objective
-may use the same handoff message; outcome and continuation anchors must remain
-separate from the ownership/objective identity anchors.
+one or more distinct, strictly later outcome anchors, and every outcome anchor
+must be a non-empty current-Agent message. Every episode anchor must be one of
+the Task's authorized source messages. Ownership and objective may use the same
+handoff message; outcome and continuation anchors must remain separate from the
+ownership/objective identity anchors. The Read/choice evidence window begins
+only after the earliest ownership-kind-compatible ownership anchor and the
+earliest ownership-compatible, non-weak objective anchor are both established;
+earlier incompatible-sender ownership or weak objective anchors cannot move
+that window backward.
 
 A short continuation, status prompt, or context-dependent question is not a
 clear Task by itself. Examples include `continue`, `status`, `why`, `继续`,

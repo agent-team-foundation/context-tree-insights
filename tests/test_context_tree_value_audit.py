@@ -4367,6 +4367,129 @@ print(json.dumps({{"ok": True, "data": data}}))
             mixed_sender_result.stderr,
         )
 
+        late_objective_id = "late-concrete-objective-message"
+        late_objective_candidate = json.loads(json.dumps(candidate))
+        next(
+            message
+            for message in late_objective_candidate["visible_messages"]
+            if message["message_id"] == objective_id
+        )["content"] = "Please continue."
+        late_objective_candidate["visible_messages"].append(
+            {
+                "message_id": late_objective_id,
+                "created_at": "2026-07-22T10:03:00Z",
+                "sender_id": OTHER_AGENT_ID,
+                "sender_kind": "human",
+                "content": (
+                    "Deliver the independent authoritative state-source "
+                    "decision."
+                ),
+            }
+        )
+        late_objective_candidate["chat"]["message_count"] += 1
+        write_jsonl(
+            self.artifacts / "candidates.jsonl",
+            [late_objective_candidate],
+        )
+        read_before_concrete_objective = json.loads(json.dumps(valid))
+        read_before_concrete_objective["source_fragments"][0][
+            "message_ids"
+        ].insert(2, late_objective_id)
+        read_before_concrete_objective["episode"][
+            "objective_anchor_message_ids"
+        ].append(late_objective_id)
+        read_before_concrete_result = self.report(
+            [read_before_concrete_objective],
+            evidence_name="episode-read-before-concrete-evidence.jsonl",
+            report_name="episode-read-before-concrete-REPORT.md",
+        )
+        self.assertEqual(2, read_before_concrete_result.returncode)
+        self.assertIn(
+            "precedes established episode ownership/objective",
+            read_before_concrete_result.stderr,
+        )
+
+        late_ownership_id = "late-compatible-ownership-message"
+        late_ownership_candidate = json.loads(json.dumps(candidate))
+        next(
+            message
+            for message in late_ownership_candidate["visible_messages"]
+            if message["message_id"] == objective_id
+        )["sender_id"] = AGENT_ID
+        late_ownership_candidate["visible_messages"].append(
+            {
+                "message_id": late_ownership_id,
+                "created_at": "2026-07-22T10:03:00Z",
+                "sender_id": AGENT_ID,
+                "sender_kind": "agent",
+                "content": (
+                    "I accept ownership of the authoritative state-source "
+                    "decision."
+                ),
+            }
+        )
+        late_ownership_candidate["chat"]["message_count"] += 1
+        write_jsonl(
+            self.artifacts / "candidates.jsonl",
+            [late_ownership_candidate],
+        )
+        read_before_compatible_ownership = json.loads(json.dumps(valid))
+        read_before_compatible_ownership["source_fragments"][0][
+            "message_ids"
+        ].insert(2, late_ownership_id)
+        read_before_compatible_ownership["episode"]["ownership"] = {
+            "kind": "accepted",
+            "anchor_message_ids": [assignment_id, late_ownership_id],
+            "reason": (
+                "The audited Agent visibly accepted the assigned objective."
+            ),
+        }
+        read_before_ownership_result = self.report(
+            [read_before_compatible_ownership],
+            evidence_name="episode-read-before-ownership-evidence.jsonl",
+            report_name="episode-read-before-ownership-REPORT.md",
+        )
+        self.assertEqual(2, read_before_ownership_result.returncode)
+        self.assertIn(
+            "precedes established episode ownership/objective",
+            read_before_ownership_result.stderr,
+        )
+
+        human_outcome_id = "human-outcome-message"
+        mixed_outcome_candidate = json.loads(json.dumps(candidate))
+        mixed_outcome_candidate["visible_messages"].append(
+            {
+                "message_id": human_outcome_id,
+                "created_at": "2026-07-22T10:05:30Z",
+                "sender_id": OTHER_AGENT_ID,
+                "sender_kind": "human",
+                "content": "Thanks, this delivery is complete.",
+            }
+        )
+        mixed_outcome_candidate["chat"]["message_count"] += 1
+        write_jsonl(
+            self.artifacts / "candidates.jsonl",
+            [mixed_outcome_candidate],
+        )
+        mixed_outcome = json.loads(json.dumps(valid))
+        mixed_outcome["source_fragments"][0]["message_ids"].append(
+            human_outcome_id
+        )
+        mixed_outcome["episode"]["outcome_anchor_message_ids"].append(
+            human_outcome_id
+        )
+        mixed_outcome["effect"]["outcome_anchor"] = human_outcome_id
+        mixed_outcome_result = self.report(
+            [mixed_outcome],
+            evidence_name="episode-mixed-outcome-evidence.jsonl",
+            report_name="episode-mixed-outcome-REPORT.md",
+        )
+        self.assertEqual(2, mixed_outcome_result.returncode)
+        self.assertIn(
+            "every outcome anchor to be a non-empty current-Agent message",
+            mixed_outcome_result.stderr,
+        )
+
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
         weak_objective = json.loads(json.dumps(valid))
         weak_objective["objective"] = "修一下吧"

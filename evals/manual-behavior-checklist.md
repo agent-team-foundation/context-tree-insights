@@ -193,6 +193,12 @@ Pass when:
   while concrete `continue` objectives remain eligible;
 - a weak assignment cannot borrow another sender's concrete objective, and one
   Agent message cannot simultaneously serve as objective and terminal outcome;
+- an earlier weak objective anchor cannot admit a Read that precedes the
+  earliest ownership-compatible concrete objective anchor;
+- an earlier ownership anchor from a sender incompatible with the ownership
+  kind cannot admit a Read before compatible ownership is established;
+- every outcome anchor is a non-empty current-Agent message, so a later human
+  follow-up cannot extend the episode or become the bound Effect outcome;
 - work owned by another Agent remains context until a visible assignment,
   transfer, or acceptance;
 - a candidate missing any clear-Task gate is excluded with the deterministic
