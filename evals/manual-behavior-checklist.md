@@ -4,7 +4,7 @@ Use this checklist before admitting a `context-tree-value-audit` revision. Run i
 in designated First Tree Agent workspaces against disposable or sanitized
 records. Never commit generated artifacts.
 
-For a 0.2.5 upgrade, confirm the installed payload exposes only
+For a 0.3.0 upgrade, confirm the installed payload exposes only
 `$context-tree-value-audit`; the superseded `$context-tree-insights` directory
 must not remain as a second callable Skill. Exercise the README's minimal
 move/copy/compare flow and confirm the old payload is outside both Skill
@@ -21,7 +21,7 @@ Record in a private note:
 - exact Chat UUIDs when using `explicit_chat`;
 - optional acquisition bound;
 - artifact directory;
-- clear Task quota and expansion batches.
+- clear Task count and acquisition bound;
 - current Runtime and evidence-adapter version.
 
 Capture the Tree HEAD, `git status --short`, and initial artifact directory
@@ -170,17 +170,20 @@ Pass when:
 - malformed receipt is omitted with `context_decision_invalid`;
 - no malformed receipt blocks the message, Chat export, or audit.
 
-## 5. One Chat splits into multiple Tasks
+## 5. Complete Task reconstruction
 
-Use one Chat containing two distinct objectives and outcomes.
+Use one Chat containing one objective across planning, implementation, review,
+QA, correction, and final delivery, followed by a genuinely independent
+objective and outcome.
 
 Pass when:
 
+- all phases and continuations for the first deliverable remain one Task;
 - it produces two Task rows with separate source messages and windows;
-- clear Tasks have objective, object scope, outcome, and one allowed task type;
+- clear Tasks have objective, object scope, and outcome;
 - a Task missing those boundaries is marked excluded;
-- excluded Tasks contain no exposure or effects;
-- one read or choice copied into both Tasks is rejected.
+- excluded Tasks contain no Read or Effect judgment;
+- one Read or choice copied into both Tasks is rejected.
 
 ## 6. Cross-Chat handoff merge
 
@@ -193,65 +196,47 @@ Pass when:
 - the same fragments without linkage are rejected;
 - unrelated Chats cannot be merged by topical similarity alone.
 
-## 7. Confirmed and unresolved exposure
+## 7. Observed and unresolved Read
 
 Create one Task with attributable Task-window reads and one historical Task
-whose trace coverage cannot resolve exposure.
+whose trace coverage cannot resolve the Read.
 
 Pass when:
 
-- the first is `confirmed` with valid read IDs;
+- the first is `observed` with valid Read IDs;
 - the second is `unresolved` with a reason;
-- unresolved exposure has no reads and no effects;
+- unresolved Read has no Read IDs and a null Effect;
 - no `not_observed`, `unused`, or negative-value state is emitted;
-- reads outside the Task window or source Chats are rejected;
+- Reads outside the Task window or source Chats are rejected;
 - unresolved Tasks appear in coverage counts, never an unused denominator.
 
-## 8. Four effects, anchors, and deduplication
+## 8. Optional Effect
 
 Prepare valid examples of `confirmed`, `constrained`, `redirected`, and
-`conflicted`, with `verified` or `probable` original judgments.
+`conflicted`, plus observed-Read Tasks with no Effect.
 
 Pass when:
 
-- `informed`, `none`, unknown effects, and numeric weights are rejected;
-- every effect has Task exposure reads, later same-Agent choices, an outcome
+- unknown Effects, multiple Effects, confidence tiers, and numeric weights are
+  rejected;
+- every Effect has observed Task Reads, later same-Agent choices, an outcome
   anchor, and a summary;
-- every effect persists the five passage-to-choice rubric checks; `verified`
-  requires all five while `probable` requires the first four and no visible
-  influence;
-- `verified` additionally requires every cited passage to match the same node
-  in the bound Tree's local `origin/HEAD` snapshot; an unverified source may
-  support only `probable`;
-- post-choice reads and out-of-window choices are rejected;
-- duplicate effect evidence does not inflate independent-effect totals;
-- input `support` is rejected;
-- reporter-derived support is definite only for confirmed + verified and
-  limited otherwise.
+- post-choice Reads and out-of-window choices are rejected;
+- a null Effect requires one short `effect_reason`;
+- a decision receipt alone does not create an Effect;
+- schema-v1 task types, sampling fields, `verified` / `probable`, rubrics, and
+  support fields are rejected;
+- there is at most one Effect per Task.
 
-## 9. Task quota and saturation
+## 9. Sample handling
 
-Run a sanitized sequence with:
-
-- 100 clear Tasks;
-- a 20-Task expansion with no saturation signals;
-- a second 20-Task expansion with no saturation signals.
+Run sanitized reports with 1, 16, and 44 clear Tasks.
 
 Pass when:
 
-- `sampling_order` is contiguous and reproducible;
-- all five task types are represented in the initial 100 clear Tasks;
-- the report records 100 + 20 + 20 and saturation at 140;
-- a new effect type, key counterexample, or conclusion change resets the
-  consecutive-empty counter;
-- unresolved exposure never counts as an empty effect batch or establishes
-  saturation;
-- missing or spurious `new_effect_type` annotations are rejected against the
-  actual cumulative effect-type set;
-- rows beyond an already established saturation point are rejected;
-- an incomplete sample is reported as incomplete/continuing rather than a
-  stable rate;
-- `--days`, when supplied, remains only an acquisition bound.
+- every available clear Task is reported without a minimum quota;
+- no task-type coverage, batch expansion, or saturation state is emitted;
+- `--days`, when supplied, remains only an acquisition bound;
 - a Chat with messages inside the bound but later activity after `window.end`
   is fetched and filtered rather than omitted.
 
@@ -260,29 +245,26 @@ Pass when:
 Pass when the report includes:
 
 - clear and excluded Tasks;
-- confirmed and unresolved exposure Tasks;
-- effect Tasks and independent effects;
-- effect distribution and task type × effect;
-- derived support and sampling status;
+- observed and unresolved Read Tasks;
+- Effect Tasks and observed Reads without an Effect;
+- the four-Effect distribution;
+- every clear Task's Read and Effect result;
+- every excluded Task's reason;
 - authorized Chat/message/trace coverage and gaps.
 - the four-class in-window Tree-read attempt conservation table.
 
 Verify:
 
-- confirmed + unresolved = clear Tasks;
-- effect Tasks ≤ clear Tasks;
-- task type × effect cells sum to independent effects;
+- observed + unresolved = clear Tasks;
+- Effect + observed Read without Effect = observed Read Tasks;
+- the four Effect counts sum to Effect Tasks;
 - the report does not output a global effectiveness rate;
-- read counts, receipts, and unresolved gaps are not represented as causal
+- Read counts, receipts, and unresolved gaps are not represented as causal
   value or non-value.
-- the report labels itself exploratory, separates local default-branch matches
-  from unverified sources, and does not imply remote provenance, causal proof,
-  or ROI.
-- zero evidence-ready Tasks render effect totals, distribution, support,
-  representatives, and saturation as `N/A / pending`, never numeric zero.
+- the report labels itself sampled and does not imply remote provenance,
+  causal proof, or ROI;
 - an optional reviewed baseline is hash-anchored, internally conserving, and
-  rendered separately; it does not alter current exposure, effects, or
-  saturation.
+  rendered separately; it does not alter current Reads or Effects.
 
 For the 0.2.1 historical pilot rerun, the 210 in-window calls must all remain
 accounted for. Compare the new result with the grammar-only overlay
@@ -290,8 +272,8 @@ accounted for. Compare the new result with the grammar-only overlay
 delta must name the command-shape class and the stricter attribution or safety
 reason. Do not tune the parser merely to reproduce the target counts.
 
-After collection, redo Task-level exposure and effect judgment. Never reuse
-the old blanket `unresolved` / empty-effects rows as negative cases, and never
+After collection, redo Task-level Read and Effect judgment. Never reuse
+the old blanket `unresolved` / empty-Effect rows as negative cases, and never
 let the current rerun erase the separately reviewed 37 positive effect Tasks.
 
 ## 11. No product or source mutation
@@ -315,6 +297,6 @@ Pass when:
 
 Record pass/fail and the observable artifact or transcript location for every
 section. A failure in explicit routing, authorization, trace preflight,
-Agent/workspace/Tree isolation, Task reconstruction, exposure semantics,
-effect validation, quota/saturation, conservation, or no-mutation behavior
+Agent/workspace/Tree isolation, Task reconstruction, Read semantics,
+Effect validation, conservation, or no-mutation behavior
 blocks the revision.

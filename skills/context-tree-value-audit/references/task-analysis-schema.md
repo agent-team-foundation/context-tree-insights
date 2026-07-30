@@ -1,89 +1,66 @@
-# Task Analysis Schema
+# Task, Read, and Effect Schema
 
-Use this reference after `collect` produces `candidates.jsonl`. The Task, not
-the Chat, is the judgment and counting unit. `Chat UUID @ Agent UUID` remains
-the authorization, trace-mapping, and evidence-source unit.
+Use this reference after `collect` produces `candidates.jsonl`. Task is the
+judgment and counting unit. `Chat UUID @ Agent UUID` remains only the
+authorization, trace-mapping, and evidence-source unit.
 
-Write exactly one `task-judgments.jsonl` row per reconstructed Task. Do not
-split tasks, exposures, and effects into separate artifact files.
+Write exactly one schema-v2 `task-judgments.jsonl` row for every reconstructed
+Task or excluded candidate.
 
 ## Clear Task
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "stable-local-task-id",
   "status": "clear",
   "objective": "Choose the state authority",
   "object_scope": "state persistence",
   "outcome": "Kept the existing state source",
-  "task_type": "solution_design",
   "started_at": "RFC3339",
   "ended_at": "RFC3339",
   "source_fragments": [
     {
       "audit_id": "CHAT_UUID@AGENT_UUID",
-      "message_ids": ["message-id"]
+      "message_ids": ["assignment-message-id", "outcome-message-id"]
     }
   ],
-  "sampling_order": 1,
-  "saturation_signals": [],
-  "exposure": {
-    "status": "confirmed",
+  "read": {
+    "status": "observed",
     "read_ids": ["read-id"],
     "reason": null
   },
-  "effects": [
-    {
-      "effect": "constrained",
-      "original_judgment": "verified",
-      "rubric": {
-        "real_read": true,
-        "decision_bearing_normal_passage": true,
-        "task_relevant": true,
-        "read_before_choice": true,
-        "influence_visible": true
-      },
-      "read_ids": ["read-id"],
-      "choice_message_ids": ["message-id"],
-      "outcome_anchor": "message-id-or-stable-outcome-reference",
-      "summary": "The constraint prevented a second state source."
-    }
-  ]
+  "effect": {
+    "type": "constrained",
+    "read_ids": ["read-id"],
+    "choice_message_ids": ["outcome-message-id"],
+    "outcome_anchor": "outcome-message-id",
+    "summary": "The constraint ruled out a second state source."
+  },
+  "effect_reason": null
 }
 ```
 
-A clear Task requires a concrete objective, object scope, outcome, start/end
-window, and source messages. If any of those boundaries cannot be stated
-honestly, use an excluded Task.
+A clear Task requires a concrete objective, material object scope,
+independently judgeable outcome, bounded start/end window, and authorized
+source messages.
 
-Allowed `task_type` values are:
-
-- `solution_design` — 方案设计;
-- `implementation_delivery` — 实现交付;
-- `review_qa_debugging` — Review、QA、排障;
-- `research_explanation` — 调研、解释;
-- `coordination_progress` — 协调推进.
-
-`sampling_order` is the acquisition order among clear Tasks and must be
-unique and contiguous from 1. `saturation_signals` may contain only
-`new_effect_type`, `key_counterexample`, or `conclusion_change`.
-`new_effect_type` is not a free-form annotation: every complete expansion
-batch must declare it exactly when that batch contains an effect type not seen
-in the cumulative earlier sample. Missing or spurious declarations are
-rejected.
+Treat one complete objective-to-outcome work item as one Task. Keep planning,
+implementation, review, QA, corrections, merge approval, status questions,
+and short continuations for the same deliverable in that Task. Split only when
+there is a new objective, materially different scope or deliverable, an
+independent outcome, and an unambiguous source boundary.
 
 ## Excluded Task
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "stable-local-task-id",
   "status": "excluded",
   "objective": null,
   "object_scope": "unclear scope",
   "outcome": null,
-  "task_type": null,
   "started_at": "RFC3339",
   "ended_at": "RFC3339",
   "source_fragments": [
@@ -96,13 +73,9 @@ rejected.
 }
 ```
 
-Excluded Tasks must not contain `exposure`, `effects`, `sampling_order`, or
-`saturation_signals`.
+Excluded Tasks do not contain `read`, `effect`, or `effect_reason`.
 
-## Task reconstruction
-
-One Chat may contain multiple Tasks. Keep their source messages, windows,
-reads, and choices separate.
+## Cross-Chat Task
 
 Merge fragments from more than one Chat only when every fragment carries the
 same explicit linkage:
@@ -123,154 +96,96 @@ Allowed linkage kinds are:
 - `same_objective_delivery` for the same objective and primary delivery.
 
 The reporter rejects an unlinked cross-Chat Task. A single-Chat Task must not
-claim cross-Chat linkage.
+claim cross-Chat linkage. Every source message must belong to the referenced
+authorized Chat-Agent evidence row and fall inside the Task and acquisition
+windows.
 
-Every source message must belong to the referenced authorized Chat-Agent
-evidence row and fall inside the Task window. The Task window must remain
-inside any explicit acquisition bound.
+## Read
 
-## Exposure
+Read has only two states:
 
-Exposure has only two states:
+- `observed` — one or more attributable Task-window `read_ids` exist;
+- `unresolved` — historical evidence cannot resolve the Read; include a short
+  `reason`, keep `read_ids` empty, and keep Effect null.
 
-- `confirmed` — one or more attributable `read_ids` are available;
-- `unresolved` — historical evidence cannot resolve exposure; include a
-  concrete `reason`, keep `read_ids` empty, and keep `effects` empty.
+Do not use `confirmed`, `not_observed`, `unused`, or a negative-value state.
+Missing telemetry and an absent decision receipt are unknown. An unresolved
+Read is never evidence that the Tree was not read or had no value.
 
-Do not use `not_observed`. Missing telemetry and an absent decision receipt are
-unknown, not evidence that the Tree was not read or did not matter. An
-`unresolved` Task is never placed in an "unused" denominator.
+Every observed Read must belong to a source Chat, start and complete inside the
+Task window, and be assigned to only one Task.
 
-Every exposure read must belong to a source Chat, start and complete inside the
-Task window, and be assigned to only one reconstructed Task.
-
-Collector command classification is not exposure by itself. For
+Collector command classification is not a Read by itself. For
 `read_only_composite` or `output_attribution: aggregate`, inspect the recorded
-passage and component paths. `auxiliary_output_possible` means the accepted
-command contained safe auxiliary operations, not that their bytes were kept.
-The collector removes exactly attributable static labels and emits no read ID
-when dynamic diagnostic output cannot be separated. If actual Tree content is
-still not attributable, keep the Task exposure unresolved.
+passage and component paths. If actual Tree content is not attributable, keep
+the Read unresolved.
 
-## Effects and original judgment
+## Effect
 
-Effects use only:
+Effect is either null or one object whose `type` is:
 
-- `confirmed`;
-- `constrained`;
-- `redirected`;
-- `conflicted`.
+- `confirmed` — removed material uncertainty and justified keeping the choice;
+- `constrained` — ruled out an option or narrowed the acceptable boundary;
+- `redirected` — changed the intended approach;
+- `conflicted` — exposed a conflict that still required resolution.
 
-Do not use `informed`, `none`, or a numeric weight. `original_judgment` reuses
-`verified` and `probable`, and every effect persists the five checks that make
-that classification reproducible:
+Record an Effect only when all four conditions hold:
 
-- `real_read`: a successful tool result contains the cited Tree passage;
-- `decision_bearing_normal_passage`: the passage states a current decision,
-  constraint, rationale, or cross-domain relationship in normal content;
-- `task_relevant`: the passage can affect a concrete choice in this Task;
-- `read_before_choice`: every cited read completes before the earliest cited
-  choice;
-- `influence_visible`: a later visible same-Agent message shows the passage
-  confirmed, constrained, redirected, or conflicted with the choice.
+1. a real Read contains a relevant normal Tree decision, constraint, rationale,
+   or cross-domain relationship;
+2. every cited Read completes before the earliest cited choice;
+3. the later same-Agent choice or outcome reasonably shows one of the four
+   effects;
+4. no more direct user instruction or other evidence fully explains the
+   result.
 
-Use `verified` only when all five checks are `true`. Use `probable` only when
-the first four checks are `true` and `influence_visible` is `false` or `null`
-because the aligned outcome does not expose complete causality. Do not soften a
-failed real-read, normal-passage, relevance, or timing check into `probable`.
+Every Effect requires observed Read IDs, later same-Agent choice message IDs, a
+non-empty outcome anchor, and one concrete summary sentence. The same Read or
+choice cannot be copied across Tasks.
 
-`verified` also requires every cited read to carry
-`tree_source.status: default_branch_match`. The collector assigns that status
-only when the recorded passage matches the same node in the bound Tree's local
-`origin/HEAD` snapshot. An `unverified_source` may support `probable`, never
-`verified`. This is a local content match, not remote provenance.
+If those conditions are not met, set `"effect": null` and include one short
+`effect_reason`. Do not add `verified`, `probable`, confidence tiers, support
+levels, numeric weights, or multiple Effects. A `contextDecision` receipt may
+support the judgment but cannot create an Effect by itself.
 
-An accepted read-only command shape can still fail `real_read` when its output
-contains only status text, labels, selectors, counts, or diagnostics. Exact
-trace recovery improves evidence quality; it is not the only semantic signal,
-and a collector failure never reverses a separately reviewed positive case
-into a zero effect.
+## Separately reviewed historical baseline
 
-Every effect requires read IDs, later same-Agent choice message IDs, a
-non-empty outcome anchor, and a concise summary. Effect reads must be included
-in the Task exposure and must complete no later than the earliest cited choice.
-
-The same read or choice cannot be copied across different reconstructed Tasks.
-The reporter derives an independent effect identity from effect type, reads,
-choices, and outcome anchor, so duplicate effect rows do not inflate totals.
-
-### Separately reviewed historical baseline
-
-Do not inject an older positive case into a current unresolved Task. If an
-earlier Task-level review remains valid but its exact current collector IDs
-cannot be recreated, pass an optional one-row `reviewed-baseline.jsonl` to the
-reporter. It must contain:
+An optional `reviewed-baseline.jsonl` contains one schema-v2 aggregate:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "basis": "separately_reviewed_task_cases",
   "reviewed_at": "RFC3339",
   "evidence_anchor": {
     "artifact_id": "opaque-reviewed-artifact-id",
     "sha256": "64-lowercase-hex"
   },
-  "clear_tasks": 162,
-  "effect_tasks": 37,
-  "independent_effects": 37,
+  "clear_tasks": 44,
+  "effect_tasks": 16,
   "effect_counts": {
-    "confirmed": 5,
-    "constrained": 17,
-    "redirected": 13,
-    "conflicted": 2
-  },
-  "support_counts": {
-    "definite": 24,
-    "limited": 13
+    "confirmed": 2,
+    "constrained": 8,
+    "redirected": 5,
+    "conflicted": 1
   }
 }
 ```
 
-Both count maps must conserve `independent_effects`. The baseline appears in a
-separate report section and never changes current exposure, effect totals,
-quota, or saturation. This preserves reviewed evidence without allowing
-arbitrary effects on unresolved Tasks.
+The Effect counts must conserve `effect_tasks`. The reporter keeps the
+baseline separate from the current rerun.
 
-## Derived support and conservation
+## Reporting
 
-Never persist a `support` field in `task-judgments.jsonl`. The reporter derives:
-
-- `definite`: confirmed exposure plus `verified`;
-- `limited`: every other still-valid positive effect.
-
-The derived effect evidence also carries `tree_source_status` so the report
-separately counts local default-branch matches and unverified sources.
+Report every available clear Task and excluded candidate in the authorized
+acquisition bound. There is no minimum Task quota, task-type coverage gate,
+batch expansion, or saturation status.
 
 The report must conserve:
 
-- confirmed exposure Tasks + unresolved exposure Tasks = clear Tasks;
-- effect Tasks ≤ clear Tasks;
-- the sum of task type × effect cells = independent effects.
+- observed Read Tasks + unresolved Read Tasks = clear Tasks;
+- Effect Tasks + observed Reads without an Effect = observed Read Tasks;
+- the four Effect counts = Effect Tasks.
 
-## Task quota and saturation
-
-Start with at least 100 clear Tasks and represent all five task types in that
-initial cohort. Then expand by 20 clear Tasks at a time. Stop only after two
-consecutive complete expansion batches contain no
-`new_effect_type`, `key_counterexample`, or `conclusion_change`.
-
-The reporter derives new effect types from the Task effects and cross-validates
-the batch annotation before counting an empty batch. A newly observed effect
-type therefore resets the consecutive-empty counter even when an auditor
-forgets the annotation; the missing annotation is rejected rather than silently
-declaring saturation.
-
-A partial run is reported as incomplete or continuing; it is not silently
-promoted to a stable rate. If two empty expansion batches establish saturation,
-the validator rejects Task rows beyond that reproducible stop point.
-
-Unresolved exposure cannot make a batch "empty" for effect saturation. When no
-clear Task has evidence-ready exposure, effect totals, distributions, support,
-representatives, and saturation are all `N/A / pending`, not numeric zero. If
-some clear Tasks are confirmed while others remain unresolved, observed
-positive effects may be reported, but saturation remains pending.
+Always state the sample size and evidence gaps. Do not output a global
+effectiveness rate, causal claim, or ROI.

@@ -1,8 +1,8 @@
 # Runtime Evidence Adapters
 
-The audit core is Runtime-neutral. Authorization, Task reconstruction,
-exposure, effect judgment, support derivation, sampling, and reporting do not
-change by provider. Only historical Tree-read evidence recovery varies.
+The audit core is Runtime-neutral. Authorization, Task reconstruction, Read
+judgment, Effect judgment, and reporting do not change by provider. Only
+historical Tree-read evidence recovery varies.
 
 The collector requires and resolves the current Runtime from
 `FIRST_TREE_PROVIDER`; absence or an unknown value fails closed. An explicit
@@ -64,10 +64,10 @@ injected context exists.
 
 ### Cursor and Kimi Code
 
-The collector recognizes these Runtime names but does not infer historical
-exposure from incomplete native records. It emits a provider-specific
+The collector recognizes these Runtime names but does not infer a historical
+Read from incomplete native records. It emits a provider-specific
 `historical_evidence_not_supported` coverage gap, no read IDs, and leaves every
-affected Task pending. Adding audit-only persistence to First Tree Runtime
+affected Task Read unresolved. Adding audit-only persistence to First Tree Runtime
 handlers is outside this Skill's scope.
 
 ## Missing evidence
