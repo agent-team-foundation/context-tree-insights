@@ -187,9 +187,12 @@ before `window.start`.
 
 `tree_identity` is a deterministic opaque identity for the exact
 Agent/workspace-bound Tree. The audit-row and read-level values must match.
-`tree_source_snapshot` describes the locally available `origin/HEAD` snapshot
-without fetching or changing git state. If it cannot be established, its
-status is `unavailable` with a conservative reason.
+`tree_source_snapshot` records the locally available `origin/HEAD` snapshot at
+collection time without fetching or changing git state. If it cannot be
+established, its status is `unavailable` with a conservative reason. Reporting
+checks the recorded snapshot and each read's `tree_source` for internal
+consistency; a later advance of the bound Tree does not invalidate an
+otherwise reproducible historical artifact.
 
 Each read's `tree_source` is `default_branch_match` only when its one recorded
 node passage matches that node in the local snapshot. Every other read is
@@ -234,8 +237,8 @@ other-Agent messages cannot establish that Agent's effect.
 
 `outside_candidate_set` means collection found neither a successful qualifying
 Tree read nor a visible Tree-influence signal. It is not evidence of no
-exposure or no value. A later Task reconstruction may still mark historical
-exposure unresolved.
+Read or no value. A later Task reconstruction may still mark the historical
+Read unresolved.
 
 ## Read evidence
 
@@ -304,7 +307,7 @@ read-only command shapes:
 unless provider-native output blocks permit safe nested-call slicing. An
 accepted command shape is still only candidate evidence: the Task auditor
 must verify that the recorded passage actually contains decision-bearing Tree
-content before confirming exposure or an effect.
+content before recording an observed Read or Effect.
 
 When one outer orchestration call forwards multiple provider-native output
 blocks, the collector emits one read row per attributable nested shell call
@@ -317,4 +320,4 @@ effect still requires the Agent to judge a current decision, constraint,
 rationale, or cross-domain relationship in normal content.
 
 Missing, cleaned, malformed, truncated, unsupported, or unmapped Runtime
-evidence remains a coverage gap. It does not become negative exposure evidence.
+evidence remains a coverage gap. It does not become a negative Read.

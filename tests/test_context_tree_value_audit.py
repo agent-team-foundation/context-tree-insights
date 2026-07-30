@@ -171,7 +171,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("Do not trigger from an ordinary task", skill)
         self.assertIn("all authorized Chats are not an eligible", skill)
         self.assertIn("accepted_read_only_composite", skill)
-        self.assertIn("N/A / pending", skill)
+        self.assertIn("There is no\nminimum Task quota", skill)
         claude_skill = (CLAUDE_SKILL_ROOT / "SKILL.md").read_text(
             encoding="utf-8"
         )
@@ -180,23 +180,18 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("allow_implicit_invocation: false", openai)
         self.assertIn("explicit_agent", reference)
         self.assertIn("explicit_chat", reference)
-        for rubric_key in (
-            "real_read",
-            "decision_bearing_normal_passage",
-            "task_relevant",
-            "read_before_choice",
-            "influence_visible",
-        ):
-            self.assertIn(rubric_key, task_reference)
-        self.assertIn("all five checks are `true`", task_reference)
-        self.assertIn("first four checks are `true`", task_reference)
+        self.assertIn("Task, Read, and Effect Schema", task_reference)
+        self.assertIn('"schema_version": 2', task_reference)
+        self.assertIn('"status": "observed"', task_reference)
+        self.assertIn('"effect": null', task_reference)
+        self.assertIn("no more direct user instruction", task_reference)
         self.assertIn("in_window_tree_read_attempts", reference)
         self.assertIn("unresolved_opaque", reference)
         self.assertIn("explicit_agent", skill)
-        self.assertIn("default_branch_match", task_reference)
-        self.assertIn("exploratory evidence scan", skill)
-        self.assertIn("collector failure never reverses", task_reference)
-        self.assertEqual("0.2.5", version)
+        self.assertNotIn("original_judgment", task_reference)
+        self.assertNotIn("sampling_order", task_reference)
+        self.assertIn("sampled evidence report", skill)
+        self.assertEqual("0.3.0", version)
         self.assertIn(".skill-quarantine/", readme)
         self.assertIn("diff -qr", readme)
         self.assertIn("rollback", readme)
@@ -1223,10 +1218,9 @@ print(json.dumps({{"ok": True, "data": data}}))
         *,
         task_id: str = "task-1",
         message_id: str = MESSAGE_ID,
-        sampling_order: int = 1,
-        exposure_status: str = "confirmed",
+        read_status: str = "observed",
         read_ids: list[str] | None = None,
-        effects: list[dict[str, Any]] | None = None,
+        effect: dict[str, Any] | None | object = ...,
     ) -> dict[str, Any]:
         selected_reads = (
             read_ids
@@ -1235,36 +1229,25 @@ print(json.dumps({{"ok": True, "data": data}}))
             if candidate["reads"]
             else []
         )
-        if effects is None:
-            effects = (
-                [
-                    {
-                        "effect": "constrained",
-                        "original_judgment": "verified",
-                        "rubric": {
-                            "real_read": True,
-                            "decision_bearing_normal_passage": True,
-                            "task_relevant": True,
-                            "read_before_choice": True,
-                            "influence_visible": True,
-                        },
-                        "read_ids": selected_reads,
-                        "choice_message_ids": [message_id],
-                        "outcome_anchor": message_id,
-                        "summary": "The Tree constraint prevented a second state table.",
-                    }
-                ]
-                if selected_reads and exposure_status == "confirmed"
-                else []
+        if effect is ...:
+            effect = (
+                {
+                    "type": "constrained",
+                    "read_ids": selected_reads,
+                    "choice_message_ids": [message_id],
+                    "outcome_anchor": message_id,
+                    "summary": "The Tree constraint prevented a second state table.",
+                }
+                if selected_reads and read_status == "observed"
+                else None
             )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "task_id": task_id,
             "status": "clear",
             "objective": "Choose one state source",
             "object_scope": "state persistence",
             "outcome": "Kept the existing authoritative state source.",
-            "task_type": "solution_design",
             "started_at": "2026-07-22T10:00:00Z",
             "ended_at": "2026-07-22T10:06:00Z",
             "source_fragments": [
@@ -1273,18 +1256,21 @@ print(json.dumps({{"ok": True, "data": data}}))
                     "message_ids": [message_id],
                 }
             ],
-            "sampling_order": sampling_order,
-            "saturation_signals": [],
-            "exposure": {
-                "status": exposure_status,
+            "read": {
+                "status": read_status,
                 "read_ids": selected_reads,
                 "reason": (
                     "Historical trace coverage cannot confirm a read."
-                    if exposure_status == "unresolved"
+                    if read_status == "unresolved"
                     else None
                 ),
             },
-            "effects": effects,
+            "effect": effect,
+            "effect_reason": (
+                "No later choice reasonably shows Tree influence."
+                if effect is None
+                else None
+            ),
         }
 
     def report(
@@ -3898,251 +3884,93 @@ print(json.dumps({{"ok": True, "data": data}}))
     def test_report_is_task_first_deterministic_and_rejects_invalid_effects(self) -> None:
         self.write_chat_export()
         self.write_trace_fixtures()
-        result = self.collect("candidates.jsonl")
-        self.assertEqual(0, result.returncode, result.stderr)
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
         candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
         task = self.task_judgment(candidate)
 
         first = self.report(
             [task],
-            evidence_name="evidence-one.jsonl",
-            report_name="REPORT-one.md",
+            evidence_name="minimal-evidence-one.jsonl",
+            report_name="minimal-REPORT-one.md",
         )
         second = self.report(
             [task],
-            evidence_name="evidence-two.jsonl",
-            report_name="REPORT-two.md",
+            evidence_name="minimal-evidence-two.jsonl",
+            report_name="minimal-REPORT-two.md",
         )
         self.assertEqual(0, first.returncode, first.stderr)
         self.assertEqual(0, second.returncode, second.stderr)
         self.assertEqual(
-            (self.artifacts / "evidence-one.jsonl").read_bytes(),
-            (self.artifacts / "evidence-two.jsonl").read_bytes(),
+            (self.artifacts / "minimal-evidence-one.jsonl").read_bytes(),
+            (self.artifacts / "minimal-evidence-two.jsonl").read_bytes(),
         )
         self.assertEqual(
-            (self.artifacts / "REPORT-one.md").read_bytes(),
-            (self.artifacts / "REPORT-two.md").read_bytes(),
+            (self.artifacts / "minimal-REPORT-one.md").read_bytes(),
+            (self.artifacts / "minimal-REPORT-two.md").read_bytes(),
         )
-        markdown = (self.artifacts / "REPORT-one.md").read_text(encoding="utf-8")
+        markdown = (self.artifacts / "minimal-REPORT-one.md").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("| Clear Tasks | 1 |", markdown)
-        self.assertIn("| Confirmed exposure Tasks | 1 |", markdown)
-        self.assertIn("| Independent effects | 1 |", markdown)
+        self.assertIn("| Read observed Tasks | 1 |", markdown)
+        self.assertIn("| Effect Tasks | 1 |", markdown)
+        self.assertIn("| Observed Read without Effect | 0 |", markdown)
         self.assertIn("| constrained | 1 |", markdown)
-        self.assertIn("definite **1**", markdown)
-        self.assertIn("not a global effectiveness rate", markdown)
+        self.assertIn("There is no minimum Task quota", markdown)
         self.assertIn("Tree-read grammar conservation", markdown)
-        self.assertIn("| accepted_exact | 1 |", markdown)
-        self.assertIn("| accepted_read_only_composite | 3 |", markdown)
-        for status in (
-            "accepted_exact",
-            "accepted_read_only_composite",
-            "unresolved_opaque",
-            "rejected_unsafe",
-        ):
-            self.assertEqual(
-                1,
-                markdown.count(f"| {status} |"),
-                f"report duplicated the {status} conservation row",
-            )
-        evidence = read_jsonl(self.artifacts / "evidence-one.jsonl")
-        self.assertEqual(
-            "definite", evidence[0]["effects"][0]["derived_support"]
-        )
+        evidence = read_jsonl(self.artifacts / "minimal-evidence-one.jsonl")
+        self.assertEqual("constrained", evidence[0]["effect"]["type"])
+        self.assertIn("effect_id", evidence[0]["effect"])
+        self.assertNotIn("derived_support", evidence[0]["effect"])
 
-        legacy_candidate = json.loads(json.dumps(candidate))
-        legacy_candidate.pop("runtime_provider")
-        for read in legacy_candidate["reads"]:
-            read.pop("runtime_provider")
-        write_jsonl(
-            self.artifacts / "legacy-candidates.jsonl",
-            [legacy_candidate],
+        invalid = json.loads(json.dumps(task))
+        invalid["effect"]["type"] = "informed"
+        invalid_result = self.report(
+            [invalid],
+            evidence_name="minimal-invalid-evidence.jsonl",
+            report_name="minimal-invalid-REPORT.md",
         )
-        legacy = self.report(
-            [task],
-            candidates_name="legacy-candidates.jsonl",
-            evidence_name="legacy-evidence.jsonl",
-            report_name="legacy-REPORT.md",
-        )
-        self.assertEqual(0, legacy.returncode, legacy.stderr)
-        self.assertIn(
-            "| Runtime evidence provider | codex |",
-            (self.artifacts / "legacy-REPORT.md").read_text(encoding="utf-8"),
-        )
+        self.assertEqual(2, invalid_result.returncode)
+        self.assertIn(".type must be one of", invalid_result.stderr)
 
-        pilot_counts_candidate = json.loads(json.dumps(candidate))
-        pilot_counts_candidate["collector_diagnostics"] = {
-            "in_window_tree_read_attempts": 210,
-            "attempt_status_counts": {
-                "accepted_exact": 24,
-                "accepted_read_only_composite": 75,
-                "unresolved_opaque": 101,
-                "rejected_unsafe": 10,
-            },
-            "attempt_reason_counts": {
-                "unresolved_exec_wrapper_shape": 101,
-                "unsafe_shell_shape": 10,
-            },
-        }
-        write_jsonl(
-            self.artifacts / "pilot-counts-candidates.jsonl",
-            [pilot_counts_candidate],
+        missing_anchor = json.loads(json.dumps(task))
+        missing_anchor["effect"].pop("outcome_anchor")
+        missing_anchor_result = self.report(
+            [missing_anchor],
+            evidence_name="minimal-missing-anchor-evidence.jsonl",
+            report_name="minimal-missing-anchor-REPORT.md",
         )
-        pilot_counts = self.report(
-            [task],
-            candidates_name="pilot-counts-candidates.jsonl",
-            evidence_name="pilot-counts-evidence.jsonl",
-            report_name="pilot-counts-REPORT.md",
-        )
-        self.assertEqual(0, pilot_counts.returncode, pilot_counts.stderr)
-        pilot_markdown = (
-            self.artifacts / "pilot-counts-REPORT.md"
-        ).read_text(encoding="utf-8")
-        for expected_row in (
-            "| accepted_exact | 24 |",
-            "| accepted_read_only_composite | 75 |",
-            "| unresolved_opaque | 101 |",
-            "| rejected_unsafe | 10 |",
-            "| Total | 210 |",
-        ):
-            self.assertEqual(1, pilot_markdown.count(expected_row))
+        self.assertEqual(2, missing_anchor_result.returncode)
+        self.assertIn("outcome_anchor", missing_anchor_result.stderr)
 
-        nonconserving_candidate = json.loads(json.dumps(candidate))
-        nonconserving_candidate["collector_diagnostics"][
-            "in_window_tree_read_attempts"
-        ] += 1
-        write_jsonl(
-            self.artifacts / "nonconserving-candidates.jsonl",
-            [nonconserving_candidate],
-        )
-        nonconserving = self.report(
-            [task],
-            candidates_name="nonconserving-candidates.jsonl",
-            evidence_name="nonconserving-evidence.jsonl",
-            report_name="nonconserving-REPORT.md",
-        )
-        self.assertEqual(2, nonconserving.returncode)
-        self.assertIn(
-            "collector diagnostics do not conserve",
-            nonconserving.stderr,
-        )
-
-        duplicate_task = json.loads(json.dumps(task))
-        duplicate_task["effects"].append(
-            json.loads(json.dumps(duplicate_task["effects"][0]))
-        )
-        deduplicated = self.report(
-            [duplicate_task],
-            evidence_name="deduplicated-evidence.jsonl",
-            report_name="deduplicated-REPORT.md",
-        )
-        self.assertEqual(0, deduplicated.returncode, deduplicated.stderr)
-        deduplicated_report = (
-            self.artifacts / "deduplicated-REPORT.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("| Independent effects | 1 |", deduplicated_report)
-        self.assertIn("| solution_design | 0 | 1 | 0 | 0 | 1 |", deduplicated_report)
-
-        limited_task = json.loads(json.dumps(task))
-        limited_task["effects"][0]["original_judgment"] = "probable"
-        limited_task["effects"][0]["rubric"]["influence_visible"] = False
-        limited = self.report(
-            [limited_task],
-            evidence_name="limited-evidence.jsonl",
-            report_name="limited-REPORT.md",
-        )
-        self.assertEqual(0, limited.returncode, limited.stderr)
-        self.assertEqual(
-            "limited",
-            read_jsonl(self.artifacts / "limited-evidence.jsonl")[0]["effects"][0][
-                "derived_support"
-            ],
-        )
-
-        missing_rubric_task = json.loads(json.dumps(task))
-        missing_rubric_task["effects"][0].pop("rubric")
-        missing_rubric = self.report(
-            [missing_rubric_task],
-            evidence_name="missing-rubric-evidence.jsonl",
-            report_name="missing-rubric-REPORT.md",
-        )
-        self.assertEqual(2, missing_rubric.returncode)
-        self.assertIn(".rubric must be an object", missing_rubric.stderr)
-
-        overstated_probable_task = json.loads(json.dumps(task))
-        overstated_probable_task["effects"][0]["original_judgment"] = "probable"
-        overstated_probable = self.report(
-            [overstated_probable_task],
-            evidence_name="overstated-probable-evidence.jsonl",
-            report_name="overstated-probable-REPORT.md",
-        )
-        self.assertEqual(2, overstated_probable.returncode)
-        self.assertIn("influence_visible false or null", overstated_probable.stderr)
-
-        task["effects"][0]["effect"] = "informed"
-        invalid_effect = self.report(
-            [task],
-            evidence_name="evidence-invalid.jsonl",
-            report_name="REPORT-invalid.md",
-        )
-        self.assertEqual(2, invalid_effect.returncode)
-        self.assertIn(".effect must be one of", invalid_effect.stderr)
-
-        task["effects"][0]["effect"] = "constrained"
-        task["effects"][0].pop("outcome_anchor")
-        missing_anchor = self.report(
-            [task],
-            evidence_name="evidence-missing-anchor.jsonl",
-            report_name="REPORT-missing-anchor.md",
-        )
-        self.assertEqual(2, missing_anchor.returncode)
-        self.assertIn("outcome_anchor", missing_anchor.stderr)
-
-        task = self.task_judgment(candidate)
-        candidate["reads"][0]["completed_at"] = "2026-07-22T10:02:01Z"
-        candidate["tree_identity"] = "tree-tampered"
-        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
-        wrong_tree = self.report(
-            [task],
-            evidence_name="evidence-wrong-tree.jsonl",
-            report_name="REPORT-wrong-tree.md",
-        )
-        self.assertEqual(2, wrong_tree.returncode)
-        self.assertIn("workspace-bound Tree", wrong_tree.stderr)
-
-    def test_verified_effect_requires_default_branch_match(self) -> None:
+    def test_report_survives_tree_advance_and_rejects_v02_confidence_fields(
+        self,
+    ) -> None:
         self.write_chat_export()
         self.write_trace_fixtures()
-        matched = self.collect("matched-source-candidates.jsonl")
-        self.assertEqual(0, matched.returncode, matched.stderr)
-        matched_candidate = read_jsonl(
-            self.artifacts / "matched-source-candidates.jsonl"
-        )[0]
-        self.assertEqual(
-            "local_default_branch",
-            matched_candidate["tree_source_snapshot"]["status"],
-        )
-        self.assertEqual(
-            "default_branch_match",
-            matched_candidate["reads"][0]["tree_source"]["status"],
-        )
+        collected = self.collect("candidates.jsonl")
+        self.assertEqual(0, collected.returncode, collected.stderr)
+        candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
+        task = self.task_judgment(candidate)
 
         self.tree_file.write_text(
-            "# Architecture\n\n## Decision\n\nUse a replacement state source.\n",
+            "# Architecture\n\n## Decision\n\nChat history remains authoritative.\n",
             encoding="utf-8",
         )
         subprocess.run(
-            ["git", "-C", str(self.tree_root), "add", "system/architecture.md"],
+            ["git", "-C", str(self.tree_root), "add", "."],
             check=True,
             capture_output=True,
             text=True,
         )
         subprocess.run(
-            ["git", "-C", str(self.tree_root), "commit", "-m", "replace"],
+            ["git", "-C", str(self.tree_root), "commit", "-m", "advance"],
             check=True,
             capture_output=True,
             text=True,
         )
-        replacement_commit = subprocess.run(
+        advanced_commit = subprocess.run(
             ["git", "-C", str(self.tree_root), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
@@ -4155,57 +3983,36 @@ print(json.dumps({{"ok": True, "data": data}}))
                 str(self.tree_root),
                 "update-ref",
                 "refs/remotes/origin/main",
-                replacement_commit,
+                advanced_commit,
             ],
             check=True,
             capture_output=True,
             text=True,
         )
-        collected = self.collect("candidates.jsonl")
-        self.assertEqual(0, collected.returncode, collected.stderr)
-        candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
-        self.assertEqual(
-            "local_default_branch",
-            candidate["tree_source_snapshot"]["status"],
-        )
-        self.assertEqual(
-            {"status": "unverified_source"},
-            candidate["reads"][0]["tree_source"],
-        )
 
-        task = self.task_judgment(candidate)
-        overstated = self.report(
+        accepted = self.report(
             [task],
-            evidence_name="overstated-source-evidence.jsonl",
-            report_name="overstated-source-REPORT.md",
+            evidence_name="source-neutral-evidence.jsonl",
+            report_name="source-neutral-REPORT.md",
         )
-        self.assertEqual(2, overstated.returncode)
-        self.assertIn("requires every cited read", overstated.stderr)
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
 
-        task["effects"][0]["original_judgment"] = "probable"
-        task["effects"][0]["rubric"]["influence_visible"] = False
-        exploratory = self.report(
-            [task],
-            evidence_name="exploratory-source-evidence.jsonl",
-            report_name="exploratory-source-REPORT.md",
-        )
-        self.assertEqual(0, exploratory.returncode, exploratory.stderr)
-        effect = read_jsonl(
-            self.artifacts / "exploratory-source-evidence.jsonl"
-        )[0]["effects"][0]
-        self.assertEqual(
-            "unverified_source",
-            effect["tree_source_status"],
-        )
-        self.assertEqual("limited", effect["derived_support"])
-        self.assertIn(
-            "unverified source **1**",
-            (
-                self.artifacts / "exploratory-source-REPORT.md"
-            ).read_text(encoding="utf-8"),
-        )
+        for field, value in (
+            ("original_judgment", "probable"),
+            ("rubric", {"real_read": True}),
+            ("support", "limited"),
+        ):
+            legacy = json.loads(json.dumps(task))
+            legacy["effect"][field] = value
+            result = self.report(
+                [legacy],
+                evidence_name=f"legacy-{field}-evidence.jsonl",
+                report_name=f"legacy-{field}-REPORT.md",
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("superseded v0.2", result.stderr)
 
-    def test_report_handles_excluded_task_without_representative_case(
+    def test_report_handles_excluded_task(
         self,
     ) -> None:
         self.write_chat_export()
@@ -4213,19 +4020,13 @@ print(json.dumps({{"ok": True, "data": data}}))
         collected = self.collect("candidates.jsonl")
         self.assertEqual(0, collected.returncode, collected.stderr)
         candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
-        candidate["candidate_status"] = "outside_candidate_set"
-        candidate["mapped_trace_files"] = []
-        candidate["reads"] = []
-        candidate["visible_tree_mentions"] = []
-        write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
         excluded = {
-            "schema_version": 1,
+            "schema_version": 2,
             "task_id": "excluded-1",
             "status": "excluded",
             "objective": None,
             "object_scope": "unknown",
             "outcome": None,
-            "task_type": None,
             "started_at": "2026-07-22T10:00:00Z",
             "ended_at": "2026-07-22T10:06:00Z",
             "source_fragments": [
@@ -4238,13 +4039,16 @@ print(json.dumps({{"ok": True, "data": data}}))
         }
         result = self.report(
             [excluded],
-            evidence_name="outside-evidence.jsonl",
-            report_name="outside-REPORT.md",
+            evidence_name="minimal-outside-evidence.jsonl",
+            report_name="minimal-outside-REPORT.md",
         )
         self.assertEqual(0, result.returncode, result.stderr)
-        report = (self.artifacts / "outside-REPORT.md").read_text(encoding="utf-8")
-        self.assertIn("Status: **N/A / pending**", report)
+        report = (self.artifacts / "minimal-outside-REPORT.md").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("| Excluded Tasks | 1 |", report)
+        self.assertIn("## Excluded Tasks", report)
+        self.assertIn("No clear objective and outcome boundary.", report)
 
     def test_one_chat_splits_into_two_tasks_and_duplicate_read_is_rejected(
         self,
@@ -4259,7 +4063,7 @@ print(json.dumps({{"ok": True, "data": data}}))
             "created_at": "2026-07-22T10:05:30Z",
             "sender_id": AGENT_ID,
             "sender_kind": None,
-            "content": "A separate coordination task completed.",
+            "content": "A separate task completed.",
         }
         candidate["visible_messages"].append(second_message)
         candidate["chat"]["message_count"] += 1
@@ -4270,73 +4074,50 @@ print(json.dumps({{"ok": True, "data": data}}))
             candidate,
             task_id="task-2",
             message_id=SECOND_MESSAGE_ID,
-            sampling_order=2,
-            exposure_status="unresolved",
+            read_status="unresolved",
             read_ids=[],
-            effects=[],
+            effect=None,
         )
-        second_task["objective"] = "Coordinate delivery"
-        second_task["object_scope"] = "handoff status"
-        second_task["outcome"] = "Recorded a separate coordination outcome."
-        second_task["task_type"] = "coordination_progress"
+        second_task["objective"] = "Explain a separate result"
+        second_task["object_scope"] = "independent outcome"
+        second_task["outcome"] = "Delivered the separate explanation."
 
         split = self.report(
             [first_task, second_task],
-            evidence_name="split-evidence.jsonl",
-            report_name="split-REPORT.md",
+            evidence_name="minimal-split-evidence.jsonl",
+            report_name="minimal-split-REPORT.md",
         )
         self.assertEqual(0, split.returncode, split.stderr)
-        report = (self.artifacts / "split-REPORT.md").read_text(encoding="utf-8")
-        self.assertIn("| Clear Tasks | 2 |", report)
-        self.assertIn("| Unresolved exposure Tasks | 1 |", report)
-        self.assertIn(
-            "Unresolved exposure is unknown coverage, not an unused/no-value denominator.",
-            report,
+        report = (self.artifacts / "minimal-split-REPORT.md").read_text(
+            encoding="utf-8"
         )
+        self.assertIn("| Clear Tasks | 2 |", report)
+        self.assertIn("| Read unresolved Tasks | 1 |", report)
+        self.assertIn("| Observed Read without Effect | 0 |", report)
 
         unresolved_with_read = json.loads(json.dumps(second_task))
-        unresolved_with_read["sampling_order"] = 1
-        unresolved_with_read["exposure"]["read_ids"] = [
+        unresolved_with_read["read"]["read_ids"] = [
             candidate["reads"][0]["read_id"]
         ]
-        unresolved_read_result = self.report(
+        unresolved_result = self.report(
             [unresolved_with_read],
-            evidence_name="unresolved-read-evidence.jsonl",
-            report_name="unresolved-read-REPORT.md",
+            evidence_name="minimal-unresolved-read-evidence.jsonl",
+            report_name="minimal-unresolved-read-REPORT.md",
         )
-        self.assertEqual(2, unresolved_read_result.returncode)
-        self.assertIn(
-            "must not contain read_ids", unresolved_read_result.stderr
-        )
+        self.assertEqual(2, unresolved_result.returncode)
+        self.assertIn("must not contain read_ids", unresolved_result.stderr)
 
-        unresolved_with_effect = json.loads(json.dumps(second_task))
-        unresolved_with_effect["sampling_order"] = 1
-        unresolved_with_effect["effects"] = [
-            json.loads(json.dumps(first_task["effects"][0]))
-        ]
-        unresolved_effect_result = self.report(
-            [unresolved_with_effect],
-            evidence_name="unresolved-effect-evidence.jsonl",
-            report_name="unresolved-effect-REPORT.md",
-        )
-        self.assertEqual(2, unresolved_effect_result.returncode)
-        self.assertIn(
-            "must not contain effects", unresolved_effect_result.stderr
-        )
-
-        duplicated = self.task_judgment(
+        duplicate = self.task_judgment(
             candidate,
             task_id="task-2",
             message_id=SECOND_MESSAGE_ID,
-            sampling_order=2,
-            exposure_status="confirmed",
             read_ids=[candidate["reads"][0]["read_id"]],
-            effects=[],
+            effect=None,
         )
         duplicate_result = self.report(
-            [first_task, duplicated],
-            evidence_name="duplicate-evidence.jsonl",
-            report_name="duplicate-REPORT.md",
+            [first_task, duplicate],
+            evidence_name="minimal-duplicate-evidence.jsonl",
+            report_name="minimal-duplicate-REPORT.md",
         )
         self.assertEqual(2, duplicate_result.returncode)
         self.assertIn("copied across incompatible Tasks", duplicate_result.stderr)
@@ -4395,13 +4176,12 @@ print(json.dumps({{"ok": True, "data": data}}))
         )
         self.assertEqual(0, linked.returncode, linked.stderr)
 
-    def test_sampling_requires_evidence_before_saturation(self) -> None:
+    def test_every_available_task_reports_without_a_sampling_gate(self) -> None:
         self.write_chat_export()
         self.write_trace_fixtures()
         collected = self.collect("candidates.jsonl")
         self.assertEqual(0, collected.returncode, collected.stderr)
         candidate = read_jsonl(self.artifacts / "candidates.jsonl")[0]
-        source_candidate = json.loads(json.dumps(candidate))
         candidate["candidate_status"] = "outside_candidate_set"
         candidate["mapped_trace_files"] = []
         candidate["reads"] = []
@@ -4415,171 +4195,91 @@ print(json.dumps({{"ok": True, "data": data}}))
                 "sender_kind": None,
                 "content": f"Sample task {index}",
             }
-            for index in range(1, 141)
+            for index in range(1, 45)
         ]
-        candidate["chat"]["message_count"] = 140
+        candidate["chat"]["message_count"] = 44
         write_jsonl(self.artifacts / "candidates.jsonl", [candidate])
         tasks = [
             self.task_judgment(
                 candidate,
                 task_id=f"sample-task-{index:03d}",
                 message_id=f"sample-message-{index:03d}",
-                sampling_order=index,
-                exposure_status="unresolved",
+                read_status="unresolved",
                 read_ids=[],
-                effects=[],
+                effect=None,
             )
-            for index in range(1, 141)
+            for index in range(1, 45)
         ]
-        task_types = [
-            "solution_design",
-            "implementation_delivery",
-            "review_qa_debugging",
-            "research_explanation",
-            "coordination_progress",
-        ]
-        for index, task in enumerate(tasks):
-            task["task_type"] = task_types[index % len(task_types)]
+
+        for count in (1, 16, 44):
+            result = self.report(
+                tasks[:count],
+                evidence_name=f"sample-{count}-evidence.jsonl",
+                report_name=f"sample-{count}-REPORT.md",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            report = (self.artifacts / f"sample-{count}-REPORT.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(f"| Clear Tasks | {count} |", report)
+            self.assertIn(f"| Read unresolved Tasks | {count} |", report)
+            self.assertIn("| Observed Read without Effect | 0 |", report)
+            self.assertIn("There is no minimum Task quota", report)
+            self.assertNotIn("Effect saturation", report)
+            self.assertNotIn("Status: `saturated`", report)
+            self.assertNotIn("task type", report.lower())
+
         write_jsonl(
             self.artifacts / "reviewed-baseline.jsonl",
             [
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "basis": "separately_reviewed_task_cases",
                     "reviewed_at": "2026-07-22T12:00:00Z",
                     "evidence_anchor": {
-                        "artifact_id": "reviewed-task-cases-v1",
+                        "artifact_id": "reviewed-task-cases-v2",
                         "sha256": "a" * 64,
                     },
-                    "clear_tasks": 162,
-                    "effect_tasks": 37,
-                    "independent_effects": 37,
+                    "clear_tasks": 44,
+                    "effect_tasks": 16,
                     "effect_counts": {
-                        "confirmed": 5,
-                        "constrained": 17,
-                        "redirected": 13,
-                        "conflicted": 2,
-                    },
-                    "support_counts": {
-                        "definite": 24,
-                        "limited": 13,
+                        "confirmed": 2,
+                        "constrained": 8,
+                        "redirected": 5,
+                        "conflicted": 1,
                     },
                 }
             ],
         )
-        result = self.report(
-            tasks,
-            evidence_name="saturation-evidence.jsonl",
-            report_name="saturation-REPORT.md",
+        baseline = self.report(
+            tasks[:16],
+            evidence_name="minimal-baseline-evidence.jsonl",
+            report_name="minimal-baseline-REPORT.md",
             reviewed_baseline_name="reviewed-baseline.jsonl",
         )
-        self.assertEqual(0, result.returncode, result.stderr)
-        report = (self.artifacts / "saturation-REPORT.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            "Status: `effect_analysis_pending`; clear Tasks: **140**",
-            report,
-        )
-        self.assertIn("| Effect Tasks | N/A |", report)
-        self.assertIn("Effect saturation: **N/A / pending**", report)
-        self.assertNotIn("## Effect Distribution", report)
-        self.assertNotIn("| 101–120 | none |", report)
-        self.assertIn("## Separately Reviewed Historical Baseline", report)
-        self.assertIn("| Reviewed clear Tasks | 162 |", report)
-        self.assertIn("| Reviewed effect Tasks | 37 |", report)
-        self.assertIn("| constrained | 17 |", report)
-        self.assertIn("definite **24**, limited **13**", report)
-
-        spurious_signal_tasks = json.loads(json.dumps(tasks))
-        spurious_signal_tasks[100]["saturation_signals"] = ["new_effect_type"]
-        spurious_signal = self.report(
-            spurious_signal_tasks,
-            evidence_name="spurious-signal-evidence.jsonl",
-            report_name="spurious-signal-REPORT.md",
-        )
-        self.assertEqual(2, spurious_signal.returncode)
-        self.assertIn("must not declare new_effect_type", spurious_signal.stderr)
-
-        ready_candidate = json.loads(json.dumps(candidate))
-        ready_candidate["candidate_status"] = "candidate"
-        ready_candidate["mapped_trace_files"] = source_candidate[
-            "mapped_trace_files"
-        ]
-        read_template = source_candidate["reads"][0]
-        ready_candidate["reads"] = []
-        for index in range(1, 141):
-            current_read = json.loads(json.dumps(read_template))
-            current_read["read_id"] = f"sample-read-{index:03d}"
-            current_read["call_id"] = f"sample-call-{index:03d}"
-            ready_candidate["reads"].append(current_read)
-        ready_candidate["visible_choice_candidates"] = json.loads(
-            json.dumps(ready_candidate["visible_messages"])
-        )
-        write_jsonl(self.artifacts / "candidates.jsonl", [ready_candidate])
-
-        ready_tasks = [
-            self.task_judgment(
-                ready_candidate,
-                task_id=f"sample-task-{index:03d}",
-                message_id=f"sample-message-{index:03d}",
-                sampling_order=index,
-                exposure_status="confirmed",
-                read_ids=[f"sample-read-{index:03d}"],
-                effects=[],
-            )
-            for index in range(1, 141)
-        ]
-        for index, task in enumerate(ready_tasks):
-            task["task_type"] = task_types[index % len(task_types)]
-        ready = self.report(
-            ready_tasks,
-            evidence_name="ready-saturation-evidence.jsonl",
-            report_name="ready-saturation-REPORT.md",
-        )
-        self.assertEqual(0, ready.returncode, ready.stderr)
-        ready_report = (
-            self.artifacts / "ready-saturation-REPORT.md"
+        self.assertEqual(0, baseline.returncode, baseline.stderr)
+        baseline_report = (
+            self.artifacts / "minimal-baseline-REPORT.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("Status: `saturated`; clear Tasks: **140**", ready_report)
-        self.assertIn("| 101–120 | none |", ready_report)
-        self.assertIn("| 121–140 | none |", ready_report)
-        self.assertIn("| Independent effects | 0 |", ready_report)
+        self.assertIn("## Separately Reviewed Historical Baseline", baseline_report)
+        self.assertIn("| Reviewed effect Tasks | 16 |", baseline_report)
+        self.assertNotIn("Derived support", baseline_report)
+        self.assertNotIn("support_counts", baseline_report)
 
-        novel_tasks = json.loads(json.dumps(ready_tasks))
-        novel_tasks[120] = self.task_judgment(
-            ready_candidate,
-            task_id="sample-task-121",
-            message_id="sample-message-121",
-            sampling_order=121,
-            exposure_status="confirmed",
-            read_ids=["sample-read-121"],
-        )
-        novel_tasks[120]["effects"][0]["original_judgment"] = "probable"
-        novel_tasks[120]["effects"][0]["rubric"]["influence_visible"] = False
-        missing_signal = self.report(
-            novel_tasks,
-            evidence_name="missing-signal-evidence.jsonl",
-            report_name="missing-signal-REPORT.md",
-        )
-        self.assertEqual(2, missing_signal.returncode)
-        self.assertIn("must declare new_effect_type", missing_signal.stderr)
-
-        novel_tasks[120]["saturation_signals"] = ["new_effect_type"]
-        reset = self.report(
-            novel_tasks,
-            evidence_name="reset-evidence.jsonl",
-            report_name="reset-REPORT.md",
-        )
-        self.assertEqual(0, reset.returncode, reset.stderr)
-        reset_report = (self.artifacts / "reset-REPORT.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            "Status: `continue_sampling`; clear Tasks: **140**",
-            reset_report,
-        )
-        self.assertIn("| 121–140 | new_effect_type |", reset_report)
+        for legacy_field, legacy_value in (
+            ("task_type", "solution_design"),
+            ("sampling_order", 1),
+            ("saturation_signals", []),
+        ):
+            legacy = json.loads(json.dumps(tasks[0]))
+            legacy[legacy_field] = legacy_value
+            rejected = self.report(
+                [legacy],
+                evidence_name=f"legacy-{legacy_field}-evidence.jsonl",
+                report_name=f"legacy-{legacy_field}-REPORT.md",
+            )
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("superseded v0.2", rejected.stderr)
 
     def test_symlinked_artifact_output_is_rejected(self) -> None:
         self.write_chat_export()
