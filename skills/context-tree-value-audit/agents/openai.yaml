@@ -1,6 +1,6 @@
 interface:
   display_name: "Context Tree Value Audit"
-  short_description: "Audit task-level Context Tree decision value"
-  default_prompt: "Use $context-tree-value-audit to run a task-first Context Tree value audit for this Agent's current Runtime with task-quota sampling."
+  short_description: "Audit episode-level Context Tree decision value"
+  default_prompt: "Use $context-tree-value-audit to run an episode-based Context Tree value audit for this Agent's current Runtime with explicit ownership boundaries and task-quota sampling."
 policy:
   allow_implicit_invocation: false

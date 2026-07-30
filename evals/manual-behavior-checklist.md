@@ -4,7 +4,7 @@ Use this checklist before admitting a `context-tree-value-audit` revision. Run i
 in designated First Tree Agent workspaces against disposable or sanitized
 records. Never commit generated artifacts.
 
-For a 0.2.5 upgrade, confirm the installed payload exposes only
+For a 0.3.0 upgrade, confirm the installed payload exposes only
 `$context-tree-value-audit`; the superseded `$context-tree-insights` directory
 must not remain as a second callable Skill. Exercise the README's minimal
 move/copy/compare flow and confirm the old payload is outside both Skill
@@ -170,16 +170,46 @@ Pass when:
 - malformed receipt is omitted with `context_decision_invalid`;
 - no malformed receipt blocks the message, Chat export, or audit.
 
-## 5. One Chat splits into multiple Tasks
+## 5. Continuous episode reconstruction and ownership
 
-Use one Chat containing two distinct objectives and outcomes.
+Use sanitized Chats containing:
+
+- one objective progressing through plan, implementation, review, QA,
+  correction, and final delivery;
+- short continuations and status/context prompts such as `continue`, `why`,
+  `继续`, `你在干啥`, `进展呢`, and `你这个修复什么`;
+- two genuinely independent objectives with material scope changes and
+  separate outcomes;
+- work first assigned to another Agent, followed by a visible transfer,
+  acceptance, or independent review assignment to the audited Agent.
 
 Pass when:
 
-- it produces two Task rows with separate source messages and windows;
-- clear Tasks have objective, object scope, outcome, and one allowed task type;
-- a Task missing those boundaries is marked excluded;
-- excluded Tasks contain no exposure or effects;
+- the single-deliverable phases, corrections, continuations, status prompts,
+  and clarification messages remain one parent Task;
+- each genuinely new objective produces one Task with a separate material
+  scope, independent outcome, and unambiguous source boundary;
+- clear Tasks use schema v2 and carry ownership, objective, and outcome
+  anchors plus primary-deliverable, boundary, and type reasons;
+- assigned/transferred ownership has a non-current-Agent anchor and accepted
+  ownership has a current-Agent anchor, with matching objective-anchor sender;
+- at least one objective-anchor source message is concrete, so synthesized
+  judgment prose cannot upgrade a weak source fragment;
+- every clear Task has a current-Agent outcome anchor;
+- another Agent's work remains context before the audited Agent's visible
+  assignment, transfer, or acceptance;
+- an outcome anchor before ownership/objective, or any episode anchor outside
+  the Task source fragments, is rejected;
+- source messages, reads, and choices outside the derived episode
+  ownership/objective-to-outcome interval are rejected;
+- ownership/objective/outcome identity anchors reused across clear Tasks are
+  rejected;
+- fragment-only objectives are rejected as clear Tasks rather than expanded by
+  guesswork;
+- a Task missing a gate is marked excluded with a structured exclusion kind;
+- excluded Tasks contain no episode, exposure, or effects;
+- Task type follows the primary terminal deliverable, and ordinary progress is
+  not mislabeled as `coordination_orchestration`;
 - one read or choice copied into both Tasks is rejected.
 
 ## 6. Cross-Chat handoff merge
@@ -215,8 +245,9 @@ Prepare valid examples of `confirmed`, `constrained`, `redirected`, and
 Pass when:
 
 - `informed`, `none`, unknown effects, and numeric weights are rejected;
-- every effect has Task exposure reads, later same-Agent choices, an outcome
-  anchor, and a summary;
+- every effect has Task exposure reads, later same-Agent choices from the Task
+  source fragments, an outcome anchor bound to the episode outcome IDs, and a
+  summary;
 - every effect persists the five passage-to-choice rubric checks; `verified`
   requires all five while `probable` requires the first four and no visible
   influence;
@@ -251,6 +282,8 @@ Pass when:
 - rows beyond an already established saturation point are rejected;
 - an incomplete sample is reported as incomplete/continuing rather than a
   stable rate;
+- a small corpus or genuinely absent type stays partial; no weak Task is
+  retained, split, or invented to meet quota/type coverage;
 - `--days`, when supplied, remains only an acquisition bound.
 - a Chat with messages inside the bound but later activity after `window.end`
   is fetched and filtered rather than omitted.

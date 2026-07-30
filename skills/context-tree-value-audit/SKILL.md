@@ -19,9 +19,10 @@ Keep three responsibilities separate:
 - the bundled script performs deterministic collection, reference validation,
   deduplication, conservation checks, and reporting.
 
-The collector establishes what records exist. The Agent performs semantic Task
-reconstruction and passage-to-choice judgment. A read or decision receipt is
-evidence, not server-verified causality.
+The collector establishes what records exist. The Agent reconstructs
+single-Agent-owned continuous work episodes and performs passage-to-choice
+judgment. A read or decision receipt is evidence, not server-verified
+causality.
 
 ## Gate the run
 
@@ -163,14 +164,30 @@ Read
 [references/task-analysis-schema.md](references/task-analysis-schema.md), then
 write exactly one `task-judgments.jsonl` row for every reconstructed Task.
 
-A clear Task needs a concrete objective, object scope, outcome, Task window,
-source fragments, and one of five task types. Otherwise mark it excluded.
-Excluded Tasks carry no exposure or effects.
+A clear Task is one independently judgeable continuous work episode owned by
+the audited Agent. It needs a concrete objective, material object scope,
+independently judgeable outcome or terminal state, bounded source fragments
+from objective through outcome, explicit ownership/objective/outcome anchors,
+and one primary terminal deliverable. Otherwise mark it excluded with a
+structured exclusion kind. Excluded Tasks carry no exposure or effects.
 
-One Chat may contain multiple Tasks. Merge across Chats only for one PR/MR/
-Issue, a visible handoff, or the same objective and primary delivery, and
-record the explicit shared linkage. Do not copy one read or choice into
-different Tasks.
+Short continuations, status prompts, context-dependent questions, merge
+approval, repeated review/fix requests, and ordinary phase transitions are not
+separate Tasks. Merge plan → implementation → review → QA → final delivery,
+plus corrections to the same deliverable, into one episode. Split only when
+there is a new objective, material scope or deliverable change, independent
+outcome, and unambiguous source boundary.
+
+For a single-Agent audit, another Agent's work is context until this Agent is
+visibly assigned, transferred, or accepts an objective. Type each clear Task
+from its primary terminal deliverable. Coordination is a Task only when
+dispatch, handoff, gate, or terminal routing is itself the objective and
+outcome.
+
+One Chat may still contain multiple qualifying episodes. Merge across Chats
+only for one PR/MR/Issue, a visible handoff, or the same objective and primary
+delivery, and record the explicit shared linkage. Do not copy one read or
+choice into different Tasks.
 
 Exposure is only:
 
@@ -207,7 +224,11 @@ Record `sampling_order` and any `saturation_signals` on each clear Task so the
 stop is reproducible. The reporter derives effect-type novelty from actual
 effects and rejects a missing or spurious `new_effect_type` annotation before
 counting an empty batch. A partial run remains incomplete or continuing. Do
-not turn a time bound or Chat count into a sample-size rule.
+not turn a time bound or Chat count into a sample-size rule. Never retain,
+split, or invent a weak Task to meet the quota or type coverage. If the
+authorized corpus has fewer clear Tasks or genuinely lacks a type, preserve
+the applicable partial status. When exposure analysis is ready, use
+`minimum_not_met` or `task_type_coverage_not_met`.
 
 ## Validate and report
 
@@ -228,14 +249,17 @@ conserves its reviewed Task, effect, and support counts. The reporter renders
 it in a separate historical-baseline section; it never imports those effects
 into unresolved current Tasks or into current saturation.
 
-The deterministic reporter rejects unauthorized source messages, Task-window
-violations, unlinked cross-Chat merges, duplicated reads/choices, invalid
-effects or confidence, missing outcome anchors, persisted support, and
-non-conserving aggregates.
+The deterministic reporter rejects Task judgment schema v1, weak fragment-only
+source objectives, missing or invalid episode ownership and anchors, reused
+episode identity anchors, reads or choices outside the established episode,
+unauthorized source messages, Task-window violations, unlinked cross-Chat
+merges, duplicated reads/choices, invalid effects or confidence, unbound
+outcome anchors, persisted support, and non-conserving aggregates.
 
 The report must include:
 
-- clear and excluded Tasks;
+- a complete inventory of all submitted/adjudicated sample rows: clear Tasks
+  with boundary rationale and exposure/effects, plus excluded candidates;
 - confirmed and unresolved exposure Tasks;
 - effect Tasks and deduplicated independent effects;
 - the four-effect distribution;

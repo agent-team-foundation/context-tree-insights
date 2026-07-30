@@ -4,14 +4,16 @@ Use this reference after `collect` produces `candidates.jsonl`. The Task, not
 the Chat, is the judgment and counting unit. `Chat UUID @ Agent UUID` remains
 the authorization, trace-mapping, and evidence-source unit.
 
-Write exactly one `task-judgments.jsonl` row per reconstructed Task. Do not
-split tasks, exposures, and effects into separate artifact files.
+Write exactly one `task-judgments.jsonl` row per reconstructed continuous work
+episode. Do not split tasks, exposures, and effects into separate artifact
+files. Task judgment schema v2 is intentionally incompatible with
+boundary-light v1 judgments.
 
 ## Clear Task
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "stable-local-task-id",
   "status": "clear",
   "objective": "Choose the state authority",
@@ -23,9 +25,26 @@ split tasks, exposures, and effects into separate artifact files.
   "source_fragments": [
     {
       "audit_id": "CHAT_UUID@AGENT_UUID",
-      "message_ids": ["message-id"]
+      "message_ids": [
+        "assignment-message-id",
+        "continue-message-id",
+        "delivery-message-id"
+      ]
     }
   ],
+  "episode": {
+    "ownership": {
+      "kind": "assigned",
+      "anchor_message_ids": ["assignment-message-id"],
+      "reason": "A human assigned this objective to the audited Agent."
+    },
+    "objective_anchor_message_ids": ["assignment-message-id"],
+    "outcome_anchor_message_ids": ["delivery-message-id"],
+    "continuation_message_ids": ["continue-message-id"],
+    "primary_deliverable": "A decision selecting the authoritative state source.",
+    "boundary_reason": "The assignment and final decision bound one continuous objective.",
+    "task_type_reason": "The primary terminal result is a design choice."
+  },
   "sampling_order": 1,
   "saturation_signals": [],
   "exposure": {
@@ -45,17 +64,42 @@ split tasks, exposures, and effects into separate artifact files.
         "influence_visible": true
       },
       "read_ids": ["read-id"],
-      "choice_message_ids": ["message-id"],
-      "outcome_anchor": "message-id-or-stable-outcome-reference",
+      "choice_message_ids": ["delivery-message-id"],
+      "outcome_anchor": "delivery-message-id",
       "summary": "The constraint prevented a second state source."
     }
   ]
 }
 ```
 
-A clear Task requires a concrete objective, object scope, outcome, start/end
-window, and source messages. If any of those boundaries cannot be stated
-honestly, use an excluded Task.
+A clear Task is one independently judgeable, continuous work episode owned by
+the audited Agent. It requires all six gates:
+
+1. ownership established by an assignment, transfer, or visible acceptance;
+2. a concrete normalized objective;
+3. a material object scope;
+4. an independently judgeable outcome or terminal state;
+5. bounded source fragments from objective through outcome;
+6. one primary terminal deliverable that determines the Task type.
+
+The `episode` object makes those gates auditable. Ownership must be
+`assigned`, `transferred`, or `accepted`. `assigned` and `transferred` need a
+non-current-Agent ownership and objective anchor; `accepted` needs a
+current-Agent ownership and objective anchor. At least one objective-anchor
+source message must itself state a concrete objective; synthesized judgment
+prose cannot turn a weak prompt into one. Every Task needs a current-Agent
+outcome anchor. Every episode anchor must be one of the Task's authorized source
+messages, and the outcome cannot precede ownership or objective. Ownership and
+objective may use the same handoff message. Continuation messages must be
+recorded separately from objective and outcome anchors.
+
+A short continuation, status prompt, or context-dependent question is not a
+clear Task by itself. Examples include `continue`, `status`, `why`, `继续`,
+`做了吗`, `你在干啥`, `进展呢`, `地址呢`, `为什么`, `什么意思`,
+`你这个修复什么`, `那这个呢`, `再检查`, `修一下`, and `重新看`.
+Merge it into its parent episode when that parent is visible; otherwise exclude
+it. Never invent the missing objective from surrounding work performed by
+another Agent.
 
 Allowed `task_type` values are:
 
@@ -63,7 +107,23 @@ Allowed `task_type` values are:
 - `implementation_delivery` — 实现交付;
 - `review_qa_debugging` — Review、QA、排障;
 - `research_explanation` — 调研、解释;
-- `coordination_progress` — 协调推进.
+- `coordination_orchestration` — coordination whose dispatch, handoff, gate,
+  or terminal routing result is itself the primary deliverable.
+
+Choose the type from the primary terminal deliverable, not the first verb in
+the conversation:
+
+- code, UI, a PR/MR, a published artifact, or an external state change is
+  `implementation_delivery`;
+- a verdict, defect localization, QA result, or release gate without delivering
+  the corresponding fix is `review_qa_debugging`;
+- an executable option, architecture, or product decision is
+  `solution_design`;
+- a factual synthesis or explanation without a new design decision is
+  `research_explanation`;
+- ordinary status updates, reminders, merge approval, and phase transitions
+  stay inside their parent episode and are not
+  `coordination_orchestration`.
 
 `sampling_order` is the acquisition order among clear Tasks and must be
 unique and contiguous from 1. `saturation_signals` may contain only
@@ -77,7 +137,7 @@ rejected.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "task_id": "stable-local-task-id",
   "status": "excluded",
   "objective": null,
@@ -92,17 +152,61 @@ rejected.
       "message_ids": ["message-id"]
     }
   ],
+  "exclusion_kind": "missing_objective",
   "exclusion_reason": "No defensible objective and outcome boundary."
 }
 ```
 
 Excluded Tasks must not contain `exposure`, `effects`, `sampling_order`, or
-`saturation_signals`.
+`saturation_signals`. They must contain one structured `exclusion_kind`:
+
+- `greeting_or_acknowledgement`;
+- `status_ping_or_continuation`;
+- `context_dependent_clarification`;
+- `missing_objective`;
+- `missing_scope`;
+- `missing_outcome`;
+- `ownership_not_established`;
+- `automatic_or_provider_only`;
+- `ambiguous_boundary`;
+- `non_independent_subphase`.
+
+When more than one label could apply, use this precedence so reruns converge:
+
+1. form-only exclusions: `automatic_or_provider_only`,
+   `greeting_or_acknowledgement`, `status_ping_or_continuation`,
+   `context_dependent_clarification`, `non_independent_subphase`;
+2. `ownership_not_established`;
+3. `missing_objective`;
+4. `missing_scope`;
+5. `missing_outcome`;
+6. `ambiguous_boundary`.
+
+An excluded row is an observed candidate, not a Task. Keep any partially known
+objective/scope/outcome fields honest, and use `exclusion_reason` to identify
+other passed or failed gates; do not add a partial `episode` object.
 
 ## Task reconstruction
 
-One Chat may contain multiple Tasks. Keep their source messages, windows,
-reads, and choices separate.
+One Chat may contain multiple Tasks, but a new message or phase does not create
+a new Task. Merge:
+
+- short continuation, status, clarification, review-again, fix-again, or merge
+  messages into the active parent episode;
+- plan → implementation → review → QA → final delivery for one objective and
+  primary deliverable;
+- corrections and revisions to that same deliverable.
+
+Split only when all four are present: a new objective, a material scope or
+deliverable change, an independently judgeable outcome, and an unambiguous
+source boundary. Keep the resulting source messages, windows, reads, and
+choices separate.
+
+For a single-Agent audit, work assigned to another Agent is Chat context, not
+this Agent's Task. Start this Agent's Task only at a visible assignment,
+transfer, or acceptance. A later independent review, takeover, verification
+gate, or coordination objective may form a new owned episode when it passes
+all six gates. An ordinary status check always stays in its parent episode.
 
 Merge fragments from more than one Chat only when every fragment carries the
 same explicit linkage:
@@ -142,7 +246,9 @@ unknown, not evidence that the Tree was not read or did not matter. An
 `unresolved` Task is never placed in an "unused" denominator.
 
 Every exposure read must belong to a source Chat, start and complete inside the
-Task window, and be assigned to only one reconstructed Task.
+Task window, occur no earlier than established episode ownership/objective and
+no later than the episode outcome, and be assigned to only one reconstructed
+Task.
 
 Collector command classification is not exposure by itself. For
 `read_only_composite` or `output_attribution: aggregate`, inspect the recorded
@@ -191,9 +297,17 @@ trace recovery improves evidence quality; it is not the only semantic signal,
 and a collector failure never reverses a separately reviewed positive case
 into a zero effect.
 
-Every effect requires read IDs, later same-Agent choice message IDs, a
-non-empty outcome anchor, and a concise summary. Effect reads must be included
-in the Task exposure and must complete no later than the earliest cited choice.
+Every effect requires read IDs, later same-Agent choice message IDs from the
+Task source fragments, an outcome anchor equal to one of the episode outcome
+message IDs, and a concise summary. Effect reads must be included in the Task
+exposure and must complete no later than the earliest cited choice. Reads and
+choices must remain inside the established episode, not merely the declared
+Task window.
+
+Ownership, objective, and outcome identity anchors cannot be copied across
+different clear Tasks. One message that appears to bundle multiple objectives
+does not provide an unambiguous split boundary; merge or exclude unless
+separate source anchors establish the episodes.
 
 The same read or choice cannot be copied across different reconstructed Tasks.
 The reporter derives an independent effect identity from effect type, reads,
@@ -268,6 +382,12 @@ declaring saturation.
 A partial run is reported as incomplete or continuing; it is not silently
 promoted to a stable rate. If two empty expansion batches establish saturation,
 the validator rejects Task rows beyond that reproducible stop point.
+
+Never retain, split, or invent a weak Task to reach 100 or fill a missing type.
+When the authorized corpus is smaller or genuinely lacks one of the five
+types, preserve the clear/excluded judgments and the applicable partial status.
+When exposure analysis is ready, report `minimum_not_met` or
+`task_type_coverage_not_met`.
 
 Unresolved exposure cannot make a batch "empty" for effect saturation. When no
 clear Task has evidence-ready exposure, effect totals, distributions, support,

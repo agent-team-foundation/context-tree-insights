@@ -1,9 +1,10 @@
 # Context Tree Value Audit
 
-`context-tree-value-audit` 0.2.5 is an explicit-only Skill for task-first,
+`context-tree-value-audit` 0.3.0 is an explicit-only Skill for episode-based,
 evidence-first analysis of Context Tree decision value for the current First
 Tree Runtime when its native historical evidence is supported. It reconstructs
-Tasks from authorized Chats, separates confirmed from unresolved exposure,
+single-Agent-owned continuous work episodes from authorized Chats, separates
+confirmed from unresolved exposure,
 judges four visible effect types, and stops sampling through a Task quota plus
 saturation.
 
@@ -11,6 +12,11 @@ The 0.2 series renamed the installable Skill from
 `context-tree-insights` to `context-tree-value-audit`. Replace the old Skill
 directory during upgrade; do not install both names because they represent one
 explicit audit capability, not two independent workflows.
+
+Version 0.3 replaces boundary-light Task judgment schema v1 with continuous
+episode schema v2. Do not reuse old `task-judgments.jsonl`: reconstruct the
+episodes and their ownership/objective/outcome anchors, then rerun the
+deterministic reporter.
 
 The audit core remains separate from First Tree core. Codex, Claude Code, and
 Claude Code TUI use their existing native local transcripts. Cursor and Kimi
@@ -29,7 +35,14 @@ Tree.
   Chats visible to this one current Agent. The Skill trusts that explicit
   scope and never broadens it or crosses to another Agent.
 - `Chat UUID @ Agent UUID` remains the authorization and trace-mapping unit;
-  Task is the judgment and counting unit.
+  a continuous work episode is the Task judgment and counting unit.
+- Short continuations, status prompts, context-dependent questions, repeated
+  review/fix requests, and phases of one delivery do not become separate Tasks.
+- Clear Tasks carry source-backed ownership, objective, and outcome anchors;
+  work owned by another Agent remains context until the audited Agent visibly
+  receives, accepts, or takes over an objective.
+- Task type follows the primary terminal deliverable. Coordination qualifies
+  only when orchestration itself has an independent objective and outcome.
 - Local Runtime evidence is preflighted against authorized Chat and Agent IDs
   before complete recorded output is scanned.
 - Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
@@ -177,11 +190,13 @@ The Skill orchestrates four stages:
    grammar, reconstructs exact or read-only-composite evidence plus visible
    choices, and distinguishes local default-branch matches from unverified
    sources. Unsupported Runtime history stays pending.
-3. The Agent reconstructs Tasks, Task-window exposure, effects, and sampling
-   signals in `task-judgments.jsonl`, including the reproducible five-check
+3. The Agent reconstructs continuous work episodes, ownership/objective/outcome
+   anchors, Task-window exposure, effects, and sampling signals in
+   schema-v2 `task-judgments.jsonl`, including the reproducible five-check
    rubric behind each `verified` or `probable` effect.
-4. `report` validates source ownership, windows, cross-Chat linkage,
-   deduplication, sampling, and aggregate conservation, then creates
+4. `report` validates episode ownership and anchors, source ownership, windows,
+   cross-Chat linkage, weak fragment-only objectives, deduplication, sampling,
+   and aggregate conservation, then creates
    `evidence.jsonl` and `REPORT.md`. An optional hash-anchored reviewed
    baseline is shown separately, so a current collector gap cannot erase
    previously reviewed positive cases or silently import them into the rerun.
