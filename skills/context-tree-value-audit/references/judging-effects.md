@@ -12,9 +12,17 @@ Everything below is scaffolding for answering that honestly.
 
 ## Material you have
 
-Each sampled case gives you a read (node path, chat, timestamp) and the node's
-content as of that read. You supply the rest by reading that Chat around the
-read time: what the agent said, what it did, and what the human asked for.
+Each sampled case gives you a read (node path, chat, timestamp) and a
+**candidate snapshot** of the node's text, taken from the checkout HEAD observed
+at read time. That is not a promise of what the agent saw — if it was reading
+uncommitted Tree edits, the real text is unrecoverable. Each case says which of
+`head_commit_snapshot`, `current_working_copy`, or `unavailable` it is.
+
+**When the snapshot may not be what was read, do not claim an effect that turns
+on specific wording.** Use `null`.
+
+You supply the rest by reading that Chat around the read time: what the agent
+said, what it did, and what the human asked for.
 
 Read the window **before** the read too. Most false positives come from
 skipping that.

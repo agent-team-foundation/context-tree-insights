@@ -10,24 +10,29 @@ sample size and seed, and the refutation rate.
 
 - The Skill loads only after an explicit `/context-tree-value-audit` or
   `$context-tree-value-audit` invocation; ordinary tasks do not load it.
-- `policy.allow_implicit_invocation` is `false` and the Claude projection keeps
-  `disable-model-invocation: true`.
+- `policy.allow_implicit_invocation` is `false` and the single canonical
+  `SKILL.md` keeps `disable-model-invocation: true`. There is no separate Claude
+  projection directory; one payload serves every runtime.
 - The run touches only this agent's own feed. There is no option, prompt, or
   workaround that widens it to another agent.
 - Artifacts land in a private workspace directory at mode `0600` and are not
   committed.
 
-## 2. Facts are complete and honest
+## 2. Facts are observed, and say so
 
 - `facts` runs with no sample and no judgment.
 - Exposure is reported as counts. **No percentage of total work appears
   anywhere**, because unrecorded reads make any such rate false.
-- Both recording gaps are printed: pipeline reads unrecorded, search reads
-  directory-granular.
-- The never-read list excludes nodes under a recorded search root. Verify with a
-  `Grep` of a tree directory: no node beneath it may be listed as never-read.
-- The never-read list excludes `AGENTS.md`, `members/`, and `raw-context/`.
-- A node read via `Read` in the window does not appear in the never-read list.
+- All recording gaps are printed: read telemetry best-effort with pipeline reads
+  unrecorded, search reads directory-granular, write events telemetry-only, and
+  node text a candidate snapshot.
+- The no-observed-read list excludes nodes under a recorded search root. Verify
+  with a `Grep` of a tree directory: no node beneath it may be listed.
+- That list is labelled an evidence gap and carries **no** removal or merge
+  recommendation.
+- The list excludes `AGENTS.md`, `members/`, and `raw-context/`.
+- A node read via `Read` in the window does not appear in the list.
+- Exposure is reported as counts only; no percentage of total work appears.
 
 ## 3. Sampling is uniform and reproducible
 
@@ -35,9 +40,16 @@ sample size and seed, and the refutation rate.
   ones.
 - Only file-level reads of normal content are eligible.
 - The analyst does not hand-pick or re-roll cases to find interpretable ones.
-- Case material carries node content as of the read when the recorded commit
-  resolves, and says so honestly when it falls back to the working copy or
-  cannot resolve the node at all.
+- Case material carries a **candidate snapshot** from the checkout HEAD observed
+  at read time, labelled `head_commit_snapshot`, with its caveat text. It never
+  claims to be exactly what the agent read. Verify the honest fallbacks
+  (`current_working_copy`, `unavailable`) too.
+- Editing `cases` in a valid sample — even keeping identity, window, and
+  population digest — makes `report` refuse to publish effect counts.
+- An events feed from another Tree, or a changed branch binding, is excluded
+  rather than credited to the current Tree.
+- A window with no IO at all reports zero counts instead of failing, provided
+  `--tree-root` pins the Tree.
 
 ## 4. Judgment and the adversarial pass
 
@@ -72,6 +84,6 @@ Compare before and after:
 
 ## Sign-off
 
-Record pass/fail per section. A failure in routing, scope, the never-read search
-guard, the mandatory adversarial pass, or the reliability floor blocks the
-revision.
+Record pass/fail per section. A failure in routing, scope, Tree-identity isolation,
+the search guard on the no-observed-read list, sample conservation, the
+mandatory adversarial pass, or the reliability floor blocks the revision.

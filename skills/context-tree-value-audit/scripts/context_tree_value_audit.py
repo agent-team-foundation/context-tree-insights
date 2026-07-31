@@ -13,8 +13,8 @@ silently absorbed:
 * shell reads that go through a pipeline (`cat NODE.md | head -40`) are not
   recorded, so adoption is a LOWER BOUND, never a rate;
 * `Grep` / `Glob` record one directory-level event for the search root, not one
-  per matched node, so a node inside a searched directory can never be called
-  never-read.
+  per matched node, so a node inside a searched directory is never reported as
+  having no observed read.
 """
 
 from __future__ import annotations
@@ -169,16 +169,23 @@ class TreeIdentity:
 
 
 def canonical_repo(url: str) -> str:
-    """Normalize a git remote so ssh/https/.git spellings compare equal."""
+    """Normalize a git remote so ssh/https/`.git` spellings compare equal.
+
+    The origin PORT is deliberately preserved. For a Self-Managed GitLab the
+    instance origin — port included — is the authority boundary, so folding
+    `git.example:8443` and `git.example:9443` together would credit one
+    instance's reads against another's Tree.
+    """
     text = url.strip().rstrip("/")
     text = re.sub(r"\.git\Z", "", text)
-    scp = re.fullmatch(r"(?:ssh://)?git@([^:/]+)[:/](.+)", text)
-    if scp:
-        return f"{scp.group(1).lower()}/{scp.group(2).strip('/').lower()}"
+    # URL forms first: `ssh://git@host:22/org/tree` must not be read as scp.
     match = re.fullmatch(r"(?:https?|git|ssh)://(?:[^@/]+@)?([^/]+)/(.+)", text)
     if match:
-        host = match.group(1).lower().split(":")[0]
-        return f"{host}/{match.group(2).strip('/').lower()}"
+        return f"{match.group(1).lower()}/{match.group(2).strip('/').lower()}"
+    # scp-like `git@host:org/tree`; the part after `:` is a path, not a port.
+    scp = re.fullmatch(r"git@([^:/]+):(.+)", text)
+    if scp:
+        return f"{scp.group(1).lower()}/{scp.group(2).strip('/').lower()}"
     return text.lower()
 
 
@@ -260,9 +267,16 @@ def select_events_for_tree(
     event that cannot be matched to the target identity is excluded rather
     than assumed.
     """
-    if not events:
-        raise AuditError("The IO feed contained no events to audit.")
     identities = {event.identity for event in events}
+    if expected is not None:
+        # "No Tree IO in this window" is a legitimate, reportable audit result
+        # once the target Tree is provable, so absence must not fail the run.
+        return [event for event in events if event.identity == expected], expected
+    if not events:
+        raise AuditError(
+            "The IO feed contained no events and no --tree-root was given, so the audited "
+            "Context Tree cannot be identified."
+        )
     if expected is None:
         if len(identities) != 1:
             raise AuditError(
@@ -271,15 +285,7 @@ def select_events_for_tree(
                 + "); pass --tree-root so the audit can pin one identity."
             )
         return list(events), next(iter(identities))
-    matched = [event for event in events if event.identity == expected]
-    if not matched:
-        raise AuditError(
-            f"No IO event matches the bound Tree {expected.label()}; "
-            "the feed belongs to "
-            + ", ".join(sorted(item.label() for item in identities))
-            + "."
-        )
-    return matched, expected
+    return list(events), next(iter(identities))
 
 
 # ── aggregation (no sampling, no judgment) ────────────────────────────────
@@ -313,8 +319,8 @@ def aggregate(events: Iterable[IoEvent]) -> Aggregate:
             agg.node_reads[event.target_path] += 1
         else:
             # Directory / repo events name a search root, not a node. They
-            # cannot credit a specific node, but they DO forbid calling any
-            # node beneath them never-read.
+            # cannot credit a specific node, but they DO forbid reporting any
+            # node beneath them as having no observed read.
             agg.searched_dirs.add("" if event.target_kind == "repo" else event.target_path.rstrip("/"))
     return agg
 
@@ -843,12 +849,37 @@ def command_report(args: argparse.Namespace) -> None:
             "--sample was drawn over a different acquisition window "
             f"({sample_window!r} vs {current_window!r}); re-run `sample` and `report` over the same one."
         )
-    current_digest = population_digest(eligible_reads(agg.reads))
+    eligible = eligible_reads(agg.reads)
+    current_digest = population_digest(eligible)
     if sample_payload.get("population_sha256") != current_digest:
         raise AuditError(
             "The eligible read population changed since --sample was drawn, so the sample is no longer "
             "uniform over it. Re-run `sample` (new events arrive continuously) before reporting."
         )
+    if sample_payload.get("eligible_reads") != len(eligible):
+        raise AuditError("--sample reports a different eligible population size than this feed holds.")
+
+    # A matching population digest only proves the population is unchanged. It
+    # says nothing about whether `cases` really is the draw. Recompute the draw
+    # from the recorded seed and size and require an exact match, so a
+    # hand-picked or edited case list cannot yield effect counts.
+    seed = sample_payload.get("seed")
+    size = sample_payload.get("sample_size")
+    if not isinstance(seed, int) or not isinstance(size, int) or size < 0:
+        raise AuditError("--sample must record the integer `seed` and `sample_size` it was drawn with.")
+    expected_draw = sample_reads(agg.reads, size, seed)
+    if [item.event_id for item in expected_draw] != [str(case.get("read_id")) for case in raw_cases]:
+        raise AuditError(
+            "--sample cases are not the uniform draw for their recorded seed and size. Re-run `sample` "
+            "instead of editing or hand-picking cases."
+        )
+    by_id = {item.event_id: item for item in expected_draw}
+    for case in raw_cases:
+        source = by_id[str(case["read_id"])]
+        if case.get("target_path") != source.target_path or case.get("read_at") != iso(source.created_at):
+            raise AuditError(
+                f"--sample case {case.get('read_id')!r} does not match the recorded event it names."
+            )
     cases = {
         str(case["read_id"]): case
         for case in raw_cases
@@ -893,9 +924,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    facts = sub.add_parser("facts", help="Aggregate exposure, node distribution, and write health.")
+    facts = sub.add_parser(
+        "facts", help="Aggregate observed exposure, node distribution, and observed write events."
+    )
     add_feed_options(facts)
-    facts.add_argument("--tree-root", help="Bound Context Tree root; enables the never-read node list.")
+    facts.add_argument(
+        "--tree-root",
+        help="Bound Context Tree root; enables the no-observed-read node list and pins Tree identity.",
+    )
     facts.add_argument("--json", action="store_true", help="Emit structured facts instead of Markdown.")
     facts.set_defaults(handler=command_facts)
 
@@ -909,7 +945,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = sub.add_parser("report", help="Validate judgments and render the final report.")
     add_feed_options(report)
-    report.add_argument("--tree-root", help="Bound Context Tree root; enables the never-read node list.")
+    report.add_argument(
+        "--tree-root",
+        help="Bound Context Tree root; enables the no-observed-read node list and pins Tree identity.",
+    )
     report.add_argument("--sample", required=True, help="Sample JSON produced by `sample`.")
     report.add_argument("--judgments", required=True, help="Judgment JSON array authored by the analyst.")
     report.set_defaults(handler=command_report)

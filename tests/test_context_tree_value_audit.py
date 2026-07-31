@@ -324,8 +324,11 @@ class TreeIdentityTests(unittest.TestCase):
     def test_a_changed_branch_binding_does_not_count_toward_the_current_tree(self) -> None:
         events = normalized([event("old", "system/a.md", branch="legacy")])
         expected = audit.TreeIdentity(repo=audit.canonical_repo(REPO), branch="main")
-        with self.assertRaisesRegex(audit.AuditError, "No IO event matches"):
-            audit.select_events_for_tree(events, expected)
+        selected, identity = audit.select_events_for_tree(events, expected)
+        # Excluded, not counted — and not an error either: zero observed IO for
+        # the current binding is itself a reportable result.
+        self.assertEqual(selected, [])
+        self.assertEqual(identity, expected)
 
     def test_a_mixed_feed_without_a_pinned_identity_fails_closed(self) -> None:
         events = normalized(
@@ -392,3 +395,61 @@ class WordingTests(unittest.TestCase):
         self.assertIn("no observed read", lowered)
         self.assertIn("evidence gap, not a finding", lowered)
         self.assertIn("best-effort", lowered)
+
+
+class OriginPortTests(unittest.TestCase):
+    def test_a_different_origin_port_is_a_different_tree(self) -> None:
+        # For Self-Managed GitLab the instance origin, port included, is the
+        # authority boundary. Folding ports would cross-credit instances.
+        self.assertNotEqual(
+            audit.canonical_repo("https://git.example:8443/org/tree"),
+            audit.canonical_repo("https://git.example:9443/org/tree"),
+        )
+
+    def test_ssh_url_with_a_port_is_not_missplit_as_scp(self) -> None:
+        self.assertEqual(
+            audit.canonical_repo("ssh://git@git.example:2222/org/tree.git"),
+            "git.example:2222/org/tree",
+        )
+
+    def test_scp_form_keeps_its_path_after_the_colon(self) -> None:
+        self.assertEqual(audit.canonical_repo("git@github.com:org/tree.git"), "github.com/org/tree")
+
+
+class EmptyFeedTests(unittest.TestCase):
+    def test_no_io_in_the_window_is_a_result_not_a_failure(self) -> None:
+        expected = audit.TreeIdentity(repo=audit.canonical_repo(REPO), branch="main")
+        selected, identity = audit.select_events_for_tree([], expected)
+        self.assertEqual(selected, [])
+        self.assertEqual(identity, expected)
+
+    def test_a_feed_holding_only_other_trees_reports_zero_for_the_target(self) -> None:
+        events = normalized([event("theirs", "a.md", repo="https://github.com/other/tree")])
+        expected = audit.TreeIdentity(repo=audit.canonical_repo(REPO), branch="main")
+        selected, _ = audit.select_events_for_tree(events, expected)
+        self.assertEqual(selected, [])
+
+    def test_an_empty_feed_without_a_pinned_tree_still_fails_closed(self) -> None:
+        with self.assertRaisesRegex(audit.AuditError, "cannot be identified"):
+            audit.select_events_for_tree([], None)
+
+
+class SampleDrawIntegrityTests(unittest.TestCase):
+    """A matching population digest must not be enough to publish effects."""
+
+    def _feed(self) -> list[audit.IoEvent]:
+        return normalized([event(f"r{index}", f"system/n{index}.md") for index in range(10)])
+
+    def test_the_recorded_draw_is_reproducible_from_seed_and_size(self) -> None:
+        reads = self._feed()
+        first = [item.event_id for item in audit.sample_reads(reads, 3, seed=5)]
+        second = [item.event_id for item in audit.sample_reads(reads, 3, seed=5)]
+        self.assertEqual(first, second)
+
+    def test_a_hand_picked_case_list_is_not_the_uniform_draw(self) -> None:
+        reads = self._feed()
+        drawn = [item.event_id for item in audit.sample_reads(reads, 3, seed=5)]
+        # The reviewer's attack: keep the population intact, swap in the reads
+        # that happen to be easiest to judge.
+        handpicked = [item.event_id for item in reads[:3]]
+        self.assertNotEqual(drawn, handpicked)
