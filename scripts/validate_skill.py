@@ -33,6 +33,11 @@ FORBIDDEN_ARTIFACT_NAMES = {
     "chats.jsonl",
     "judgments.jsonl",
     "task-judgments.jsonl",
+    "task-source.jsonl",
+    "task-inventory-draft.jsonl",
+    "task-inventory.jsonl",
+    "read-attributions.jsonl",
+    "effect-judgments.jsonl",
 }
 
 

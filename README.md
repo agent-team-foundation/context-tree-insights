@@ -1,22 +1,22 @@
 # Context Tree Value Audit
 
-`context-tree-value-audit` 0.4.0 is an explicit-only Skill for task-first,
+`context-tree-value-audit` 0.5.0 is an explicit-only Skill for task-first,
 evidence-first analysis of Context Tree decision value for the current First
 Tree Runtime when its native historical evidence is supported. It reconstructs
 single-Agent-owned continuous Tasks from authorized Chats, records whether a
-Tree Read is observed or unresolved, and judges one optional Effect without a
-minimum sample gate.
+Tree Read is observed or unresolved, and judges zero or more independent
+Effects without a minimum sample gate.
 
 The 0.2 series renamed the installable Skill from
 `context-tree-insights` to `context-tree-value-audit`. Replace the old Skill
 directory during upgrade; do not install both names because they represent one
 explicit audit capability, not two independent workflows.
 
-Version 0.4 replaces the 0.3 Task judgment schema v2 with continuous episode
-schema v3. Do not reuse schema-v1 or schema-v2 `task-judgments.jsonl`:
-reconstruct the episodes and their ownership/objective/outcome anchors, then
-rerun the deterministic reporter. No migration or compatibility reader is
-provided.
+Version 0.5 replaces the combined schema-v3 Task judgment with three ordered
+schema-v4 artifacts: frozen Task inventory, Read attributions, and Effect
+judgments. Do not reuse schema-v1/v2/v3 judgment files. Reconstruct Tasks from
+the message-only projection, freeze the inventory digest, then rerun Read and
+Effect analysis. No migration or compatibility reader is provided.
 
 The audit core remains separate from First Tree core. Codex, Claude Code, and
 Claude Code TUI use their existing native local transcripts. Cursor and Kimi
@@ -40,9 +40,14 @@ Tree.
   counting unit.
 - Short continuations, status prompts, context-dependent questions, repeated
   review/fix requests, and phases of one delivery do not become separate Tasks.
-- Clear Tasks carry source-backed ownership, objective, and outcome anchors;
-  work owned by another Agent remains context until the audited Agent visibly
-  receives, accepts, or takes over an objective.
+- Clear Tasks carry source-backed objective and same-Agent outcome messages;
+  work owned by another Agent remains context until the audited Agent receives
+  or visibly accepts an objective. That acceptance is an analyst judgment from
+  work messages; the reporter does not infer the addressee of arbitrary prose.
+- Task reconstruction uses a message-only projection that excludes
+  collector-derived Reads, passages, Tree-mention indexes, receipts, choice
+  projections, and Effect judgments; original work-message content remains
+  unchanged. Its normalized inventory is frozen before Read attribution.
 - Local Runtime evidence is preflighted against authorized Chat and Agent IDs
   before complete recorded output is scanned.
 - Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
@@ -59,8 +64,8 @@ Tree.
   duplicate, pending, or out-of-window results stay unresolved.
 - Read is only `observed` or `unresolved`; unresolved is never counted as
   unused.
-- Effect is optional and only `confirmed`, `constrained`, `redirected`, or
-  `conflicted`.
+- Each Task has zero or more Effects; each is only `confirmed`, `constrained`,
+  `redirected`, or `conflicted`.
 - A decision receipt may support an Effect but cannot create one by itself.
 - There is no fixed Task quota, task-type gate, or saturation state.
 - The output is a sampled evidence report, not causal proof, ROI, or a
@@ -184,7 +189,7 @@ tasks. Pin a reviewed commit or release when installing for another Agent.
 
 ## Pipeline
 
-The Skill orchestrates four stages:
+The Skill orchestrates six operational steps across three analysis stages:
 
 1. `export-chats` resolves explicit authorization and exports visible records.
 2. `collect` maps authorized Chats to supported native local evidence,
@@ -192,15 +197,18 @@ The Skill orchestrates four stages:
    grammar, reconstructs exact or read-only-composite evidence plus visible
    choices, and distinguishes local default-branch matches from unverified
    sources. Unsupported Runtime history produces unresolved Reads.
-3. The Agent reconstructs continuous Task episodes with explicit
-   ownership/objective/outcome anchors and writes one observed/unresolved Read
-   plus at most one Effect in schema-v3 `task-judgments.jsonl`.
-4. `report` validates episode ownership and anchors, weak fragment-only
-   objectives, source ownership, windows, cross-Chat linkage, Read/choice
-   timing, deduplication, and aggregate conservation, then creates
-   `evidence.jsonl` and `REPORT.md`. An optional hash-anchored reviewed
-   baseline is shown separately, so a current collector gap cannot erase
-   previously reviewed positive cases or silently import them into the rerun.
+3. `task-source` removes every collector-derived Tree/Read/Effect projection
+   and keeps only authorized work messages. It does not redact literal
+   Tree/Read/Effect discussion from the work itself.
+4. The Agent reconstructs Tasks from that projection; `freeze-tasks` validates
+   and writes a digest-bound `task-inventory.jsonl`.
+5. The Agent writes digest-bound Read attributions, then zero-or-more Effect
+   judgments for each clear Task without changing the frozen inventory.
+6. `report` validates Task sources, weak fragment-only objectives, source
+   ownership, windows, cross-Chat linkage, Read/choice timing, inventory
+   digests, deduplication, multi-Effect conservation, and creates
+   `evidence.jsonl` and `REPORT.md`. An optional hash-anchored reviewed baseline
+   remains separate from the current rerun.
 
 There is no default time window. `--days` is an optional data-acquisition
 bound. Every available Task in the authorized bound is reported; sample size

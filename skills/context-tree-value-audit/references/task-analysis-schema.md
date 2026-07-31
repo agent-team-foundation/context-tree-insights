@@ -1,21 +1,38 @@
 # Task, Read, and Effect Schema
 
-Use this reference after `collect` produces `candidates.jsonl`. Task is the
-judgment and counting unit. `Chat UUID @ Agent UUID` remains only the
-authorization, trace-mapping, and evidence-source unit.
+The audit uses three ordered stages. Task reconstruction is completed and
+frozen before Tree Reads are visible to the analyst. Read attribution then
+uses that frozen inventory. Effect analysis runs last and may not change either
+earlier artifact.
 
-Write exactly one schema-v3 `task-judgments.jsonl` row for every reconstructed
-Task or excluded candidate.
+`Chat UUID @ Agent UUID` remains the authorization, trace-mapping, and source
+unit. Task is the work unit. Effect is the independently counted value unit.
 
-## Clear Task
+## Stage 1: Task reconstruction
+
+Run `task-source` after collection. It projects only authorized work messages:
+no collector-derived Reads, passages, Tree-mention indexes, decision receipts,
+choice projections, or Effect judgments are present. Original message content
+is unchanged and may literally discuss Tree, Read, or Effect when that
+discussion is part of the work. Reconstruct Tasks only from this message-only
+artifact and do not use those literal terms as evidence that a Read or Effect
+occurred.
+
+A Task is one continuous work episode in which the audited Agent accepted a
+concrete objective and produced an independently judgeable outcome. Scope and
+primary deliverable may clarify the boundary but are optional.
+
+Write one schema-v4 `task-inventory-draft.jsonl` row for every clear Task or
+excluded candidate:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "task_id": "stable-local-task-id",
   "status": "clear",
   "objective": "Choose the state authority",
   "object_scope": "state persistence",
+  "primary_deliverable": "A decision selecting one state source",
   "outcome": "Kept the existing state source",
   "started_at": "RFC3339",
   "ended_at": "RFC3339",
@@ -23,103 +40,39 @@ Task or excluded candidate.
     {
       "audit_id": "CHAT_UUID@AGENT_UUID",
       "message_ids": [
-        "assignment-message-id",
-        "continue-message-id",
+        "objective-message-id",
+        "continuation-message-id",
         "outcome-message-id"
       ]
     }
   ],
-  "episode": {
-    "ownership": {
-      "kind": "assigned",
-      "anchor_message_ids": ["assignment-message-id"],
-      "reason": "A human assigned this objective to the audited Agent."
-    },
-    "objective_anchor_message_ids": ["assignment-message-id"],
-    "outcome_anchor_message_ids": ["outcome-message-id"],
-    "continuation_message_ids": ["continue-message-id"],
-    "primary_deliverable": "A decision selecting the authoritative state source.",
-    "boundary_reason": "The assignment and final decision bound one continuous objective."
-  },
-  "read": {
-    "status": "observed",
-    "read_ids": ["read-id"],
-    "reason": null
-  },
-  "effect": {
-    "type": "constrained",
-    "read_ids": ["read-id"],
-    "choice_message_ids": ["outcome-message-id"],
-    "outcome_anchor": "outcome-message-id",
-    "summary": "The constraint ruled out a second state source."
-  },
-  "effect_reason": null
+  "objective_source_message_ids": ["objective-message-id"],
+  "outcome_source_message_ids": ["outcome-message-id"]
 }
 ```
 
-A clear Task is one independently judgeable, continuous work episode owned by
-the audited Agent. It requires all six gates:
+`objective`, `outcome`, source fragments, and objective/outcome message IDs are
+required. `object_scope` and `primary_deliverable` may be null. `started_at`
+must equal the earliest objective source; `ended_at` must equal the latest
+outcome source. Outcome sources must be non-empty messages authored by the
+audited Agent and must strictly follow all objective sources.
 
-1. ownership established by an assignment, transfer, or visible acceptance;
-2. a concrete normalized objective;
-3. a material object scope;
-4. an independently judgeable outcome or terminal state;
-5. bounded source fragments from objective through outcome;
-6. one primary terminal deliverable.
+The Task inventory must not contain `episode`, ownership categories,
+continuation IDs, boundary rationale, Read, Effect, confidence, support,
+sampling, or task-type fields. Assignment, transfer, and visible acceptance are
+all expressed by the objective source messages rather than a separate
+ownership taxonomy.
+The analyst is responsible for judging from those work messages that the
+audited Agent received or accepted the objective. The reporter validates source
+identity, ordering, and the audited Agent's outcome; it does not infer the
+semantic addressee of arbitrary message prose.
 
-The `episode` object makes those gates auditable. Ownership must be
-`assigned`, `transferred`, or `accepted`. `assigned` and `transferred` need a
-non-current-Agent ownership and objective anchor; `accepted` needs a
-current-Agent ownership and objective anchor. At least one concrete objective
-anchor must come from that ownership-compatible sender: non-current for
-`assigned`/`transferred`, current for `accepted`. A weak assignment plus another
-sender's later concrete message cannot be combined into a clear objective.
-Synthesized judgment prose cannot turn a weak prompt into one. Every Task needs
-one or more distinct, strictly later outcome anchors, and every outcome anchor
-must be a non-empty current-Agent message. Every episode anchor must be one of
-the Task's authorized source messages. Ownership and objective may use the same
-handoff message; outcome and continuation anchors must remain separate from the
-ownership/objective identity anchors. The Read/choice evidence window begins
-only after the earliest ownership-kind-compatible ownership anchor and the
-earliest ownership-compatible, non-weak objective anchor are both established;
-earlier incompatible-sender ownership or weak objective anchors cannot move
-that window backward.
-
-A short continuation, status prompt, or context-dependent question is not a
-clear Task by itself. Examples include `continue`, `status`, `why`, `继续`,
-`做了吗`, `你在干啥`, `进展呢`, `地址呢`, `为什么`, `什么意思`,
-`你这个修复什么`, `那这个呢`, `再检查`, `修一下`, and `重新看`.
-Polite or modal wrappers do not make those fragments concrete:
-`please continue`, `status please`, `请继续`, and `修一下吧` remain weak.
-The anchored context-dependent command set also keeps deictic variants such as
-`please continue fixing it`, `please fix it`, `continue the work`,
-`继续修一下`, `修复一下`, `修这个`, and `帮忙修下` weak.
-Edge-only Unicode punctuation/symbol decoration and closed high-frequency
-modifiers do not change that result, so `“please continue”`,
-`please just continue`, `请继续吧～`, and `请继续（谢谢）` remain weak.
-One or more leading First Tree Agent mentions use the exact slug grammar and
-stop before punctuation or adjacent prose: `@agent-one @agent-two，请继续`
-remains weak, while
-`@agent-one @agent-two，请继续完成状态源方案并交付独立决定` remains
-concrete. Strip only those closed decorations and wrappers; a message such as
-`Please continue the state-source design and deliver the authority decision`
-remains concrete because the residual text names an objective and deliverable.
-Merge a weak fragment into its parent episode when that parent is visible;
-otherwise exclude it. Never invent the missing objective from work performed by
-another Agent.
-
-Treat one complete objective-to-outcome work item as one Task. Keep planning,
-implementation, review, QA, corrections, merge approval, status questions,
-and short continuations for the same deliverable in that Task. Split only when
-there is a new objective, materially different scope or deliverable, an
-independent outcome, and an unambiguous source boundary.
-
-## Excluded Task
+Use an excluded row when a defensible Task cannot be reconstructed:
 
 ```json
 {
-  "schema_version": 3,
-  "task_id": "stable-local-task-id",
+  "schema_version": 4,
+  "task_id": "stable-local-candidate-id",
   "status": "excluded",
   "objective": null,
   "object_scope": "unclear scope",
@@ -137,61 +90,49 @@ independent outcome, and an unambiguous source boundary.
 }
 ```
 
-Excluded candidates do not contain `episode`, `read`, `effect`, or
-`effect_reason`. They must contain one structured `exclusion_kind`:
+Allowed exclusion kinds:
 
 - `greeting_or_acknowledgement`;
 - `status_ping_or_continuation`;
 - `context_dependent_clarification`;
 - `missing_objective`;
-- `missing_scope`;
 - `missing_outcome`;
 - `ownership_not_established`;
 - `automatic_or_provider_only`;
 - `ambiguous_boundary`;
 - `non_independent_subphase`.
 
-When more than one label could apply, use this precedence so reruns converge:
+Apply this precedence when more than one fits:
 
-1. form-only exclusions: `automatic_or_provider_only`,
-   `greeting_or_acknowledgement`, `status_ping_or_continuation`,
-   `context_dependent_clarification`, `non_independent_subphase`;
+1. form-only exclusions;
 2. `ownership_not_established`;
 3. `missing_objective`;
-4. `missing_scope`;
-5. `missing_outcome`;
-6. `ambiguous_boundary`.
+4. `missing_outcome`;
+5. `ambiguous_boundary`.
 
-An excluded row is an observed candidate, not a Task. Keep any partially known
-objective/scope/outcome fields honest, and use `exclusion_reason` to identify
-other passed or failed gates; do not add a partial `episode` object.
+An excluded row is an observed candidate, not a Task. It contains no clear-Task
+sources, primary deliverable, Read, or Effect analysis.
 
-## Task reconstruction
+### Task boundaries
 
-One Chat may contain multiple Tasks, but a new message or phase does not create
-a new Task. Merge:
+Keep planning, implementation, review, QA, corrections, merge approval, status
+questions, and short continuations inside one Task when they serve the same
+objective and outcome. Split only when a new objective, material scope or
+deliverable change, independent outcome, and unambiguous source boundary are
+all present.
 
-- short continuation, status, clarification, review-again, fix-again, or merge
-  messages into the active parent episode;
-- plan → implementation → review → QA → final delivery for one objective and
-  primary deliverable;
-- corrections and revisions to that same deliverable.
+Weak fragments such as `continue`, `status`, `why`, `please continue`,
+`please fix it`, `继续`, `做了吗`, `修一下`, and mention-decorated equivalents
+cannot establish a Task objective by themselves. Merge them into a visible
+parent episode or exclude them. A concrete message that contains `continue`
+but names its objective and outcome remains eligible.
 
-Split only when all four are present: a new objective, a material scope or
-deliverable change, an independently judgeable outcome, and an unambiguous
-source boundary. Keep the resulting source messages, windows, Reads, and
-choices separate.
+For a single-Agent audit, another Agent's work is context until the audited
+Agent receives or visibly accepts an objective. Another Agent's later message
+cannot serve as this Agent's outcome.
 
-For a single-Agent audit, work assigned to another Agent is Chat context, not
-this Agent's Task. Start this Agent's Task only at a visible assignment,
-transfer, or acceptance. A later independent review, takeover, verification
-gate, or orchestration objective may form a new owned episode when it passes
-all six gates. An ordinary status check always stays in its parent episode.
-
-## Cross-Chat Task
-
-Merge fragments from more than one Chat only when every fragment carries the
-same explicit linkage:
+Merge fragments across Chats only when every fragment carries the same
+explicit linkage:
 
 ```json
 {
@@ -202,81 +143,111 @@ same explicit linkage:
 }
 ```
 
-Allowed linkage kinds are:
+Allowed kinds are `work_item`, `explicit_handoff`, and
+`same_objective_delivery`. Topical similarity alone is insufficient.
 
-- `work_item` for one PR, MR, or Issue;
-- `explicit_handoff` for a visible handoff;
-- `same_objective_delivery` for the same objective and primary delivery.
+### Freeze
 
-The reporter rejects an unlinked cross-Chat Task. A single-Chat Task must not
-claim cross-Chat linkage. Every source message must belong to the referenced
-authorized Chat-Agent evidence row and fall inside the Task and acquisition
-windows.
+`freeze-tasks` validates the draft against the message-only Task source,
+normalizes row order, computes one SHA-256 digest, and writes
+`task-inventory.jsonl`. Every frozen row carries the same
+`inventory_sha256`.
 
-## Read
+The digest is an internal integrity fence, not a user-facing evidence concept.
+If Task reconstruction changes, create a new frozen inventory and rerun Read
+and Effect analysis. Never edit the frozen inventory during later stages.
 
-Read has only two states:
+## Stage 2: Read attribution
 
-- `observed` — one or more attributable Task-window `read_ids` exist;
-- `unresolved` — historical evidence cannot resolve the Read; include a short
-  `reason`, keep `read_ids` empty, and keep Effect null.
+Write exactly one schema-v4 `read-attributions.jsonl` row for every clear Task:
 
-Do not use `confirmed`, `not_observed`, `unused`, or a negative-value state.
-Missing telemetry and an absent decision receipt are unknown. An unresolved
-Read is never evidence that the Tree was not read or had no value.
+```json
+{
+  "schema_version": 4,
+  "inventory_sha256": "64-lowercase-hex",
+  "task_id": "stable-local-task-id",
+  "status": "observed",
+  "read_ids": ["read-id"],
+  "reason": null
+}
+```
 
-Every observed Read must belong to a source Chat, start and complete inside the
-Task window, occur no earlier than established episode ownership/objective and
-no later than the episode outcome, and be assigned to only one Task.
+Read has two states:
 
-Collector command classification is not a Read by itself. For
-`read_only_composite` or `output_attribution: aggregate`, inspect the recorded
-passage and component paths. If actual Tree content is not attributable, keep
-the Read unresolved.
+- `observed` — one or more attributable Task-window Read IDs exist;
+- `unresolved` — historical evidence cannot resolve the Read; `read_ids` is
+  empty and `reason` explains the gap.
 
-## Effect
+Zero attributed Reads are represented as unresolved unless the available
+historical evidence can support a stronger interpretation. Do not emit
+`not_observed`, `unused`, or another negative-value state. Missing telemetry
+and receipt absence remain unknown.
 
-Effect is either null or one object whose `type` is:
+Every observed Read must belong to one source Chat, start and complete inside
+the frozen Task window, and be attributed to only one Task. Read attribution
+cannot create, delete, merge, split, or resize a Task.
 
-- `confirmed` — removed material uncertainty and justified keeping the choice;
+Collector command classification is not a Read by itself. For aggregate or
+read-only-composite evidence, inspect the retained passage and component paths.
+If actual Tree content cannot be attributed, keep the Task unresolved.
+
+## Stage 3: Effect analysis
+
+Write exactly one schema-v4 `effect-judgments.jsonl` row for every clear Task:
+
+```json
+{
+  "schema_version": 4,
+  "inventory_sha256": "64-lowercase-hex",
+  "task_id": "stable-local-task-id",
+  "effects": [
+    {
+      "type": "constrained",
+      "read_ids": ["read-id"],
+      "choice_message_ids": ["choice-message-id"],
+      "outcome_message_id": "outcome-message-id",
+      "summary": "The constraint ruled out a second state source."
+    }
+  ],
+  "effect_reason": null
+}
+```
+
+A Task has zero or more Effects. Each Effect independently binds supporting
+Reads, one or more later same-Agent choices, a same-Agent outcome message, and
+one summary. Valid types are:
+
+- `confirmed` — removed material uncertainty and justified keeping a choice;
 - `constrained` — ruled out an option or narrowed the acceptable boundary;
 - `redirected` — changed the intended approach;
 - `conflicted` — exposed a conflict that still required resolution.
 
-Record an Effect only when all four conditions hold:
+Record an Effect only when:
 
-1. a real Read contains a relevant normal Tree decision, constraint, rationale,
-   or cross-domain relationship;
+1. a real Read contains relevant normal Tree content;
 2. every cited Read completes before the earliest cited choice;
-3. the later same-Agent choice or outcome reasonably shows one of the four
-   effects;
-4. no more direct user instruction or other evidence fully explains the
-   result.
+3. the later same-Agent choice or outcome reasonably shows the Effect;
+4. no more direct user instruction or other evidence fully explains it.
 
-Every Effect requires observed Read IDs, later same-Agent choice message IDs, a
-non-empty outcome anchor equal to one of the episode outcome message IDs, and
-one concrete summary sentence. Effect choices must be authorized Task source
-messages inside the established episode. The selected Effect outcome anchor
-must be no earlier than every cited Read completion and cited choice.
+The same Read may support multiple distinct choices and therefore multiple
+Effects. One choice message cannot be reused across Effects. Outcome messages
+may be shared when distinct choices converge on one later result. Effects may
+bind intermediate same-Agent outcomes inside the Task; they do not have to use
+the Task's terminal outcome source.
 
-Ownership, objective, and outcome identity anchors cannot be copied across
-different clear Tasks. One message that appears to bundle multiple objectives
-does not provide an unambiguous split boundary; merge or exclude unless
-separate source anchors establish the episodes. The same Read or choice cannot
-be copied across Tasks.
-
-If those conditions are not met, set `"effect": null` and include one short
-`effect_reason`. Do not add `verified`, `probable`, confidence tiers, support
-levels, numeric weights, or multiple Effects. A `contextDecision` receipt may
-support the judgment but cannot create an Effect by itself.
+When no Effect is defensible, set `"effects": []` and include one short
+`effect_reason`. An unresolved Read must have no Effects. Do not add
+`verified`, `probable`, confidence tiers, support levels, rubrics, or numeric
+weights. A `contextDecision` receipt may support judgment but cannot create an
+Effect by itself.
 
 ## Separately reviewed historical baseline
 
-An optional `reviewed-baseline.jsonl` contains one schema-v3 aggregate:
+An optional schema-v4 baseline remains separate from the current rerun:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "basis": "separately_reviewed_task_cases",
   "reviewed_at": "RFC3339",
   "evidence_anchor": {
@@ -285,37 +256,30 @@ An optional `reviewed-baseline.jsonl` contains one schema-v3 aggregate:
   },
   "clear_tasks": 44,
   "effect_tasks": 16,
+  "effects": 19,
   "effect_counts": {
-    "confirmed": 2,
-    "constrained": 8,
-    "redirected": 5,
+    "confirmed": 3,
+    "constrained": 9,
+    "redirected": 6,
     "conflicted": 1
   }
 }
 ```
 
-The Effect counts must conserve `effect_tasks`. The reporter keeps the
-baseline separate from the current rerun.
+Effect counts conserve `effects`; `effect_tasks` cannot exceed clear Tasks or
+total Effects.
 
 ## Reporting
 
-Report every available clear Task and excluded candidate in the authorized
-acquisition bound. There is no minimum Task quota, task-type coverage gate,
-batch expansion, or saturation status.
+Report every available Task in the authorized acquisition bound. There is no
+minimum Task quota, task-type gate, batch expansion, or saturation status.
 
-Include:
-
-- one complete clear Task inventory with ownership, objective, scope, primary
-  deliverable, outcome, Read, Effect, and evidence summary;
-- each clear Task's ownership/objective/outcome anchors and boundary rationale;
-- one complete excluded-candidate inventory with structured exclusion kind,
-  observed scope, and reason.
-
-The report must conserve:
+The report conserves:
 
 - observed Read Tasks + unresolved Read Tasks = clear Tasks;
-- Effect Tasks + observed Reads without an Effect = observed Read Tasks;
-- the four Effect counts = Effect Tasks.
+- Effect Tasks + observed Read without Effect = observed Read Tasks;
+- the four Effect counts = total Effects;
+- total Effects is greater than or equal to Effect Tasks.
 
-Always state the sample size and evidence gaps. Do not output a global
-effectiveness rate, causal claim, or ROI.
+Always show both Effect Tasks and total Effects. State sample size and evidence
+gaps. Never output a global effectiveness rate, causal claim, or ROI.
