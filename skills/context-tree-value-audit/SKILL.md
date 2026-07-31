@@ -1,6 +1,6 @@
 ---
 name: context-tree-value-audit
-description: Audit whether Context Tree reads changed what an agent did, when a human explicitly invokes /context-tree-value-audit or $context-tree-value-audit. Reads the agent's own durable Context Tree IO feed, reports node-level exposure and never-read nodes, then judges a random read sample with a mandatory adversarial pass. Do not use for ordinary task reads, stored-tree quality audits, Tree writes, or another agent.
+description: Audit whether Context Tree reads changed what an agent did, when a human explicitly invokes /context-tree-value-audit or $context-tree-value-audit. Reads the agent's own durable Context Tree IO feed, reports node-level observed exposure and nodes with no observed read, then judges a random read sample with a mandatory adversarial pass. Do not use for ordinary task reads, stored-tree quality audits, Tree writes, or another agent.
 disable-model-invocation: true
 ---
 
@@ -10,14 +10,17 @@ disable-model-invocation: true
 
 Answer two questions about one agent's own Context Tree usage:
 
-1. **Exposure** — which nodes did it actually open, which nodes were never
-   opened, and is the Tree being written to? *Complete, from recorded facts.*
+1. **Observed exposure** — which nodes have a recorded read, which have none,
+   and what write events reached the feed? *Recorded events only — a lower
+   bound, never a complete picture.*
 2. **Influence** — for a random sample of reads, did the read change what the
    agent did next? *Sampled, and every claim must survive an attempt to refute
    it.*
 
 Exposure comes from `context_tree_io_events`, which the runtime records at
-tool-execution time and which outlives session timelines. Influence is the only
+tool-execution time and which outlives session timelines. That recording is
+best-effort: pipeline shell reads produce no event at all, and write telemetry
+misses merge and out-of-path worktree commits. Influence is the only
 judgment in the run, and it is deliberately adversarial: the model that claims
 an effect must then try to explain the same choice **without** the Tree.
 
@@ -47,14 +50,20 @@ python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" facts \
 `--since` / `--until` / `--chat` are optional filters. Add `--json` for the
 structured form when you want to inspect counts directly.
 
-This step alone is worth reporting. It gives node-level read distribution, write
-activity, and the **never-read node list** — the most directly actionable
-output, because a node nobody consults is diluting the signal of the ones that
-matter.
+This step alone is worth reporting. It gives node-level read distribution,
+observed write events, and the **list of nodes with no observed read**.
 
-The never-read list is deliberately conservative: a node inside a recorded
-search root is never listed, even though the search may not have opened it.
-Over-reporting here would recommend deleting a node that was in fact consulted.
+Treat that list as an **evidence gap, not a finding**. A node lands there when no
+event reached the feed, which also happens for every pipeline shell read and
+whenever best-effort telemetry drops a call. **Never present it as a deletion or
+merge proposal.** It is a prompt to ask a human whether a node still earns its
+place — nothing stronger.
+
+It is conservative on top of that: a node inside a recorded search root is
+excluded, because `Grep`/`Glob` record only the search root.
+
+Observed write events are telemetry-only and therefore incomplete. If someone
+needs the real write picture, point them at the Tree repository's git history.
 
 ## Step 2 — Sample
 
@@ -71,8 +80,15 @@ hand-pick cases.** Choosing the reads whose surrounding conversation is easiest
 to interpret biases the result toward whatever is legible, not toward what is
 true.
 
-Each case carries the read (node path, time, chat) and the node's content **as
-of that read**, recovered from the recorded commit where possible.
+Each case carries the read (node path, time, chat) and a **candidate snapshot**
+of the node's text, reconstructed from the checkout HEAD observed at read time.
+
+That snapshot is not guaranteed to be what the agent saw: the recorded commit is
+the HEAD observed for the read, not proof that the working file matched it. If
+the agent was reading uncommitted Tree edits, the real text is unrecoverable.
+Each case states which of `head_commit_snapshot` / `current_working_copy` /
+`unavailable` it is. **When the snapshot may not match what was read, do not
+claim an effect that depends on specific wording** — use `null`.
 
 ## Step 3 — Judge each case, then try to refute it
 
@@ -139,8 +155,13 @@ python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" report \
   --output "$CTVA_ARTIFACT_DIR/REPORT.md"
 ```
 
-The report shows exposure, the never-read list, write activity, the effect
-distribution, and the **refutation rate**.
+`report` refuses to publish effect counts unless the sample provably came from
+the same Tree identity, the same window, and the same eligible read population.
+New events arrive continuously, so if it tells you the population changed,
+re-run `sample` rather than working around it.
+
+The report shows observed exposure, the no-observed-read list, observed write
+events, the effect distribution, and the **refutation rate**.
 
 **When more than half of the claimed effects are refuted, the reporter withholds
 the influence numbers** and says the run is unreliable. That is the intended
@@ -151,12 +172,17 @@ Report the exposure section and investigate the judgment step.
 
 Give them the report path and, in prose:
 
-- the exposure counts and the never-read list, which are **facts**;
+- the observed exposure counts and the no-observed-read list, stated as
+  **recorded events and evidence gaps**, never as complete activity;
 - the refutation rate, which says how much the influence numbers are worth;
 - the two known recording gaps, so nobody reads adoption as a rate:
   - pipeline shell reads (`cat NODE.md | head -40`) are **not recorded**, so
     exposure is a lower bound;
-  - `Grep` / `Glob` record the search *directory*, not the matched nodes.
+  - `Grep` / `Glob` record the search *directory*, not the matched nodes;
+  - write events are telemetry-only and miss merge and out-of-path commits;
+  - node text is a candidate snapshot from the observed HEAD, not necessarily
+    what the agent read.
 
 Never present the output as causal proof, an effectiveness rate, or ROI. Missing
-evidence is unknown — it is never proof that the Tree went unused.
+evidence is unknown — it is never proof that a node went unread or that the Tree
+went unused.

@@ -3,12 +3,13 @@
 A First Tree Skill that answers two questions about one agent's Context Tree
 usage:
 
-1. **Exposure** — which nodes did it actually open, which nodes were never
-   opened, and is the Tree being written to?
+1. **Observed exposure** — which nodes have a recorded read, which have none,
+   and what write events reached the feed?
 2. **Influence** — for a random sample of reads, did the read change what the
    agent did next?
 
-Exposure is complete and factual. Influence is sampled, judged by a model, and
+Exposure counts recorded events — a lower bound, not complete activity.
+Influence is sampled, judged by a model, and
 **every claimed effect must survive an adversarial pass that tries to explain the
 same choice without the Tree**. The report publishes the refutation rate, and
 withholds the influence numbers entirely when most claims are refuted.
@@ -41,16 +42,21 @@ readable and should be discarded.
 The audit prints these in every report, and you should repeat them whenever you
 quote a number:
 
-- **Pipeline shell reads are not recorded.** `cat NODE.md | head -40` produces
-  no event, and that is a common way to read a long file. **Exposure is a lower
-  bound, never a rate.**
+- **Read telemetry is best-effort, and pipeline shell reads are not recorded at
+  all.** `cat NODE.md | head -40` produces no event, and that is a common way to
+  read a long file. **Exposure is a lower bound, never a rate**, and "no observed
+  read" never means "never read".
 - **Search reads are directory-granular.** `Grep` / `Glob` record one event for
-  the search root, not one per matched node. The never-read list therefore
-  excludes any node under a recorded search root, even though the search may not
-  have opened it — over-reporting there would recommend deleting a node that was
-  in fact consulted.
+  the search root, not one per matched node, so any node under a recorded search
+  root is excluded from the no-observed-read list.
+- **Write events are telemetry-only.** They miss merge commits and worktree edits
+  outside the bound path. Complete write activity comes from the Tree
+  repository's git history, not from this feed.
+- **Node text is a candidate snapshot.** It is reconstructed from the checkout
+  HEAD observed at read time, which is not a promise that the working file
+  matched that commit.
 
-Both gaps live in First Tree's recording layer, not in this skill.
+These gaps live in First Tree's recording layer, not in this skill.
 
 ## Install
 
@@ -73,11 +79,11 @@ A human invokes `/context-tree-value-audit` (Claude) or
 human input; the human reads the report at the end.
 
 ```bash
-# 1. Facts — complete, no sampling, no judgment
+# 1. Facts — recorded events only, no sampling, no judgment
 python3 scripts/context_tree_value_audit.py facts \
   --tree-root /path/to/context-tree --since 2026-07-01T00:00:00Z
 
-# 2. Sample — uniform over recorded file reads of normal content
+# 2. Sample — uniform over observed file reads of normal content
 python3 scripts/context_tree_value_audit.py sample \
   --tree-root /path/to/context-tree --size 40 --seed 1 --output sample.json
 
@@ -89,9 +95,12 @@ python3 scripts/context_tree_value_audit.py report \
   --sample sample.json --judgments judgments.json --output REPORT.md
 ```
 
-`facts` alone is useful and carries no judgment risk. The **never-read node
-list** is the most directly actionable output: a node nobody consults is diluting
-the signal of the ones that matter.
+`facts` alone is useful and carries no judgment risk. The **no-observed-read
+list** is an evidence gap to take to a human, not a deletion proposal.
+
+`report` refuses to publish effect counts unless the sample came from the same
+Tree identity, window, and eligible read population, so a stale sample cannot
+produce influence numbers against a feed it was never drawn from.
 
 Use `--events-file` to replay a captured `tree io --json` payload instead of
 calling the CLI.
@@ -128,5 +137,5 @@ invoking agent's workspace at mode `0600` and must never be committed — they
 contain Tree content and chat-derived material.
 
 The output is a sampled evidence report. It is not causal proof, an
-effectiveness rate, or ROI. Missing evidence is unknown, never proof that the
-Tree went unused.
+effectiveness rate, or ROI. Missing evidence is unknown, never proof that a node
+went unread or that the Tree went unused.

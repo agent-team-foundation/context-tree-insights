@@ -20,6 +20,7 @@ silently absorbed:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -157,6 +158,31 @@ def fetch_io_events(
 
 
 @dataclass(frozen=True)
+class TreeIdentity:
+    """Canonical identity of one bound Context Tree."""
+
+    repo: str
+    branch: str
+
+    def label(self) -> str:
+        return f"{self.repo}#{self.branch}"
+
+
+def canonical_repo(url: str) -> str:
+    """Normalize a git remote so ssh/https/.git spellings compare equal."""
+    text = url.strip().rstrip("/")
+    text = re.sub(r"\.git\Z", "", text)
+    scp = re.fullmatch(r"(?:ssh://)?git@([^:/]+)[:/](.+)", text)
+    if scp:
+        return f"{scp.group(1).lower()}/{scp.group(2).strip('/').lower()}"
+    match = re.fullmatch(r"(?:https?|git|ssh)://(?:[^@/]+@)?([^/]+)/(.+)", text)
+    if match:
+        host = match.group(1).lower().split(":")[0]
+        return f"{host}/{match.group(2).strip('/').lower()}"
+    return text.lower()
+
+
+@dataclass(frozen=True)
 class IoEvent:
     event_id: str
     chat_id: str
@@ -164,8 +190,14 @@ class IoEvent:
     source: str
     target_kind: str
     target_path: str
+    tree_repo_url: str
+    tree_branch: str
     tree_head_commit: str | None
     created_at: datetime
+
+    @property
+    def identity(self) -> TreeIdentity:
+        return TreeIdentity(repo=canonical_repo(self.tree_repo_url), branch=self.tree_branch)
 
     @property
     def is_normal_content(self) -> bool:
@@ -196,9 +228,58 @@ def normalize_event(raw: Mapping[str, Any]) -> IoEvent:
         source=text("source"),
         target_kind=target_kind,
         target_path=text("targetPath"),
+        tree_repo_url=text("treeRepoUrl"),
+        tree_branch=text("treeBranch"),
         tree_head_commit=commit if isinstance(commit, str) and SHA_RE.match(commit) else None,
         created_at=parse_time(text("createdAt"), field_name="IO event createdAt"),
     )
+
+
+def tree_identity_of_root(tree_root: Path) -> TreeIdentity | None:
+    """Canonical identity of the local checkout, or None when unprovable."""
+    remote = git_text(tree_root, ["remote", "get-url", "origin"])
+    branch = git_text(tree_root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if not remote:
+        return None
+    if not branch or branch == "HEAD":
+        upstream = git_text(tree_root, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        branch = upstream.split("/", 1)[-1] if upstream else None
+    if not branch:
+        return None
+    return TreeIdentity(repo=canonical_repo(remote), branch=branch)
+
+
+def select_events_for_tree(
+    events: Sequence[IoEvent],
+    expected: TreeIdentity | None,
+) -> tuple[list[IoEvent], TreeIdentity]:
+    """Keep only events provably belonging to one Tree; fail closed otherwise.
+
+    A binding can change, and a captured feed can mix Trees. Aggregating by
+    path alone would credit reads of one Tree against another's nodes, so an
+    event that cannot be matched to the target identity is excluded rather
+    than assumed.
+    """
+    if not events:
+        raise AuditError("The IO feed contained no events to audit.")
+    identities = {event.identity for event in events}
+    if expected is None:
+        if len(identities) != 1:
+            raise AuditError(
+                "The feed mixes Context Trees ("
+                + ", ".join(sorted(item.label() for item in identities))
+                + "); pass --tree-root so the audit can pin one identity."
+            )
+        return list(events), next(iter(identities))
+    matched = [event for event in events if event.identity == expected]
+    if not matched:
+        raise AuditError(
+            f"No IO event matches the bound Tree {expected.label()}; "
+            "the feed belongs to "
+            + ", ".join(sorted(item.label() for item in identities))
+            + "."
+        )
+    return matched, expected
 
 
 # ── aggregation (no sampling, no judgment) ────────────────────────────────
@@ -249,12 +330,15 @@ def covered_by_search(node_path: str, searched_dirs: set[str]) -> bool:
     return False
 
 
-def never_read_nodes(tree_root: Path, agg: Aggregate) -> list[str]:
-    """Nodes with no file-level read and no directory-level search above them.
+def unobserved_nodes(tree_root: Path, agg: Aggregate) -> list[str]:
+    """Nodes with no observed read event and no search root recorded above them.
 
-    Deliberately conservative: a node inside a searched directory is excluded
-    even though the search may never have opened it. Over-reporting here would
-    recommend deleting a node that was in fact consulted.
+    This is an evidence gap, NOT a claim that the node was never read. Pipeline
+    shell reads are never recorded at all, and read telemetry is best-effort, so
+    absence here means "no event reached the feed" and nothing more.
+
+    Deliberately conservative on top of that: a node inside a recorded search
+    root is excluded even though the search may never have opened it.
     """
     candidates: list[str] = []
     for path in sorted(tree_root.rglob("*.md")):
@@ -279,6 +363,18 @@ def never_read_nodes(tree_root: Path, agg: Aggregate) -> list[str]:
 # ── case material for the judgment step ───────────────────────────────────
 
 
+def git_text(tree_root: Path, args: Sequence[str]) -> str | None:
+    completed = subprocess.run(
+        ["git", "-C", str(tree_root), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
+    )
+    out = completed.stdout.strip()
+    return out if completed.returncode == 0 and out else None
+
+
 def git_show(tree_root: Path, commit: str, node_path: str) -> str | None:
     completed = subprocess.run(
         ["git", "-C", str(tree_root), "show", f"{commit}:{node_path}"],
@@ -291,24 +387,61 @@ def git_show(tree_root: Path, commit: str, node_path: str) -> str | None:
 
 
 def node_content_at_read(tree_root: Path, event: IoEvent, max_chars: int) -> dict[str, Any]:
-    """Recover what the node said when it was read, preferring the exact commit."""
+    """Recover the node's likely text at read time.
+
+    `treeHeadCommit` is the checkout HEAD observed for the read, NOT a promise
+    that the working file matched that commit. An agent reading uncommitted
+    Tree edits saw something this cannot reconstruct, so the status stays
+    `head_commit_snapshot` and the analyst is told to treat it as a candidate.
+    """
     if event.tree_head_commit:
         content = git_show(tree_root, event.tree_head_commit, event.target_path)
         if content is not None:
             body, truncated = clip(content, max_chars)
-            return {"status": "exact_commit", "commit": event.tree_head_commit, "content": body, "truncated": truncated}
+            return {
+                "status": "head_commit_snapshot",
+                "commit": event.tree_head_commit,
+                "content": body,
+                "truncated": truncated,
+                "caveat": (
+                    "Node text at the checkout HEAD observed for this read. If the agent read "
+                    "uncommitted edits, it saw different text."
+                ),
+            }
     current = tree_root / event.target_path
     if current.is_file() and not current.is_symlink():
         try:
             body, truncated = clip(current.read_text(encoding="utf-8"), max_chars)
         except (OSError, UnicodeDecodeError):
             return {"status": "unavailable", "reason": "node_unreadable"}
-        return {"status": "current_working_copy", "content": body, "truncated": truncated}
+        return {
+            "status": "current_working_copy",
+            "content": body,
+            "truncated": truncated,
+            "caveat": (
+                "Node text as it stands now, not at read time. The node may have changed since."
+            ),
+        }
     return {"status": "unavailable", "reason": "node_absent_at_audit_time"}
 
 
 def clip(text: str, limit: int) -> tuple[str, bool]:
     return (text, False) if len(text) <= limit else (text[:limit], True)
+
+
+def eligible_reads(reads: Sequence[IoEvent]) -> list[IoEvent]:
+    return [event for event in reads if event.target_kind == "file" and event.is_normal_content]
+
+
+def population_digest(events: Sequence[IoEvent]) -> str:
+    """Digest of the exact eligible population a sample was drawn from.
+
+    The report re-fetches the feed, and new events arrive between the two
+    steps. Without this fence a stale or hand-written sample could produce
+    effect counts against a population it was never drawn from.
+    """
+    payload = "\n".join(sorted(event.event_id for event in events))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def sample_reads(reads: Sequence[IoEvent], size: int, seed: int) -> list[IoEvent]:
@@ -319,7 +452,7 @@ def sample_reads(reads: Sequence[IoEvent], size: int, seed: int) -> list[IoEvent
     sessions; instead we sample first and report how many cases turned out to
     be unresolvable.
     """
-    eligible = [event for event in reads if event.target_kind == "file" and event.is_normal_content]
+    eligible = eligible_reads(reads)
     if size >= len(eligible):
         return list(eligible)
     return random.Random(seed).sample(eligible, size)
@@ -328,10 +461,15 @@ def sample_reads(reads: Sequence[IoEvent], size: int, seed: int) -> list[IoEvent
 # ── report ────────────────────────────────────────────────────────────────
 
 KNOWN_GAPS = [
-    "Shell reads that pass through a pipeline (for example `cat NODE.md | head -40`) are not recorded, "
-    "so adoption below is a lower bound, not a rate.",
-    "`Grep` / `Glob` record one directory-level event for the search root rather than one event per matched "
-    "node, so a node inside a searched directory is never listed as never-read.",
+    "Read telemetry is best-effort. Shell reads that pass through a pipeline (for example "
+    "`cat NODE.md | head -40`) produce no event at all, so every read count here is a lower bound and "
+    "no rate can be derived from it.",
+    "`Grep` / `Glob` record one directory-level event for the search root rather than one event per "
+    "matched node, so a node inside a recorded search root is never listed as unobserved.",
+    "Write telemetry misses merge commits and worktree edits outside the bound path. Complete write "
+    "activity comes from the Tree repository's git history, not from this feed.",
+    "A node's text is reconstructed from the checkout HEAD observed at read time. That is a candidate "
+    "snapshot: an agent reading uncommitted edits saw text this audit cannot recover.",
 ]
 
 
@@ -341,7 +479,7 @@ def render_report(
     window_start: datetime | None,
     window_end: datetime | None,
     agg: Aggregate,
-    never_read: list[str] | None,
+    unobserved: list[str] | None,
     judgments: Sequence[Mapping[str, Any]] | None,
     sample_size: int,
 ) -> str:
@@ -356,48 +494,59 @@ def render_report(
         "This is an evidence report over one agent's own recorded Context Tree IO. "
         "It is not causal proof, an effectiveness rate, or ROI.",
         "",
-        "## Exposure",
+        "## Observed exposure",
         "",
         "| Measure | Count |",
         "| --- | ---: |",
-        f"| Chats with at least one recorded Tree read | {len(agg.chats_with_read)} |",
-        f"| Chats with any recorded Tree IO | {len(agg.chats_seen)} |",
-        f"| Recorded reads | {len(agg.reads)} |",
-        f"| Recorded writes | {len(agg.writes)} |",
-        f"| Distinct nodes read | {len(agg.node_reads)} |",
+        f"| Chats with at least one observed Tree read | {len(agg.chats_with_read)} |",
+        f"| Chats with any observed Tree IO | {len(agg.chats_seen)} |",
+        f"| Observed reads | {len(agg.reads)} |",
+        f"| Observed write events (telemetry) | {len(agg.writes)} |",
+        f"| Distinct nodes with an observed read | {len(agg.node_reads)} |",
         "",
-        "Adoption is reported as counts, not as a percentage of all work: reads that the runtime "
-        "could not record are invisible here, so any ratio would overstate its own precision.",
+        "Every number here counts **observed events**, not activity. Read telemetry is "
+        "best-effort and pipeline shell reads are never recorded, so these are lower bounds "
+        "and no percentage of total work can be derived from them.",
         "",
     ]
 
     if agg.node_reads:
-        lines += ["## Most-read nodes", "", "| Node | Reads |", "| --- | ---: |"]
+        lines += ["## Most-read nodes (observed)", "", "| Node | Observed reads |", "| --- | ---: |"]
         for path, count in agg.node_reads.most_common(15):
             lines.append(f"| `{path}` | {count} |")
         lines.append("")
 
-    if never_read is not None:
+    if unobserved is not None:
         lines += [
-            "## Never-read nodes",
+            "## Nodes with no observed read",
             "",
-            f"{len(never_read)} normal node(s) had no file-level read and sat under no recorded search root "
-            "in this window.",
+            f"{len(unobserved)} normal node(s) had no file-level read event and sat under no recorded "
+            "search root in this window.",
+            "",
+            "**This is an evidence gap, not a finding.** A node appears here when no event reached the "
+            "feed — which also happens for every pipeline shell read, and whenever best-effort read "
+            "telemetry drops a call. Do not treat this list as a removal or merge proposal; it is a "
+            "starting point for asking a human whether a node is still earning its place.",
             "",
         ]
-        if never_read:
-            lines += ["```"] + [f"{path}" for path in never_read[:100]] + ["```", ""]
-            if len(never_read) > 100:
-                lines.append(f"…and {len(never_read) - 100} more.\n")
-            lines.append(
-                "A node that is never consulted is a candidate for removal or merge — but confirm against a "
-                "longer window before deleting anything; this list only covers the window above.\n"
-            )
+        if unobserved:
+            lines += ["```"] + [f"{path}" for path in unobserved[:100]] + ["```", ""]
+            if len(unobserved) > 100:
+                lines.append(f"…and {len(unobserved) - 100} more.\n")
         else:
-            lines.append("Every normal node was read or sat under a recorded search root.\n")
+            lines.append("Every normal node had an observed read or sat under a recorded search root.\n")
 
     if agg.node_writes:
-        lines += ["## Write activity", "", "| Node | Writes |", "| --- | ---: |"]
+        lines += [
+            "## Observed write events (telemetry only)",
+            "",
+            "Write telemetry does not see merge commits or worktree edits outside the bound path, so "
+            "this is **not** the complete set of Tree writes. For complete write activity, use the "
+            "git-derived write history of the Tree repository.",
+            "",
+            "| Node | Observed write events |",
+            "| --- | ---: |",
+        ]
         for path, count in agg.node_writes.most_common(15):
             lines.append(f"| `{path}` | {count} |")
         lines.append("")
@@ -448,7 +597,7 @@ def render_report(
     lines += [f"- {gap}" for gap in KNOWN_GAPS]
     lines += [
         "",
-        "Missing evidence is unknown, never proof that the Tree went unused.",
+        "Missing evidence is unknown. It is never proof that a node went unread or that the Tree went unused.",
         "",
     ]
     return "\n".join(lines)
@@ -507,9 +656,16 @@ def write_output(path: str | None, text: str) -> None:
 
 def command_facts(args: argparse.Namespace) -> None:
     events = load_events(args)
-    agg = aggregate(events)
     tree_root = resolve_tree_root(args.tree_root) if args.tree_root else None
-    never_read = never_read_nodes(tree_root, agg) if tree_root else None
+    expected = tree_identity_of_root(tree_root) if tree_root else None
+    if tree_root is not None and expected is None:
+        raise AuditError(
+            "Could not establish the bound Tree's repository and branch identity from --tree-root, "
+            "so IO events cannot be proven to belong to it."
+        )
+    selected, identity = select_events_for_tree(events, expected)
+    agg = aggregate(selected)
+    unobserved = unobserved_nodes(tree_root, agg) if tree_root else None
     window_start = parse_time(args.since, field_name="--since") if args.since else None
     window_end = parse_time(args.until, field_name="--until") if args.until else None
     generated_at = parse_time(args.now, field_name="--now") if args.now else datetime.now(timezone.utc)
@@ -520,13 +676,15 @@ def command_facts(args: argparse.Namespace) -> None:
                 {
                     "schema_version": SCHEMA_VERSION,
                     "generated_at": iso(generated_at),
+                    "tree_identity": identity.label(),
+                    "excluded_events_from_other_trees": len(events) - len(selected),
                     "reads": len(agg.reads),
                     "writes": len(agg.writes),
                     "chats_with_read": sorted(agg.chats_with_read),
                     "node_reads": dict(agg.node_reads.most_common()),
                     "node_writes": dict(agg.node_writes.most_common()),
                     "searched_dirs": sorted(agg.searched_dirs),
-                    "never_read_nodes": never_read,
+                    "unobserved_nodes": unobserved,
                     "source_counts": dict(sorted(agg.source_counts.items())),
                     "known_gaps": KNOWN_GAPS,
                 },
@@ -543,7 +701,7 @@ def command_facts(args: argparse.Namespace) -> None:
             window_start=window_start,
             window_end=window_end,
             agg=agg,
-            never_read=never_read,
+            unobserved=unobserved,
             judgments=None,
             sample_size=0,
         ),
@@ -552,8 +710,15 @@ def command_facts(args: argparse.Namespace) -> None:
 
 def command_sample(args: argparse.Namespace) -> None:
     events = load_events(args)
-    agg = aggregate(events)
     tree_root = resolve_tree_root(args.tree_root)
+    expected = tree_identity_of_root(tree_root)
+    if expected is None:
+        raise AuditError(
+            "Could not establish the bound Tree's repository and branch identity from --tree-root."
+        )
+    selected, identity = select_events_for_tree(events, expected)
+    agg = aggregate(selected)
+    eligible = eligible_reads(agg.reads)
     chosen = sample_reads(agg.reads, args.size, args.seed)
     cases = [
         {
@@ -571,7 +736,10 @@ def command_sample(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "schema_version": SCHEMA_VERSION,
-                "eligible_reads": len([e for e in agg.reads if e.target_kind == "file" and e.is_normal_content]),
+                "tree_identity": identity.label(),
+                "window": {"since": args.since, "until": args.until, "chat": args.chat},
+                "eligible_reads": len(eligible),
+                "population_sha256": population_digest(eligible),
                 "sample_size": len(cases),
                 "seed": args.seed,
                 "cases": cases,
@@ -640,18 +808,47 @@ def validate_judgments(raw: Any, cases: Mapping[str, Mapping[str, Any]]) -> list
 
 def command_report(args: argparse.Namespace) -> None:
     events = load_events(args)
-    agg = aggregate(events)
     tree_root = resolve_tree_root(args.tree_root) if args.tree_root else None
-    never_read = never_read_nodes(tree_root, agg) if tree_root else None
+    expected = tree_identity_of_root(tree_root) if tree_root else None
+    if tree_root is not None and expected is None:
+        raise AuditError(
+            "Could not establish the bound Tree's repository and branch identity from --tree-root."
+        )
+    selected, identity = select_events_for_tree(events, expected)
+    agg = aggregate(selected)
+    unobserved = unobserved_nodes(tree_root, agg) if tree_root else None
 
     try:
         sample_payload = json.loads(Path(args.sample).expanduser().read_text(encoding="utf-8"))
         judgment_payload = json.loads(Path(args.judgments).expanduser().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise AuditError(f"Could not read sample or judgments: {error}") from error
-    raw_cases = sample_payload.get("cases") if isinstance(sample_payload, dict) else None
+    if not isinstance(sample_payload, dict):
+        raise AuditError("--sample must be a sample object produced by the `sample` command.")
+    raw_cases = sample_payload.get("cases")
     if not isinstance(raw_cases, list):
         raise AuditError("--sample must contain a cases array.")
+
+    # The sample must provably come from this same feed, Tree, and window.
+    # Effect counts drawn from a different population are not evidence.
+    if sample_payload.get("tree_identity") != identity.label():
+        raise AuditError(
+            f"--sample was drawn from {sample_payload.get('tree_identity')!r}, but this run audits "
+            f"{identity.label()!r}. Re-run `sample` against the intended Tree."
+        )
+    sample_window = sample_payload.get("window")
+    current_window = {"since": args.since, "until": args.until, "chat": args.chat}
+    if sample_window != current_window:
+        raise AuditError(
+            "--sample was drawn over a different acquisition window "
+            f"({sample_window!r} vs {current_window!r}); re-run `sample` and `report` over the same one."
+        )
+    current_digest = population_digest(eligible_reads(agg.reads))
+    if sample_payload.get("population_sha256") != current_digest:
+        raise AuditError(
+            "The eligible read population changed since --sample was drawn, so the sample is no longer "
+            "uniform over it. Re-run `sample` (new events arrive continuously) before reporting."
+        )
     cases = {
         str(case["read_id"]): case
         for case in raw_cases
@@ -666,7 +863,7 @@ def command_report(args: argparse.Namespace) -> None:
             window_start=parse_time(args.since, field_name="--since") if args.since else None,
             window_end=parse_time(args.until, field_name="--until") if args.until else None,
             agg=agg,
-            never_read=never_read,
+            unobserved=unobserved,
             judgments=judgments,
             sample_size=len(cases),
         ),

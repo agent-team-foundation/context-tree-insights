@@ -1,7 +1,7 @@
 """Deterministic tests for the Context Tree value audit.
 
 The audit's job is to be honest about a lossy feed, so most of what is worth
-testing is what it refuses to claim: never-read lists that ignore search
+testing is what it refuses to claim: unobserved-node lists that ignore search
 coverage, adoption presented as a rate, effects that skipped the adversarial
 pass, and influence numbers surviving a run whose judgments were mostly refuted.
 """
@@ -32,6 +32,8 @@ def event(
     at: str = "2026-07-01T10:00:00Z",
     commit: str | None = None,
     source: str = "claude_read_tool",
+    repo: str = REPO,
+    branch: str = "main",
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "id": event_id,
@@ -40,8 +42,8 @@ def event(
         "source": source,
         "targetKind": kind,
         "targetPath": path,
-        "treeRepoUrl": REPO,
-        "treeBranch": "main",
+        "treeRepoUrl": repo,
+        "treeBranch": branch,
         "createdAt": at,
     }
     if commit:
@@ -97,19 +99,19 @@ class AggregationTests(unittest.TestCase):
         self.assertTrue(audit.covered_by_search("anything/deep/node.md", agg.searched_dirs))
 
 
-class NeverReadTests(unittest.TestCase):
+class UnobservedNodeTests(unittest.TestCase):
     def _tree(self, root: Path) -> None:
         for relative in ("NODE.md", "system/NODE.md", "system/cli.md", "goal/NODE.md", "members/a/NODE.md"):
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("# node\n", encoding="utf-8")
 
-    def test_lists_only_nodes_with_no_read_and_no_search_above_them(self) -> None:
+    def test_lists_only_nodes_with_no_observed_read_and_no_search_above_them(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._tree(root)
             agg = audit.aggregate(normalized([event("r1", "goal/NODE.md")]))
-            never = audit.never_read_nodes(root, agg)
+            never = audit.unobserved_nodes(root, agg)
             self.assertIn("system/NODE.md", never)
             self.assertIn("system/cli.md", never)
             self.assertNotIn("goal/NODE.md", never)
@@ -121,10 +123,10 @@ class NeverReadTests(unittest.TestCase):
             root = Path(tmp)
             self._tree(root)
             agg = audit.aggregate(normalized([event("r1", "system", kind="directory")]))
-            never = audit.never_read_nodes(root, agg)
+            never = audit.unobserved_nodes(root, agg)
             # `Grep`/`Glob` record only the search root, so nothing under it can
-            # be called never-read without risking a delete recommendation for a
-            # node the search actually surfaced.
+            # be reported as unobserved without risking a delete recommendation
+            # for a node the search actually surfaced.
             self.assertNotIn("system/NODE.md", never)
             self.assertNotIn("system/cli.md", never)
             self.assertIn("goal/NODE.md", never)
@@ -215,7 +217,7 @@ class JudgmentValidationTests(unittest.TestCase):
 class ReportTests(unittest.TestCase):
     GENERATED = datetime(2026, 7, 31, tzinfo=timezone.utc)
 
-    def _render(self, judgments: list[dict[str, object]] | None, never_read: list[str] | None = None) -> str:
+    def _render(self, judgments: list[dict[str, object]] | None, unobserved: list[str] | None = None) -> str:
         agg = audit.aggregate(
             normalized([event("r1", "system/a.md"), event("w1", "system/b.md", action="write")])
         )
@@ -224,7 +226,7 @@ class ReportTests(unittest.TestCase):
             window_start=None,
             window_end=None,
             agg=agg,
-            never_read=never_read,
+            unobserved=unobserved,
             judgments=judgments,
             sample_size=len(judgments or []),
         )
@@ -235,7 +237,7 @@ class ReportTests(unittest.TestCase):
         self.assertIn("lower bound", text)
         self.assertIn("pipeline", text)
         self.assertIn("directory-level event", text)
-        self.assertIn("never proof that the Tree went unused", text)
+        self.assertIn("never proof that a node went unread", text)
 
     def test_withholds_influence_numbers_when_most_claims_were_refuted(self) -> None:
         judgments = [
@@ -261,8 +263,8 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("withheld", text)
 
     def test_reports_an_empty_never_read_list_without_implying_failure(self) -> None:
-        text = self._render(None, never_read=[])
-        self.assertIn("Every normal node was read or sat under a recorded search root", text)
+        text = self._render(None, unobserved=[])
+        self.assertIn("Every normal node had an observed read or sat under a recorded search root", text)
 
 
 class CliTests(unittest.TestCase):
@@ -295,3 +297,98 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TreeIdentityTests(unittest.TestCase):
+    def test_canonicalizes_equivalent_remote_spellings(self) -> None:
+        forms = [
+            "https://github.com/Example/Context-Tree.git",
+            "https://github.com/example/context-tree",
+            "git@github.com:example/context-tree.git",
+            "ssh://git@github.com/example/context-tree",
+        ]
+        self.assertEqual(len({audit.canonical_repo(form) for form in forms}), 1)
+
+    def test_excludes_events_from_another_tree_rather_than_miscrediting_them(self) -> None:
+        events = normalized(
+            [
+                event("mine", "system/a.md"),
+                event("theirs", "system/a.md", repo="https://github.com/other/tree"),
+            ]
+        )
+        expected = audit.TreeIdentity(repo=audit.canonical_repo(REPO), branch="main")
+        selected, identity = audit.select_events_for_tree(events, expected)
+        self.assertEqual([item.event_id for item in selected], ["mine"])
+        self.assertEqual(identity, expected)
+
+    def test_a_changed_branch_binding_does_not_count_toward_the_current_tree(self) -> None:
+        events = normalized([event("old", "system/a.md", branch="legacy")])
+        expected = audit.TreeIdentity(repo=audit.canonical_repo(REPO), branch="main")
+        with self.assertRaisesRegex(audit.AuditError, "No IO event matches"):
+            audit.select_events_for_tree(events, expected)
+
+    def test_a_mixed_feed_without_a_pinned_identity_fails_closed(self) -> None:
+        events = normalized(
+            [event("a", "x.md"), event("b", "x.md", repo="https://github.com/other/tree")]
+        )
+        with self.assertRaisesRegex(audit.AuditError, "mixes Context Trees"):
+            audit.select_events_for_tree(events, None)
+
+
+class ContentClaimTests(unittest.TestCase):
+    def test_head_commit_content_is_labelled_a_candidate_snapshot_with_its_caveat(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.md").write_text("current\n", encoding="utf-8")
+            ev = audit.normalize_event(event("e1", "a.md", commit="a" * 40))
+            # No git repo here, so git show fails and it falls back honestly.
+            result = audit.node_content_at_read(root, ev, 100)
+            self.assertEqual(result["status"], "current_working_copy")
+            self.assertIn("not at read time", result["caveat"])
+
+    def test_report_states_the_uncommitted_read_limit(self) -> None:
+        agg = audit.aggregate(normalized([event("r1", "system/a.md")]))
+        text = audit.render_report(
+            generated_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+            window_start=None,
+            window_end=None,
+            agg=agg,
+            unobserved=None,
+            judgments=None,
+            sample_size=0,
+        )
+        self.assertIn("candidate", text)
+        self.assertIn("uncommitted", text)
+        self.assertIn("git history", text)
+
+
+class SampleConservationTests(unittest.TestCase):
+    def test_population_digest_changes_when_a_new_eligible_read_arrives(self) -> None:
+        before = audit.eligible_reads(normalized([event("r1", "a.md")]))
+        after = audit.eligible_reads(normalized([event("r1", "a.md"), event("r2", "b.md")]))
+        self.assertNotEqual(audit.population_digest(before), audit.population_digest(after))
+
+    def test_digest_ignores_ordering(self) -> None:
+        one = audit.eligible_reads(normalized([event("r1", "a.md"), event("r2", "b.md")]))
+        two = audit.eligible_reads(normalized([event("r2", "b.md"), event("r1", "a.md")]))
+        self.assertEqual(audit.population_digest(one), audit.population_digest(two))
+
+
+class WordingTests(unittest.TestCase):
+    def test_report_never_calls_a_node_never_read_or_proposes_deleting_it(self) -> None:
+        agg = audit.aggregate(normalized([event("r1", "system/a.md")]))
+        text = audit.render_report(
+            generated_at=datetime(2026, 7, 31, tzinfo=timezone.utc),
+            window_start=None,
+            window_end=None,
+            agg=agg,
+            unobserved=["system/unused.md"],
+            judgments=None,
+            sample_size=0,
+        )
+        lowered = text.lower()
+        self.assertNotIn("never-read", lowered)
+        self.assertNotIn("candidate for removal", lowered)
+        self.assertIn("no observed read", lowered)
+        self.assertIn("evidence gap, not a finding", lowered)
+        self.assertIn("best-effort", lowered)
