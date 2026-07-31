@@ -12,32 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / "skills" / "context-tree-value-audit"
 SKILL_MD = SKILL_ROOT / "SKILL.md"
 OPENAI_YAML = SKILL_ROOT / "agents" / "openai.yaml"
-CLAUDE_SKILL_MD = (
-    ROOT / "projections" / "claude" / "context-tree-value-audit" / "SKILL.md"
-)
 EXPECTED_FILES = (
     SKILL_MD,
     OPENAI_YAML,
-    CLAUDE_SKILL_MD,
     SKILL_ROOT / "VERSION",
     SKILL_ROOT / "scripts" / "context_tree_value_audit.py",
-    SKILL_ROOT / "references" / "evidence-schema.md",
-    SKILL_ROOT / "references" / "task-analysis-schema.md",
-    SKILL_ROOT / "references" / "runtime-evidence-adapters.md",
+    SKILL_ROOT / "references" / "judging-effects.md",
 )
 FORBIDDEN_PATH_FRAGMENTS = ("/Users/", "\\Users\\")
 FORBIDDEN_ARTIFACT_NAMES = {
     "REPORT.md",
-    "evidence.jsonl",
-    "candidates.jsonl",
-    "chats.jsonl",
-    "judgments.jsonl",
-    "task-judgments.jsonl",
-    "task-source.jsonl",
-    "task-inventory-draft.jsonl",
-    "task-inventory.jsonl",
-    "read-attributions.jsonl",
-    "effect-judgments.jsonl",
+    "facts.json",
+    "facts.md",
+    "sample.json",
+    "judgments.json",
 }
 
 
@@ -73,28 +61,20 @@ def validate() -> None:
 
     skill_text = SKILL_MD.read_text(encoding="utf-8")
     frontmatter = parse_frontmatter(skill_text)
-    if set(frontmatter) != {"name", "description"}:
-        fail("SKILL.md frontmatter must contain only name and description.")
+    if set(frontmatter) != {"name", "description", "disable-model-invocation"}:
+        fail(
+            "SKILL.md frontmatter must contain exactly name, description, and "
+            "disable-model-invocation."
+        )
     if frontmatter["name"] != SKILL_ROOT.name:
         fail("Skill name must match its directory name.")
     if not frontmatter["description"]:
         fail("Skill description must not be empty.")
-    claude_frontmatter = parse_frontmatter(
-        CLAUDE_SKILL_MD.read_text(encoding="utf-8")
-    )
-    if set(claude_frontmatter) != {
-        "name",
-        "description",
-        "disable-model-invocation",
-    }:
-        fail(
-            "Claude projection frontmatter must contain name, description, "
-            "and disable-model-invocation."
-        )
-    if claude_frontmatter["name"] != SKILL_ROOT.name:
-        fail("Claude projection name must match the canonical Skill name.")
-    if claude_frontmatter["disable-model-invocation"] != "true":
-        fail("Claude projection must disable model invocation.")
+    # One payload serves every runtime: the Team Skill Resource bundle is
+    # materialized into each runtime's own skill root, so a Claude-specific
+    # projection directory would install a second, divergent copy.
+    if frontmatter["disable-model-invocation"] != "true":
+        fail("SKILL.md must disable model invocation.")
     version = (SKILL_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
         fail("VERSION must contain one semantic version.")

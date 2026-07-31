@@ -1,229 +1,124 @@
 # Context Tree Value Audit
 
-`context-tree-value-audit` 0.5.0 is an explicit-only Skill for task-first,
-evidence-first analysis of Context Tree decision value for the current First
-Tree Runtime when its native historical evidence is supported. It reconstructs
-single-Agent-owned continuous Tasks from authorized Chats, records whether a
-Tree Read is observed or unresolved, and judges zero or more independent
-Effects without a minimum sample gate.
+A First Tree Skill that answers two questions about one agent's Context Tree
+usage:
 
-The 0.2 series renamed the installable Skill from
-`context-tree-insights` to `context-tree-value-audit`. Replace the old Skill
-directory during upgrade; do not install both names because they represent one
-explicit audit capability, not two independent workflows.
+1. **Observed exposure** — which nodes have a recorded read, which have none,
+   and what write events reached the feed?
+2. **Influence** — for a random sample of reads, did the read change what the
+   agent did next?
 
-Version 0.5 replaces the combined schema-v3 Task judgment with three ordered
-schema-v4 artifacts: frozen Task inventory, Read attributions, and Effect
-judgments. Do not reuse schema-v1/v2/v3 judgment files. Reconstruct Tasks from
-the message-only projection, freeze the inventory digest, then rerun Read and
-Effect analysis. No migration or compatibility reader is provided.
+Exposure counts recorded events — a lower bound, not complete activity.
+Influence is sampled, judged by a model, and
+**every claimed effect must survive an adversarial pass that tries to explain the
+same choice without the Tree**. The report publishes the refutation rate, and
+withholds the influence numbers entirely when most claims are refuted.
 
-The audit core remains separate from First Tree core. Codex, Claude Code, and
-Claude Code TUI use their existing native local transcripts. Cursor and Kimi
-Code remain unsupported for historical value audits because their existing
-local records cannot yet prove complete, Chat-bound Tree reads; affected Reads
-are unresolved.
-There is no shared Tree-read CLI, generic tool abstraction, runtime event,
-database table, schedule, Context Tree write, or Web surface. Each run covers
-one First Tree Agent, one managed workspace, one current Runtime, and one bound
-Tree.
+## Why it looks like this
 
-## Safety and interpretation
+Version 1.0 is a rewrite around `first-tree tree io`, the agent-scoped feed of
+durable Context Tree IO. Exposure is now a **recorded fact** rather than
+something reconstructed from local runtime transcripts.
 
-- Invocation is explicit only: `$context-tree-value-audit` in Codex or
-  `/context-tree-value-audit` in Claude Code / Claude Code TUI.
-- The invoking human may authorize the current Chat, exact Chat UUIDs, or all
-  Chats visible to this one current Agent. The Skill trusts that explicit
-  scope and never broadens it or crosses to another Agent.
-- `Chat UUID @ Agent UUID` remains the authorization and trace-mapping unit;
-  a single-Agent-owned continuous work episode is the Task judgment and
-  counting unit.
-- Short continuations, status prompts, context-dependent questions, repeated
-  review/fix requests, and phases of one delivery do not become separate Tasks.
-- Clear Tasks carry source-backed objective and same-Agent outcome messages;
-  work owned by another Agent remains context until the audited Agent receives
-  or visibly accepts an objective. That acceptance is an analyst judgment from
-  work messages; the reporter does not infer the addressee of arbitrary prose.
-- Task reconstruction uses a message-only projection that excludes
-  collector-derived Reads, passages, Tree-mention indexes, receipts, choice
-  projections, and Effect judgments; original work-message content remains
-  unchanged. Its normalized inventory is frozen before Read attribution.
-- Local Runtime evidence is preflighted against authorized Chat and Agent IDs
-  before complete recorded output is scanned.
-- Missing, cleaned, ambiguous, malformed, truncated, or unsupported traces are
-  coverage gaps.
-- A valid `contextDecision` is projected minimally. Absence is unknown;
-  malformed metadata is diagnostic and never blocks Chat export; repository
-  identities must be remote and credential-free.
-- A Tree read is evidence of explicit activity, not semantic use or causal
-  value by itself.
-- Single-file reads and statically closed read-only composites are recovered;
-  dynamic or unknown shapes stay unresolved, and unsafe shapes are rejected.
-- A read attempt with one completed, non-empty, attributable result and no
-  explicit failure signal may become candidate evidence. Missing, failed,
-  duplicate, pending, or out-of-window results stay unresolved.
-- Read is only `observed` or `unresolved`; unresolved is never counted as
-  unused.
-- Each Task has zero or more Effects; each is only `confirmed`, `constrained`,
-  `redirected`, or `conflicted`.
-- A decision receipt may support an Effect but cannot create one by itself.
-- There is no fixed Task quota, task-type gate, or saturation state.
-- The output is a sampled evidence report, not causal proof, ROI, or a
-  global effectiveness rate.
+The previous releases mined Codex/Claude transcripts and statically parsed shell
+commands to guess which nodes had been read. That approach reached only ~9%
+exact attribution on its own pilot, supported two runtimes, and cost roughly a
+quarter of the codebase. The runtime already records the same facts at
+tool-execution time, across every runtime, in a table that outlives session
+timelines — so the audit consumes that instead.
 
-The audit writes only private local artifacts in the invoking Agent workspace.
-Never commit real Chat exports, traces, passages, task judgments, evidence
-JSONL, reports, or production-derived artifacts.
+Deleting the reconstruction layer removed the reason for most of the rest.
+Because the analysis unit is now a recorded read rather than an
+analyst-reconstructed "task", there are no task boundaries to draw, so the
+blinding protocol, the frozen inventory, the digest, and the exclusion taxonomy
+all lost their purpose. What remains is a small deterministic layer plus one
+judgment.
 
-## Repository layout
+There is no schema migration from 0.x. Artifacts from earlier versions are not
+readable and should be discarded.
+
+## Known recording gaps
+
+The audit prints these in every report, and you should repeat them whenever you
+quote a number:
+
+- **Read telemetry is best-effort, and pipeline shell reads are not recorded at
+  all.** `cat NODE.md | head -40` produces no event, and that is a common way to
+  read a long file. **Exposure is a lower bound, never a rate**, and "no observed
+  read" never means "never read".
+- **Search reads are directory-granular.** `Grep` / `Glob` record one event for
+  the search root, not one per matched node, so any node under a recorded search
+  root is excluded from the no-observed-read list.
+- **Write events are telemetry-only.** They miss merge commits and worktree edits
+  outside the bound path. Complete write activity comes from the Tree
+  repository's git history, not from this feed.
+- **Node text is a candidate snapshot.** It is reconstructed from the checkout
+  HEAD observed at read time, which is not a promise that the working file
+  matched that commit.
+
+These gaps live in First Tree's recording layer, not in this skill.
+
+## Install
+
+Package the Skill directory as a ZIP and upload it as a **Team Skill Resource**,
+then bind it to the agents that should have it. First Tree materializes it into
+each agent's runtime skill root and manages its version; there is no manual copy,
+per-runtime install, or rollback ceremony.
+
+```bash
+cd skills && zip -r ../context-tree-value-audit.zip context-tree-value-audit
+```
+
+The Skill stays explicit-invocation only: Codex `allow_implicit_invocation:
+false` and Claude `disable-model-invocation: true` keep it out of ordinary tasks.
+
+## Use
+
+A human invokes `/context-tree-value-audit` (Claude) or
+`$context-tree-value-audit` (Codex). Everything after that runs without further
+human input; the human reads the report at the end.
+
+```bash
+# 1. Facts — recorded events only, no sampling, no judgment
+python3 scripts/context_tree_value_audit.py facts \
+  --tree-root /path/to/context-tree --since 2026-07-01T00:00:00Z
+
+# 2. Sample — uniform over observed file reads of normal content
+python3 scripts/context_tree_value_audit.py sample \
+  --tree-root /path/to/context-tree --size 40 --seed 1 --output sample.json
+
+# 3. The model judges each case, then tries to refute every claim.
+
+# 4. Report
+python3 scripts/context_tree_value_audit.py report \
+  --tree-root /path/to/context-tree \
+  --sample sample.json --judgments judgments.json --output REPORT.md
+```
+
+`facts` alone is useful and carries no judgment risk. The **no-observed-read
+list** is an evidence gap to take to a human, not a deletion proposal.
+
+`report` refuses to publish effect counts unless the sample came from the same
+Tree identity, window, and eligible read population, so a stale sample cannot
+produce influence numbers against a feed it was never drawn from.
+
+Use `--events-file` to replay a captured `tree io --json` payload instead of
+calling the CLI.
+
+## Layout
 
 ```text
 skills/context-tree-value-audit/
-  SKILL.md
+  SKILL.md                          the workflow and judgment rules
   VERSION
   agents/openai.yaml
-  references/
-    evidence-schema.md
-    runtime-evidence-adapters.md
-    task-analysis-schema.md
+  references/judging-effects.md     rubric, worked examples, refutation guide
   scripts/context_tree_value_audit.py
-projections/claude/context-tree-value-audit/
-  SKILL.md
 tests/
 evals/manual-behavior-checklist.md
 ```
 
-`skills/context-tree-value-audit` is the canonical payload. The small Claude
-projection supplies Claude's manual-invocation metadata and delegates to the
-canonical payload. Tests, evaluation material, and repository documentation
-stay outside both.
-
-## Install into one Agent workspace
-
-This repository does not install or enable the Skill automatically. Project
-the Skill directory into one selected Agent workspace. For a fresh install:
-
-```bash
-CTVA_REPO="/absolute/path/to/context-tree-insights"
-CTVA_AGENT_WORKSPACE="/absolute/path/to/selected/agent/workspace"
-CTVA_SKILLS_ROOT="$CTVA_AGENT_WORKSPACE/.agents/skills"
-CTVA_DESTINATION="$CTVA_SKILLS_ROOT/context-tree-value-audit"
-CTVA_CLAUDE_ROOT="$CTVA_AGENT_WORKSPACE/.claude/skills"
-CTVA_CLAUDE_DESTINATION="$CTVA_CLAUDE_ROOT/context-tree-value-audit"
-CTVA_CLAUDE_SOURCE="$CTVA_REPO/projections/claude/context-tree-value-audit"
-
-test ! -e "$CTVA_DESTINATION"
-test ! -e "$CTVA_CLAUDE_DESTINATION"
-test ! -L "$CTVA_CLAUDE_DESTINATION"
-mkdir -p "$CTVA_SKILLS_ROOT" "$CTVA_CLAUDE_ROOT"
-cp -R "$CTVA_REPO/skills/context-tree-value-audit" "$CTVA_DESTINATION"
-cp -R "$CTVA_CLAUDE_SOURCE" "$CTVA_CLAUDE_DESTINATION"
-diff -qr "$CTVA_CLAUDE_SOURCE" "$CTVA_CLAUDE_DESTINATION"
-test -f "$CTVA_CLAUDE_DESTINATION/SKILL.md"
-python3 "$CTVA_REPO/scripts/validate_skill.py"
-```
-
-For an upgrade from the old 0.2.x name, move the exact legacy payload to a
-recoverable directory outside every Skill discovery root, then install and
-compare the new payload:
-
-```bash
-CTVA_REPO="/absolute/path/to/context-tree-insights"
-CTVA_AGENT_WORKSPACE="/absolute/path/to/selected/agent/workspace"
-CTVA_SKILLS_ROOT="$CTVA_AGENT_WORKSPACE/.agents/skills"
-CTVA_OLD="$CTVA_SKILLS_ROOT/context-tree-insights"
-CTVA_NEW="$CTVA_SKILLS_ROOT/context-tree-value-audit"
-CTVA_SOURCE="$CTVA_REPO/skills/context-tree-value-audit"
-CTVA_QUARANTINE="$CTVA_AGENT_WORKSPACE/.skill-quarantine/context-tree-insights"
-CTVA_CLAUDE_ROOT="$CTVA_AGENT_WORKSPACE/.claude/skills"
-CTVA_OLD_CLAUDE="$CTVA_CLAUDE_ROOT/context-tree-insights"
-CTVA_NEW_CLAUDE="$CTVA_CLAUDE_ROOT/context-tree-value-audit"
-CTVA_OLD_CLAUDE_TARGET="../../.agents/skills/context-tree-insights"
-CTVA_CLAUDE_SOURCE="$CTVA_REPO/projections/claude/context-tree-value-audit"
-CTVA_QUARANTINE_CLAUDE="$CTVA_AGENT_WORKSPACE/.skill-quarantine/context-tree-insights.claude-link"
-
-test -f "$CTVA_OLD/SKILL.md"
-test "$(sed -n 's/^name:[[:space:]]*//p' "$CTVA_OLD/SKILL.md")" = "context-tree-insights"
-test ! -e "$CTVA_NEW"
-test ! -e "$CTVA_NEW_CLAUDE"
-test ! -L "$CTVA_NEW_CLAUDE"
-test ! -e "$CTVA_QUARANTINE"
-test ! -e "$CTVA_QUARANTINE_CLAUDE"
-test ! -L "$CTVA_QUARANTINE_CLAUDE"
-mkdir -p "$(dirname "$CTVA_QUARANTINE")" "$CTVA_CLAUDE_ROOT"
-if test -e "$CTVA_OLD_CLAUDE" || test -L "$CTVA_OLD_CLAUDE"; then
-  test -L "$CTVA_OLD_CLAUDE"
-  test "$(readlink "$CTVA_OLD_CLAUDE")" = "$CTVA_OLD_CLAUDE_TARGET"
-  mv "$CTVA_OLD_CLAUDE" "$CTVA_QUARANTINE_CLAUDE"
-fi
-mv "$CTVA_OLD" "$CTVA_QUARANTINE"
-cp -R "$CTVA_SOURCE" "$CTVA_NEW"
-cp -R "$CTVA_CLAUDE_SOURCE" "$CTVA_NEW_CLAUDE"
-diff -qr "$CTVA_SOURCE" "$CTVA_NEW"
-diff -qr "$CTVA_CLAUDE_SOURCE" "$CTVA_NEW_CLAUDE"
-test -f "$CTVA_NEW_CLAUDE/SKILL.md"
-python3 "$CTVA_REPO/scripts/validate_skill.py"
-test ! -e "$CTVA_OLD"
-```
-
-To roll back, move the new payload aside and restore the quarantined directory:
-
-```bash
-test -d "$CTVA_QUARANTINE"
-test -d "$CTVA_NEW"
-test -d "$CTVA_NEW_CLAUDE"
-diff -qr "$CTVA_CLAUDE_SOURCE" "$CTVA_NEW_CLAUDE"
-mv "$CTVA_NEW_CLAUDE" "$CTVA_QUARANTINE.failed-new.claude"
-mv "$CTVA_NEW" "$CTVA_QUARANTINE.failed-new"
-mv "$CTVA_QUARANTINE" "$CTVA_OLD"
-if test -L "$CTVA_QUARANTINE_CLAUDE"; then
-  mv "$CTVA_QUARANTINE_CLAUDE" "$CTVA_OLD_CLAUDE"
-fi
-```
-
-Start a new Runtime session after a successful install, upgrade, or rollback,
-then confirm the intended single Skill name is callable. The Codex
-`allow_implicit_invocation: false` policy and Claude
-`disable-model-invocation: true` frontmatter keep the Skill out of ordinary
-tasks. Pin a reviewed commit or release when installing for another Agent.
-
-## Pipeline
-
-The Skill orchestrates six operational steps across three analysis stages:
-
-1. `export-chats` resolves explicit authorization and exports visible records.
-2. `collect` maps authorized Chats to supported native local evidence,
-   classifies every in-window Tree-read attempt into a conserving four-state
-   grammar, reconstructs exact or read-only-composite evidence plus visible
-   choices, and distinguishes local default-branch matches from unverified
-   sources. Unsupported Runtime history produces unresolved Reads.
-3. `task-source` removes every collector-derived Tree/Read/Effect projection
-   and keeps only authorized work messages. It does not redact literal
-   Tree/Read/Effect discussion from the work itself.
-4. The Agent reconstructs Tasks from that projection; `freeze-tasks` validates
-   and writes a digest-bound `task-inventory.jsonl`.
-5. The Agent writes digest-bound Read attributions, then zero-or-more Effect
-   judgments for each clear Task without changing the frozen inventory.
-6. `report` validates Task sources, weak fragment-only objectives, source
-   ownership, windows, cross-Chat linkage, Read/choice timing, inventory
-   digests, deduplication, multi-Effect conservation, and creates
-   `evidence.jsonl` and `REPORT.md`. An optional hash-anchored reviewed baseline
-   remains separate from the current rerun.
-
-There is no default time window. `--days` is an optional data-acquisition
-bound. Every available Task in the authorized bound is reported; sample size
-limits the conclusion rather than whether a report can be produced.
-
-Detailed commands and schemas are in
-[`SKILL.md`](skills/context-tree-value-audit/SKILL.md),
-[`evidence-schema.md`](skills/context-tree-value-audit/references/evidence-schema.md),
-[runtime-evidence-adapters.md](skills/context-tree-value-audit/references/runtime-evidence-adapters.md),
-and
-[`task-analysis-schema.md`](skills/context-tree-value-audit/references/task-analysis-schema.md).
-
 ## Validate
-
-Run the deterministic floor before publishing:
 
 ```bash
 python3 scripts/validate_skill.py
@@ -231,7 +126,16 @@ python3 -m compileall -q skills tests scripts
 python3 -m unittest discover -s tests -v
 ```
 
-Then execute
-[`evals/manual-behavior-checklist.md`](evals/manual-behavior-checklist.md)
-against a designated pilot Agent with authorized disposable or sanitized
-records. Model-backed evaluation remains outside the deterministic gate.
+Then run [`evals/manual-behavior-checklist.md`](evals/manual-behavior-checklist.md)
+against a pilot agent with authorized records.
+
+## Safety
+
+Read-only. It reads the agent's own IO feed and the bound Tree; it never writes
+Tree content, Chats, git state, or product state. Artifacts stay private to the
+invoking agent's workspace at mode `0600` and must never be committed — they
+contain Tree content and chat-derived material.
+
+The output is a sampled evidence report. It is not causal proof, an
+effectiveness rate, or ROI. Missing evidence is unknown, never proof that a node
+went unread or that the Tree went unused.

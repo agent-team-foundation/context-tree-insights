@@ -8,12 +8,8 @@ __pycache__/
 /artifacts/
 /.audit/
 /REPORT.md
-/evidence.jsonl
-/candidates.jsonl
-/chats.jsonl
-/judgments.jsonl
-/task-source.jsonl
-/task-inventory-draft.jsonl
-/task-inventory.jsonl
-/read-attributions.jsonl
-/effect-judgments.jsonl
+/facts.json
+/facts.md
+/sample.json
+/judgments.json
+*.zip

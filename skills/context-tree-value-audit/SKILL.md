@@ -1,307 +1,188 @@
 ---
 name: context-tree-value-audit
-description: Audit how Context Tree reads affected complete work Tasks when a human explicitly invokes $context-tree-value-audit in Codex or /context-tree-value-audit in Claude. The audit is evidence-first, manual, read-only, limited to explicitly authorized Chats for the current First Tree Agent, and reports the available sample without a minimum Task quota. Do not use for ordinary task reads, stored-tree audits, Tree writes, generic Chat analytics, monitoring, or another Agent.
+description: Audit whether Context Tree reads changed what an agent did, when a human explicitly invokes /context-tree-value-audit or $context-tree-value-audit. Reads the agent's own durable Context Tree IO feed, reports node-level observed exposure and nodes with no observed read, then judges a random read sample with a mandatory adversarial pass. Do not use for ordinary task reads, stored-tree quality audits, Tree writes, or another agent.
+disable-model-invocation: true
 ---
 
 # Context Tree Value Audit
 
 ## Capability
 
-Run a manual and read-only retrospective that reconstructs single-Agent-owned
-continuous Tasks from authorized Chats, determines whether a Tree Read is
-observed or unresolved, and reports zero or more independent Effects where a
-Read reasonably confirmed, constrained, redirected, or conflicted with later
-choices.
+Answer two questions about one agent's own Context Tree usage:
 
-Keep three analysis stages strictly ordered:
+1. **Observed exposure** — which nodes have a recorded read, which have none,
+   and what write events reached the feed? *Recorded events only — a lower
+   bound, never a complete picture.*
+2. **Influence** — for a random sample of reads, did the read change what the
+   agent did next? *Sampled, and every claim must survive an attempt to refute
+   it.*
 
-- reconstruct Task from message-only work evidence;
-- freeze the Task inventory before any Read is visible to the analyst;
-- attribute Reads, then analyze zero or more Effects without changing Task
-  boundaries.
-
-`Chat UUID @ Agent UUID` remains the authorization and evidence-source unit.
-Task is the work unit. Effect is the independently counted value unit. The
-bundled script performs deterministic projection, freezing, reference
-validation, deduplication, conservation checks, and reporting. A Read or
-decision receipt is evidence, not server-verified causality.
+Exposure comes from `context_tree_io_events`, which the runtime records at
+tool-execution time and which outlives session timelines. That recording is
+best-effort: pipeline shell reads produce no event at all, and write telemetry
+misses merge and out-of-path worktree commits. Influence is the only
+judgment in the run, and it is deliberately adversarial: the model that claims
+an effect must then try to explain the same choice **without** the Tree.
 
 ## Gate the run
 
-Proceed only when a human explicitly invokes `$context-tree-value-audit` in
-Codex or `/context-tree-value-audit` in Claude and asks for this value audit.
-Do not trigger from an ordinary task, a normal Context Tree read, a stored-tree
-quality audit, or an implicit analytics request.
+Proceed only when a human explicitly invokes `/context-tree-value-audit`
+(Claude) or `$context-tree-value-audit` (Codex) and asks for this audit. Do not
+trigger from an ordinary task, a normal Tree read, or a stored-tree quality
+audit.
 
-Keep the run:
+The run is read-only. Do not modify Chats, Tree content, git state, agent
+configuration, or product state. Write only inside a private artifact directory
+in this agent's workspace, and never commit those artifacts.
 
-- manual and read-only;
-- limited to one invoking Agent, one managed workspace, and one bound Context
-  Tree;
-- limited to the invoking Agent's supported local Runtime evidence;
-- confined to a new private artifact directory inside the invoking Agent
-  workspace.
+The audit covers **this agent only**. The feed is self-scoped by the server; do
+not attempt to widen it.
 
-Do not modify Chat history, traces, Tree content, git state, schedules, agent
-configuration, databases, or product state. The visible reply and provider's
-automatic trace append are not audit writes. Do not override the current
-Runtime provider, invoke another Runtime adapter, or scan another Agent.
+## Step 1 — Facts (no sampling, no judgment)
 
-## Authorize the source scope
+```bash
+python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" facts \
+  --tree-root "/absolute/path/to/bound/context-tree" \
+  --since 2026-07-01T00:00:00Z \
+  --output "$CTVA_ARTIFACT_DIR/facts.md"
+```
 
-Resolve the exact current Agent UUID and bound Tree root from the managed
-workspace identity. Resolve the immutable Agent `name` slug used by mentions,
-URLs, CLI selectors, and local mirror paths from `FIRST_TREE_AGENT_SLUG`, and
-cross-check `FIRST_TREE_AGENT_ID` and the First Tree CLI's producer-owned local
-binding resolution of that slug against the workspace UUID. The local listing
-is used only for this one identity check and is never persisted or promoted
-into the authorized source scope. `displayName` is a mutable UI label and must
-never be used as the CLI selector. Reject
-symlinks, missing or malformed runtime identity, an Agent mismatch, an unbound
-Tree, or more than one workspace or Tree.
+`--since` / `--until` / `--chat` are optional filters. Add `--json` for the
+structured form when you want to inspect counts directly.
 
-Choose exactly one mode from the human's explicit request:
+This step alone is worth reporting. It gives node-level read distribution,
+observed write events, and the **list of nodes with no observed read**.
 
-1. `explicit_agent`: all Chats visible to this one current Agent, only when the
-   human explicitly asks for the current Agent's full Chat scope;
-2. `explicit_chat`: exact Chat UUIDs for this Agent, or the explicitly
-   authorized invoking Chat resolved from runtime `chatId`.
+Treat that list as an **evidence gap, not a finding**. A node lands there when no
+event reached the feed, which also happens for every pipeline shell read and
+whenever best-effort telemetry drops a call. **Never present it as a deletion or
+merge proposal.** It is a prompt to ask a human whether a node still earns its
+place — nothing stronger.
 
-Trust the human's explicit scope. Do not broaden it, mix modes, infer another
-Agent, or scan across workspaces. Ask the human only when scope is ambiguous.
+It is conservative on top of that: a node inside a recorded search root is
+excluded, because `Grep`/`Glob` record only the search root.
 
-Write `scope.json`:
+Observed write events are telemetry-only and therefore incomplete. If someone
+needs the real write picture, point them at the Tree repository's git history.
+
+## Step 2 — Sample
+
+```bash
+python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" sample \
+  --tree-root "/absolute/path/to/bound/context-tree" \
+  --since 2026-07-01T00:00:00Z \
+  --size 40 --seed 1 \
+  --output "$CTVA_ARTIFACT_DIR/sample.json"
+```
+
+Sampling is uniform over recorded file-level reads of normal content. **Do not
+hand-pick cases.** Choosing the reads whose surrounding conversation is easiest
+to interpret biases the result toward whatever is legible, not toward what is
+true.
+
+Each case carries the read (node path, time, chat) and a **candidate snapshot**
+of the node's text, reconstructed from the checkout HEAD observed at read time.
+
+That snapshot is not guaranteed to be what the agent saw: the recorded commit is
+the HEAD observed for the read, not proof that the working file matched it. If
+the agent was reading uncommitted Tree edits, the real text is unrecoverable.
+Each case states which of `head_commit_snapshot` / `current_working_copy` /
+`unavailable` it is. **When the snapshot may not match what was read, do not
+claim an effect that depends on specific wording** — use `null`.
+
+## Step 3 — Judge each case, then try to refute it
+
+For every case, read the surrounding work in that Chat around the read time —
+what the agent said and did after it — and answer one question:
+
+> **If the agent had not read this node, would the later choice have been
+> different?**
+
+Record one judgment object per case:
 
 ```json
 {
-  "schema_version": 1,
-  "agents": [
-    {
-      "name": "current-agent",
-      "agent_id": "00000000-0000-0000-0000-000000000001",
-      "authorization": "explicit_agent"
-    }
-  ],
-  "chats": []
+  "read_id": "…",
+  "effect": { "type": "redirected", "summary": "Dropped the password-login plan and used the OAuth provider the node requires." },
+  "refuted": false
 }
 ```
 
-or:
+Use `"effect": null` when nothing defensible is visible. **Uncertainty is not an
+effect** — if you cannot point at a specific later choice, the answer is `null`.
+
+Effect types:
+
+- `confirmed` — removed real hesitation and justified keeping the plan;
+- `constrained` — ruled an option out or narrowed the acceptable boundary;
+- `redirected` — changed the intended approach;
+- `conflicted` — surfaced a conflict that still needed resolving.
+
+### The adversarial pass is mandatory
+
+For **every** case where you claimed an effect, run a second, separate pass with
+one job:
+
+> **Find an explanation for that same choice that does not need the Tree.**
+
+Look hardest for the most common one: **the human already said it.** If the
+human asked for OAuth in the same Chat, an agent "switching to OAuth" after
+reading an auth node is explained by the instruction, not the node. Also check
+whether the agent had already committed to the choice before the read, and
+whether the choice follows from the code it was editing.
+
+If such an explanation exists, set `"refuted": true` and record it:
 
 ```json
-{
-  "schema_version": 1,
-  "agents": [],
-  "chats": [
-    {
-      "chat_id": "00000000-0000-0000-0000-000000000000",
-      "agent": "current-agent",
-      "agent_id": "00000000-0000-0000-0000-000000000001",
-      "authorization": "explicit_chat"
-    }
-  ]
-}
+{ "read_id": "…", "effect": { … }, "refuted": true, "refutation": "The human asked for OAuth explicitly two messages before the read." }
 ```
 
-Every row must name the same current Agent identity. Do not add human,
-organization, or other authorization-context fields; explicit scope is the
-complete authorization model.
+Do this pass **without reusing the reasoning that produced the claim**. Judge the
+material again from the refuter's side. A claim you cannot attack is worth
+something; a claim you never attacked is worth nothing.
 
-## Collect deterministic evidence
+`refuted` is required on every claimed effect — the reporter rejects a judgment
+file that skips it.
 
-Read [references/evidence-schema.md](references/evidence-schema.md) and
-[references/runtime-evidence-adapters.md](references/runtime-evidence-adapters.md).
-Locate the Skill directory, create a private timestamped artifact directory,
-and keep all inputs and outputs inside it. Require directory mode `0700` and
-file mode `0600`. Set `FIRST_TREE_BIN` for a channel-specific executable.
-
-```bash
-python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" export-chats \
-  --artifact-root "$CTVA_ARTIFACT_DIR" \
-  --scope "$CTVA_ARTIFACT_DIR/scope.json" \
-  --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --output "$CTVA_ARTIFACT_DIR/chats.jsonl"
-
-python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" collect \
-  --artifact-root "$CTVA_ARTIFACT_DIR" \
-  --chats "$CTVA_ARTIFACT_DIR/chats.jsonl" \
-  --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --tree-root "/absolute/current/agent/bound/context-tree" \
-  --output "$CTVA_ARTIFACT_DIR/candidates.jsonl"
-```
-
-There is no default lookback. Use `--days N` only when the human explicitly
-wants a time-based acquisition ceiling. It limits data fetching; it does not
-create a minimum sample requirement. Use `--now` for reproducible reruns.
-Normally let the collector resolve the local evidence root from
-`FIRST_TREE_PROVIDER`; use `--trace-root` only for an explicitly resolved root
-for that same Runtime.
-
-Before fully scanning a trace, require bounded metadata/current-context
-preflight to establish one authorized `chatId` for the exact workspace. Never
-search arbitrary full traces to discover an authorized Chat. Classify every
-in-window call that references bound-Tree Markdown exactly once as
-`accepted_exact`, `accepted_read_only_composite`, `unresolved_opaque`, or
-`rejected_unsafe`; the four counts must conserve the attempt total. Allow only
-statically closed read-only wrappers, paths, programs, and forwarded outputs.
-Keep exact output/continuation pairing and reject writes, mutation, network
-access, and literal Tree-external reads. Unknown or dynamic shapes remain
-unresolved rather than becoming negative exposure. Missing, failed, duplicate,
-pending, incomplete, or out-of-window results are unresolved and produce no
-accepted read evidence. A unique, completed, non-empty, attributable result
-with no explicit failure signal may remain candidate evidence even when its
-provider has no separate positive-success flag.
-
-For message metadata:
-
-- project only a valid `metadata.contextDecision` v1 into
-  `decision_receipt`;
-- treat receipt absence as unknown;
-- omit malformed receipts and add `context_decision_invalid`;
-- never fail Chat export because analysis metadata is malformed.
-
-## Reconstruct Tasks, then attribute Reads, then judge Effects
-
-Read
-[references/task-analysis-schema.md](references/task-analysis-schema.md).
-
-First project a message-only source. This output deliberately excludes
-collector-derived Reads, passages, Tree-mention indexes, decision receipts,
-choice projections, and Effect judgments. It retains original work-message
-content verbatim, including literal Tree, Read, or Effect discussion when that
-discussion is part of the objective:
-
-```bash
-python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" task-source \
-  --artifact-root "$CTVA_ARTIFACT_DIR" \
-  --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --candidates "$CTVA_ARTIFACT_DIR/candidates.jsonl" \
-  --output "$CTVA_ARTIFACT_DIR/task-source.jsonl"
-```
-
-During Task reconstruction, read only `task-source.jsonl`. Do not inspect
-`candidates.jsonl`, trace evidence, Reads, receipts, choices, or any anticipated
-Effect. Write one schema-v4 `task-inventory-draft.jsonl` row for every clear
-Task or excluded candidate, then freeze it:
-
-```bash
-python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" freeze-tasks \
-  --artifact-root "$CTVA_ARTIFACT_DIR" \
-  --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --task-source "$CTVA_ARTIFACT_DIR/task-source.jsonl" \
-  --task-inventory-draft "$CTVA_ARTIFACT_DIR/task-inventory-draft.jsonl" \
-  --task-inventory-output "$CTVA_ARTIFACT_DIR/task-inventory.jsonl"
-```
-
-A clear Task is one independently judgeable continuous work episode owned by
-the audited Agent. It needs a concrete objective, independently judgeable
-outcome, bounded source fragments, and explicit objective/outcome sources.
-Material scope and primary deliverable help clarify boundaries but are
-optional. Otherwise mark the candidate excluded with a structured exclusion
-kind.
-
-Short continuations, status prompts, context-dependent questions, merge
-approval, repeated review/fix requests, and ordinary phase transitions are not
-separate Tasks. Merge plan → implementation → review → QA → final delivery,
-plus corrections to the same deliverable, into one episode. Split only when
-there is a new objective, material scope or deliverable change, independent
-outcome, and unambiguous source boundary.
-
-For a single-Agent audit, another Agent's work is context until this Agent
-receives or visibly accepts an objective. A later independent review, takeover,
-verification gate, or orchestration objective may form a new episode only when
-it passes every clear-Task gate.
-Judge that acceptance from the work messages themselves. The reporter checks
-source identity, ordering, and a same-Agent outcome, but does not infer who
-arbitrary prose addresses.
-
-One Chat may contain multiple Tasks. Merge across Chats only for one PR/MR/
-Issue, a visible handoff, or the same objective and primary delivery, and
-record the explicit shared linkage.
-
-After freeze, do not edit Task rows or boundaries. Write exactly one
-schema-v4 `read-attributions.jsonl` row for every clear Task. Each row carries
-the frozen `inventory_sha256`.
-
-Read is only:
-
-- `observed`, with attributable Task-window reads;
-- `unresolved`, with a reason explaining the evidence gap, no reads, and no
-  Effect.
-
-Do not invent `not_observed`. Missing telemetry and receipt absence are
-unknown, not proof of non-use.
-
-Then write exactly one schema-v4 `effect-judgments.jsonl` row for every clear
-Task, carrying the same inventory digest. Each Task has zero or more Effects;
-each Effect has exactly one type: `confirmed`, `constrained`, `redirected`, or
-`conflicted`. Record one only when all four conditions hold:
-
-1. a real Read contains a relevant normal Tree decision or constraint;
-2. the Read completes before the cited choice;
-3. the later same-Agent choice or outcome reasonably shows one of the four
-   effects;
-4. no more direct user instruction or other evidence fully explains the
-   result.
-
-Every Effect needs attributed Read IDs, later same-Agent choice message IDs,
-a same-Agent outcome message, and a concise summary. The same Read may support
-multiple distinct choices, but one choice cannot be reused across Effects. If
-the evidence is insufficient, use an empty Effect list and record one short
-reason. Do not add confidence tiers, support levels, numeric weights,
-`verified`, or `probable`. A decision receipt may support the judgment but
-cannot create an Effect by itself.
-
-Report every available Task in the authorized acquisition bound. There is no
-minimum Task quota, task-type coverage gate, batch-expansion rule, or saturation
-state. State the sample size and evidence gaps so readers can limit the
-conclusion to the sampled scope.
-
-## Validate and report
+## Step 4 — Report
 
 ```bash
 python3 "$CTVA_SKILL_DIR/scripts/context_tree_value_audit.py" report \
-  --artifact-root "$CTVA_ARTIFACT_DIR" \
-  --agent-workspace "AGENT_UUID=/absolute/current/agent/workspace" \
-  --candidates "$CTVA_ARTIFACT_DIR/candidates.jsonl" \
-  --task-inventory "$CTVA_ARTIFACT_DIR/task-inventory.jsonl" \
-  --read-attributions "$CTVA_ARTIFACT_DIR/read-attributions.jsonl" \
-  --effect-judgments "$CTVA_ARTIFACT_DIR/effect-judgments.jsonl" \
-  --evidence-output "$CTVA_ARTIFACT_DIR/evidence.jsonl" \
-  --report-output "$CTVA_ARTIFACT_DIR/REPORT.md"
+  --tree-root "/absolute/path/to/bound/context-tree" \
+  --since 2026-07-01T00:00:00Z \
+  --sample "$CTVA_ARTIFACT_DIR/sample.json" \
+  --judgments "$CTVA_ARTIFACT_DIR/judgments.json" \
+  --output "$CTVA_ARTIFACT_DIR/REPORT.md"
 ```
 
-Optionally supply a v4 `--reviewed-baseline` when an independently reviewed
-earlier case set exists. The reporter keeps its hash-anchored Task and Effect
-counts separate from the current rerun.
+`report` refuses to publish effect counts unless the sample provably came from
+the same Tree identity, the same window, and the same eligible read population.
+New events arrive continuously, so if it tells you the population changed,
+re-run `sample` rather than working around it.
 
-The deterministic pipeline rejects old combined judgment schemas, Task drafts
-that contain Read/Effect fields, weak fragment-only objectives, missing or
-invalid objective/outcome sources, reused identity sources, changed inventory
-digests, Reads or choices outside the frozen Task, unauthorized source
-messages, Task-window violations, unlinked cross-Chat merges, duplicated Reads
-across Tasks, reused choices across Effects, invalid Effects, invalid outcome
-messages, superseded judgment fields, and non-conserving aggregates.
+The report shows observed exposure, the no-observed-read list, observed write
+events, the effect distribution, and the **refutation rate**.
 
-The report must include:
+**When more than half of the claimed effects are refuted, the reporter withholds
+the influence numbers** and says the run is unreliable. That is the intended
+behavior, not a failure: a number nobody can defend is worse than no number.
+Report the exposure section and investigate the judgment step.
 
-- a complete frozen inventory of clear Tasks and excluded candidates with
-  structured exclusion reasons;
-- observed and unresolved Read Tasks;
-- Effect Tasks, total Effects, and observed Reads without an Effect;
-- the four-Effect distribution over total Effects;
-- every clear Task's Read and zero-or-more Effect results;
-- every excluded Task's reason;
-- authorized Chat, message, trace, and coverage-gap counts;
-- the four-class in-window Tree-read attempt conservation table;
-- explicit language that unresolved and receipt absence are unknown;
-- a separately labeled, evidence-anchored historical baseline when supplied,
-  without merging it into the current rerun;
-- no global effectiveness rate.
+## What to tell the human
 
-Because all authorized Chats are not an eligible value denominator, return local links
-to `REPORT.md` and `evidence.jsonl`, the acquisition bound if one was supplied,
-authorization mode, sample size, and any material coverage gap. Keep
-artifacts private in the invoking Agent workspace and never commit them.
-Describe the result as a sampled evidence report, not causal proof, ROI, or an
-effectiveness rate.
+Give them the report path and, in prose:
+
+- the observed exposure counts and the no-observed-read list, stated as
+  **recorded events and evidence gaps**, never as complete activity;
+- the refutation rate, which says how much the influence numbers are worth;
+- the two known recording gaps, so nobody reads adoption as a rate:
+  - pipeline shell reads (`cat NODE.md | head -40`) are **not recorded**, so
+    exposure is a lower bound;
+  - `Grep` / `Glob` record the search *directory*, not the matched nodes;
+  - write events are telemetry-only and miss merge and out-of-path commits;
+  - node text is a candidate snapshot from the observed HEAD, not necessarily
+    what the agent read.
+
+Never present the output as causal proof, an effectiveness rate, or ROI. Missing
+evidence is unknown — it is never proof that a node went unread or that the Tree
+went unused.

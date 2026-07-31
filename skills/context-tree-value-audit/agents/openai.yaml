@@ -1,6 +1,6 @@
 interface:
   display_name: "Context Tree Value Audit"
-  short_description: "Audit frozen Task, Read, and Effect evidence"
-  default_prompt: "Use $context-tree-value-audit to reconstruct and freeze Tasks before attributing Context Tree Reads and zero-or-more Effects, using the available authorized sample."
+  short_description: "Audit Context Tree exposure and influence from recorded IO"
+  default_prompt: "Use $context-tree-value-audit to report which Context Tree nodes this agent actually opened, which were never opened, and — for a random sample of reads — whether the read changed a later choice, with every claimed effect put through an adversarial pass."
 policy:
   allow_implicit_invocation: false
