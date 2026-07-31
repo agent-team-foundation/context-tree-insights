@@ -4326,7 +4326,45 @@ print(json.dumps({{"ok": True, "data": data}}))
             NOW,
         )
         self.assertEqual(2, reversed_read_result.returncode)
-        self.assertIn("completes before it starts", reversed_read_result.stderr)
+        self.assertIn(
+            "must complete after it starts",
+            reversed_read_result.stderr,
+        )
+
+        zero_duration_read_candidate = json.loads(json.dumps(candidate))
+        zero_duration_read_candidate["reads"][0]["completed_at"] = (
+            zero_duration_read_candidate["reads"][0]["timestamp"]
+        )
+        write_jsonl(
+            self.artifacts / "zero-duration-read-candidates.jsonl",
+            [zero_duration_read_candidate],
+        )
+        zero_duration_read_result = run_cli(
+            "report",
+            "--artifact-root",
+            str(self.artifacts),
+            "--agent-workspace",
+            f"{AGENT_ID}={self.workspace}",
+            "--candidates",
+            str(self.artifacts / "zero-duration-read-candidates.jsonl"),
+            "--task-inventory",
+            str(self.artifacts / "task-inventory.jsonl"),
+            "--read-attributions",
+            str(self.artifacts / "read-attributions.jsonl"),
+            "--effect-judgments",
+            str(self.artifacts / "effect-judgments.jsonl"),
+            "--evidence-output",
+            str(self.artifacts / "zero-duration-read-evidence.jsonl"),
+            "--report-output",
+            str(self.artifacts / "zero-duration-read-REPORT.md"),
+            "--generated-at",
+            NOW,
+        )
+        self.assertEqual(2, zero_duration_read_result.returncode)
+        self.assertIn(
+            "must complete after it starts",
+            zero_duration_read_result.stderr,
+        )
 
         frozen_rows = read_jsonl(self.artifacts / "task-inventory.jsonl")
         tampered_rows = json.loads(json.dumps(frozen_rows))

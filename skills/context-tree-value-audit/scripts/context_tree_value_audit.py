@@ -6186,9 +6186,9 @@ def validate_read_refs(
                 end=context["end"],
                 field=f"task {task_id} read {read_id} completion",
             )
-            if read_started_at > read_completed_at:
+            if read_started_at >= read_completed_at:
                 raise AuditError(
-                    f"Task {task_id} Read {read_id} completes before it starts."
+                    f"Task {task_id} Read {read_id} must complete after it starts."
                 )
             previous = read_owners.setdefault(read_id, task_id)
             if previous != task_id:
